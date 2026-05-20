@@ -739,12 +739,18 @@ func allToolNames() []string {
 		"download",
 		"edit",
 		"multiedit",
+		"nim_call_hierarchy",
+		"nim_check_file",
+		"nim_definition",
 		"nim_diagnostics",
+		"nim_document_symbols",
+		"nim_hover",
+		"nim_macro_expand",
+		"nim_project_maps",
 		"nim_references",
 		"nim_restart",
-		"nim_macro_expand",
 		"nim_safe_to_delete",
-		"nim_project_maps",
+		"nim_workspace_symbols",
 		"fetch",
 		"agentic_fetch",
 		"glob",
@@ -768,8 +774,24 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 }
 
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"glob", "grep", "ls", "sourcegraph", "view"}
-	// filter to only include tools that are in allowedtools (include mode)
+	// Read-only tools the explore sub-agent is allowed to use. Excludes anything
+	// that mutates state (edit/multiedit/write/bash/fetch/download/todos), and
+	// nim_restart (restarts the LSP server). Includes every nim_* read tool so
+	// the sub-agent can honor the parent's nim_first stance.
+	readOnlyTools := []string{
+		"glob", "grep", "ls", "sourcegraph", "view",
+		"nim_call_hierarchy",
+		"nim_check_file",
+		"nim_definition",
+		"nim_diagnostics",
+		"nim_document_symbols",
+		"nim_hover",
+		"nim_macro_expand",
+		"nim_project_maps",
+		"nim_references",
+		"nim_safe_to_delete",
+		"nim_workspace_symbols",
+	}
 	return filterSlice(tools, readOnlyTools, true)
 }
 
