@@ -15,7 +15,6 @@ import (
 type Workspace struct {
 	ID      string         `json:"id"`
 	Path    string         `json:"path"`
-	YOLO    bool           `json:"yolo,omitempty"`
 	Debug   bool           `json:"debug,omitempty"`
 	DataDir string         `json:"data_dir,omitempty"`
 	Version string         `json:"version,omitempty"`
@@ -83,11 +82,6 @@ func (p *PermissionAction) UnmarshalText(text []byte) error {
 type PermissionGrant struct {
 	Permission PermissionRequest `json:"permission"`
 	Action     PermissionAction  `json:"action"`
-}
-
-// PermissionSkipRequest represents a request to skip permission prompts.
-type PermissionSkipRequest struct {
-	Skip bool `json:"skip"`
 }
 
 // LSPEventType represents the type of LSP event.

@@ -185,14 +185,6 @@ func (w *AppWorkspace) PermissionDeny(perm permission.PermissionRequest) {
 	w.app.Permissions.Deny(perm)
 }
 
-func (w *AppWorkspace) PermissionSkipRequests() bool {
-	return w.app.Permissions.SkipRequests()
-}
-
-func (w *AppWorkspace) PermissionSetSkipRequests(skip bool) {
-	w.app.Permissions.SetSkipRequests(skip)
-}
-
 // -- FileTracker --
 
 func (w *AppWorkspace) FileTrackerRecordRead(ctx context.Context, sessionID, path string) {

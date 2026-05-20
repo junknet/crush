@@ -113,15 +113,9 @@ type Styles struct {
 	Editor struct {
 		Textarea textarea.Styles
 
-		// Normal mode prompt (default "::: ").
+		// Editor prompt (default "::: ").
 		PromptNormalFocused lipgloss.Style
 		PromptNormalBlurred lipgloss.Style
-
-		// YOLO mode prompt (" ! " icon + ":::" dots).
-		PromptYoloIconFocused lipgloss.Style
-		PromptYoloIconBlurred lipgloss.Style
-		PromptYoloDotsFocused lipgloss.Style
-		PromptYoloDotsBlurred lipgloss.Style
 	}
 
 	// Radio

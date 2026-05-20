@@ -399,9 +399,6 @@ permissions. Use this with care.
 }
 ```
 
-You can also skip all permission prompts entirely by running Crush with the
-`--yolo` flag. Be very, very careful with this feature.
-
 ### Disabling Built-In Tools
 
 If you'd like to prevent Crush from using certain built-in tools entirely, you

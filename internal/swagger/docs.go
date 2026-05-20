@@ -1896,96 +1896,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/workspaces/{id}/permissions/skip": {
-            "get": {
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "permissions"
-                ],
-                "summary": "Get skip permissions status",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Workspace ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/proto.PermissionSkipRequest"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    }
-                }
-            },
-            "post": {
-                "consumes": [
-                    "application/json"
-                ],
-                "tags": [
-                    "permissions"
-                ],
-                "summary": "Set skip permissions",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Workspace ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "Permission skip request",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/proto.PermissionSkipRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK"
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    }
-                }
-            }
-        },
         "/workspaces/{id}/project/init": {
             "post": {
                 "tags": [
@@ -2661,6 +2571,51 @@ const docTemplate = `{
                 }
             }
         },
+        "config.Agent": {
+            "type": "object",
+            "properties": {
+                "allowed_mcp": {
+                    "description": "this tells us which MCPs are available for this agent\n if this is empty all mcps are available\n the string array is the list of tools from the AllowedMCP the agent has available\n if the string array is nil, all tools from the AllowedMCP are available",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "allowed_tools": {
+                    "description": "The available tools for the agent\n if this is nil, all tools are available",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "context_paths": {
+                    "description": "Overrides the context paths for this agent",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "description": {
+                    "type": "string"
+                },
+                "disabled": {
+                    "description": "This is the id of the system prompt used by the agent",
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "model": {
+                    "$ref": "#/definitions/config.SelectedModelType"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
         "config.Attribution": {
             "type": "object",
             "properties": {
@@ -2836,17 +2791,6 @@ const docTemplate = `{
                 }
             }
         },
-        "config.Scope": {
-            "type": "integer",
-            "enum": [
-                0,
-                1
-            ],
-            "x-enum-varnames": [
-                "ScopeGlobal",
-                "ScopeWorkspace"
-            ]
-        },
         "config.SelectedModel": {
             "type": "object",
             "properties": {
@@ -2896,11 +2840,17 @@ const docTemplate = `{
             "type": "string",
             "enum": [
                 "large",
-                "small"
+                "small",
+                "build",
+                "coder",
+                "explore"
             ],
             "x-enum-varnames": [
                 "SelectedModelTypeLarge",
-                "SelectedModelTypeSmall"
+                "SelectedModelTypeSmall",
+                "SelectedModelTypeBuild",
+                "SelectedModelTypeCoder",
+                "SelectedModelTypeExplore"
             ]
         },
         "config.TUIOptions": {
@@ -2972,6 +2922,15 @@ const docTemplate = `{
                 "$schema": {
                     "type": "string"
                 },
+                "agents": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/config.Agent"
+                    }
+                },
+                "default_agent": {
+                    "type": "string"
+                },
                 "hooks": {
                     "type": "object",
                     "additionalProperties": {
@@ -2988,7 +2947,7 @@ const docTemplate = `{
                     "$ref": "#/definitions/config.MCPs"
                 },
                 "models": {
-                    "description": "We currently only support large/small as values here.",
+                    "description": "Model profiles used by the built-in roles and legacy aliases.",
                     "type": "object",
                     "additionalProperties": {
                         "$ref": "#/definitions/config.SelectedModel"
@@ -3091,6 +3050,17 @@ const docTemplate = `{
                     "$ref": "#/definitions/config.TUIOptions"
                 }
             }
+        },
+        "github_com_charmbracelet_crush_internal_config.Scope": {
+            "type": "integer",
+            "enum": [
+                0,
+                1
+            ],
+            "x-enum-varnames": [
+                "ScopeGlobal",
+                "ScopeWorkspace"
+            ]
         },
         "github_com_charmbracelet_crush_internal_proto.Message": {
             "type": "object",
@@ -3219,6 +3189,12 @@ const docTemplate = `{
                 "title": {
                     "type": "string"
                 },
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.Todo"
+                    }
+                },
                 "updated_at": {
                     "type": "integer"
                 }
@@ -3251,7 +3227,7 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "scope": {
-                    "$ref": "#/definitions/config.Scope"
+                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3265,7 +3241,7 @@ const docTemplate = `{
                     "$ref": "#/definitions/config.SelectedModelType"
                 },
                 "scope": {
-                    "$ref": "#/definitions/config.Scope"
+                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3285,7 +3261,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "scope": {
-                    "$ref": "#/definitions/config.Scope"
+                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3296,7 +3272,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "scope": {
-                    "$ref": "#/definitions/config.Scope"
+                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3307,7 +3283,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "scope": {
-                    "$ref": "#/definitions/config.Scope"
+                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3318,7 +3294,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "scope": {
-                    "$ref": "#/definitions/config.Scope"
+                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 },
                 "value": {}
             }
@@ -3552,14 +3528,6 @@ const docTemplate = `{
                 }
             }
         },
-        "proto.PermissionSkipRequest": {
-            "type": "object",
-            "properties": {
-                "skip": {
-                    "type": "boolean"
-                }
-            }
-        },
         "proto.ProjectInitPromptResponse": {
             "type": "object",
             "properties": {
@@ -3614,8 +3582,28 @@ const docTemplate = `{
                 "title": {
                     "type": "string"
                 },
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.Todo"
+                    }
+                },
                 "updated_at": {
                     "type": "integer"
+                }
+            }
+        },
+        "proto.Todo": {
+            "type": "object",
+            "properties": {
+                "active_form": {
+                    "type": "string"
+                },
+                "content": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
                 }
             }
         },
@@ -3665,9 +3653,6 @@ const docTemplate = `{
                 },
                 "version": {
                     "type": "string"
-                },
-                "yolo": {
-                    "type": "boolean"
                 }
             }
         },

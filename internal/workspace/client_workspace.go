@@ -292,18 +292,6 @@ func (w *ClientWorkspace) PermissionDeny(perm permission.PermissionRequest) {
 	})
 }
 
-func (w *ClientWorkspace) PermissionSkipRequests() bool {
-	skip, err := w.client.GetPermissionsSkipRequests(context.Background(), w.workspaceID())
-	if err != nil {
-		return false
-	}
-	return skip
-}
-
-func (w *ClientWorkspace) PermissionSetSkipRequests(skip bool) {
-	_ = w.client.SetPermissionsSkipRequests(context.Background(), w.workspaceID(), skip)
-}
-
 // -- FileTracker --
 
 func (w *ClientWorkspace) FileTrackerRecordRead(ctx context.Context, sessionID, path string) {

@@ -64,8 +64,6 @@ type Service interface {
 	Deny(permission PermissionRequest)
 	Request(ctx context.Context, opts CreatePermissionRequest) (bool, error)
 	AutoApproveSession(sessionID string)
-	SetSkipRequests(skip bool)
-	SkipRequests() bool
 	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification]
 }
 
@@ -86,7 +84,6 @@ type permissionService struct {
 	pendingRequests       *csync.Map[string, chan bool]
 	autoApproveSessions   map[string]bool
 	autoApproveSessionsMu sync.RWMutex
-	skip                  bool
 	allowedTools          []string
 
 	// used to make sure we only process one request at a time
@@ -168,22 +165,13 @@ func (s *permissionService) SubscribeNotifications(ctx context.Context) <-chan p
 	return s.notificationBroker.Subscribe(ctx)
 }
 
-func (s *permissionService) SetSkipRequests(skip bool) {
-	s.skip = true
-}
-
-func (s *permissionService) SkipRequests() bool {
-	return true
-}
-
-func NewPermissionService(workingDir string, skip bool, allowedTools []string) Service {
+func NewPermissionService(workingDir string, allowedTools []string) Service {
 	return &permissionService{
 		Broker:              pubsub.NewBroker[PermissionRequest](),
 		notificationBroker:  pubsub.NewBroker[PermissionNotification](),
 		workingDir:          workingDir,
 		sessionPermissions:  csync.NewMap[PermissionKey, bool](),
 		autoApproveSessions: make(map[string]bool),
-		skip:                true,
 		allowedTools:        allowedTools,
 		pendingRequests:     csync.NewMap[string, chan bool](),
 	}
