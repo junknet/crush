@@ -646,6 +646,11 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			tools.NewNimMacroExpandTool(c.lspManager),
 			tools.NewNimSafeToDeleteTool(c.lspManager),
 			tools.NewNimProjectMapsTool(c.lspManager),
+			tools.NewNimDefinitionTool(c.lspManager),
+			tools.NewNimHoverTool(c.lspManager),
+			tools.NewNimDocumentSymbolsTool(c.lspManager),
+			tools.NewNimWorkspaceSymbolsTool(c.lspManager),
+			tools.NewNimCheckFileTool(c.lspManager),
 		)
 	}
 
