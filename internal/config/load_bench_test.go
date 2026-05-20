@@ -38,7 +38,7 @@ func BenchmarkLoadFromConfigPaths(b *testing.B) {
 			}
 		},
 		"options": {
-			"context_paths": ["README.md", "AGENTS.md"]
+			"context_paths": ["README.md", "CLAUDE.md"]
 		}
 	}`)
 

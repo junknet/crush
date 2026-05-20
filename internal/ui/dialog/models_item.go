@@ -64,11 +64,10 @@ type ModelItem struct {
 	model     catwalk.Model
 	modelType ModelType
 
-	cache        map[int]string
-	t            *styles.Styles
-	m            fuzzy.Match
-	focused      bool
-	showProvider bool
+	cache   map[int]string
+	t       *styles.Styles
+	m       fuzzy.Match
+	focused bool
 }
 
 // Finished implements list.Item. Model items are render-stable
@@ -95,21 +94,20 @@ func (m *ModelItem) SelectedModelType() config.SelectedModelType {
 var _ ListItem = &ModelItem{}
 
 // NewModelItem creates a new ModelItem.
-func NewModelItem(t *styles.Styles, prov catwalk.Provider, model catwalk.Model, typ ModelType, showProvider bool) *ModelItem {
+func NewModelItem(t *styles.Styles, prov catwalk.Provider, model catwalk.Model, typ ModelType) *ModelItem {
 	return &ModelItem{
-		Versioned:    list.NewVersioned(),
-		prov:         prov,
-		model:        model,
-		modelType:    typ,
-		t:            t,
-		cache:        make(map[int]string),
-		showProvider: showProvider,
+		Versioned: list.NewVersioned(),
+		prov:      prov,
+		model:     model,
+		modelType: typ,
+		t:         t,
+		cache:     make(map[int]string),
 	}
 }
 
 // Filter implements ListItem.
 func (m *ModelItem) Filter() string {
-	return m.model.Name
+	return common.FormatModelDisplayName(string(m.prov.Name), m.model.Name) + " " + string(m.prov.ID) + " " + m.model.ID
 }
 
 // ID implements ListItem.
@@ -119,17 +117,14 @@ func (m *ModelItem) ID() string {
 
 // Render implements ListItem.
 func (m *ModelItem) Render(width int) string {
-	var providerInfo string
-	if m.showProvider {
-		providerInfo = string(m.prov.Name)
-	}
 	styles := ListItemStyles{
 		ItemBlurred:     m.t.Dialog.NormalItem,
 		ItemFocused:     m.t.Dialog.SelectedItem,
 		InfoTextBlurred: m.t.Dialog.ListItem.InfoBlurred,
 		InfoTextFocused: m.t.Dialog.ListItem.InfoFocused,
 	}
-	return renderItem(styles, m.model.Name, providerInfo, m.focused, width, m.cache, &m.m)
+	title := common.FormatModelDisplayName(string(m.prov.Name), m.model.Name)
+	return renderItem(styles, title, "", m.focused, width, m.cache, &m.m)
 }
 
 // SetFocused implements ListItem.

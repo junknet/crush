@@ -31,6 +31,22 @@ func FormatReasoningEffort(effort string) string {
 	return cases.Title(language.English).String(effort)
 }
 
+// FormatModelDisplayName namespaces a model by its provider so that
+// identically named models remain unambiguous in the UI.
+func FormatModelDisplayName(providerName, modelName string) string {
+	providerName = strings.TrimSpace(providerName)
+	modelName = strings.TrimSpace(modelName)
+
+	switch {
+	case providerName == "":
+		return modelName
+	case modelName == "":
+		return providerName
+	default:
+		return providerName + "/" + modelName
+	}
+}
+
 // ModelContextInfo contains token usage and cost information for a model.
 type ModelContextInfo struct {
 	ContextUsed  int64
@@ -42,32 +58,10 @@ type ModelContextInfo struct {
 // settings, and optional context usage/cost.
 func ModelInfo(t *styles.Styles, modelName, providerName, reasoningInfo string, context *ModelContextInfo, width int, hyperCredits *int) string {
 	modelIcon := t.ModelInfo.Icon.Render(styles.ModelIcon)
-	modelName = t.ModelInfo.Name.Render(modelName)
-
-	// Build first line with model name and optionally provider on the same line
-	var firstLine string
-	if providerName != "" {
-		providerInfo := t.ModelInfo.Provider.Render(fmt.Sprintf("via %s", providerName))
-		modelWithProvider := fmt.Sprintf("%s %s %s", modelIcon, modelName, providerInfo)
-
-		// Check if it fits on one line
-		if lipgloss.Width(modelWithProvider) <= width {
-			firstLine = modelWithProvider
-		} else {
-			// If it doesn't fit, put provider on next line
-			firstLine = fmt.Sprintf("%s %s", modelIcon, modelName)
-		}
-	} else {
-		firstLine = fmt.Sprintf("%s %s", modelIcon, modelName)
-	}
+	modelName = t.ModelInfo.Name.Render(FormatModelDisplayName(providerName, modelName))
+	firstLine := fmt.Sprintf("%s %s", modelIcon, modelName)
 
 	parts := []string{firstLine}
-
-	// If provider didn't fit on first line, add it as second line
-	if providerName != "" && !strings.Contains(firstLine, "via") {
-		providerInfo := fmt.Sprintf("via %s", providerName)
-		parts = append(parts, t.ModelInfo.ProviderFallback.Render(providerInfo))
-	}
 
 	if reasoningInfo != "" {
 		parts = append(parts, t.ModelInfo.Reasoning.Render(reasoningInfo))

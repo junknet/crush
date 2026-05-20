@@ -438,21 +438,23 @@ func (a *AssistantMessageItem) cachedError(width int) string {
 	return out
 }
 
-// renderThinking renders the thinking/reasoning content with footer.
-//
-// Slicing happens AFTER glamour rendering so fenced code blocks, list
-// continuations, and tables are not split mid-block — the same
-// boundary problem §4.4 of the design note flags. The bordered
-// ThinkingBox style is applied on top of the (already-windowed)
-// lines so the visual box matches what the user sees today.
 func (a *AssistantMessageItem) renderThinking(thinking string, width int) string {
-	renderer := common.QuietMarkdownRenderer(a.sty, width)
-	mu := common.LockMarkdownRenderer(renderer)
-	mu.Lock()
-	rendered, err := renderer.Render(thinking)
-	mu.Unlock()
-	if err != nil {
-		rendered = thinking
+	var rendered string
+	var err error
+	if a.message.IsThinking() {
+		// During streaming/thinking, bypass glamour rendering to prevent terminal escape sequence
+		// corruption, layout reflow flickering, and CPU performance bottlenecks.
+		// Simply wrap the raw text to the target width using lipgloss.
+		rendered = lipgloss.NewStyle().Width(width).Render(thinking)
+	} else {
+		renderer := common.QuietMarkdownRenderer(a.sty, width)
+		mu := common.LockMarkdownRenderer(renderer)
+		mu.Lock()
+		rendered, err = renderer.Render(thinking)
+		mu.Unlock()
+		if err != nil {
+			rendered = thinking
+		}
 	}
 	rendered = strings.TrimSpace(rendered)
 

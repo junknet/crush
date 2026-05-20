@@ -43,7 +43,7 @@ func (m *UI) skillsInfo(width, maxItems int, isSection bool) string {
 		title = common.Section(t, title, width)
 	}
 
-	items := m.skillStatusItems()
+	items := m.customSkillStatusItems()
 	if len(items) == 0 {
 		list := t.Resource.AdditionalText.Render("None")
 		return lipgloss.NewStyle().Width(width).Render(fmt.Sprintf("%s\n\n%s", title, list))
@@ -51,6 +51,66 @@ func (m *UI) skillsInfo(width, maxItems int, isSection bool) string {
 
 	list := skillsList(t, items, width, maxItems)
 	return lipgloss.NewStyle().Width(width).Render(fmt.Sprintf("%s\n\n%s", title, list))
+}
+
+func (m *UI) customSkillStatusItems() []skillStatusItem {
+	t := m.com.Styles
+	var items []skillStatusItem
+	stateNames := make(map[string]struct{})
+
+	disabledSet := make(map[string]bool)
+	if m.com != nil && m.com.Workspace != nil {
+		if cfg := m.com.Config(); cfg != nil {
+			for _, name := range cfg.Options.DisabledSkills {
+				disabledSet[name] = true
+			}
+		}
+	}
+
+	states := slices.Clone(m.skillStates)
+	slices.SortStableFunc(states, func(a, b *skills.SkillState) int {
+		return strings.Compare(a.Path, b.Path)
+	})
+
+	workingDir := m.com.Workspace.WorkingDir()
+
+	for _, state := range states {
+		name := state.Name
+		if name == "" {
+			name = filepath.Base(filepath.Dir(state.Path))
+		}
+		if disabledSet[name] {
+			continue
+		}
+
+		if strings.HasPrefix(state.Path, "crush://skills/") {
+			continue
+		}
+		rel, err := filepath.Rel(workingDir, state.Path)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+
+		if _, exists := stateNames[name]; exists {
+			continue
+		}
+		stateNames[name] = struct{}{}
+		icon := t.Resource.OnlineIcon.String()
+		if state.State == skills.StateError {
+			icon = t.Resource.ErrorIcon.String()
+		}
+		items = append(items, skillStatusItem{
+			icon:  icon,
+			name:  name,
+			title: t.Resource.Name.Render(name),
+		})
+	}
+
+	slices.SortStableFunc(items, func(a, b skillStatusItem) int {
+		return strings.Compare(a.name, b.name)
+	})
+
+	return items
 }
 
 func (m *UI) skillStatusItems() []skillStatusItem {

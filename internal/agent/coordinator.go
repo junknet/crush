@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -33,7 +35,10 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/provider"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	agentruntime "github.com/charmbracelet/crush/internal/runtime"
+	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 	"golang.org/x/sync/errgroup"
@@ -52,14 +57,23 @@ import (
 
 // Coordinator errors.
 var (
-	errCoderAgentNotConfigured         = errors.New("coder agent not configured")
-	errModelProviderNotConfigured      = errors.New("model provider not configured")
-	errLargeModelNotSelected           = errors.New("large model not selected")
-	errSmallModelNotSelected           = errors.New("small model not selected")
-	errLargeModelProviderNotConfigured = errors.New("large model provider not configured")
-	errSmallModelProviderNotConfigured = errors.New("small model provider not configured")
-	errLargeModelNotFound              = errors.New("large model not found in provider config")
-	errSmallModelNotFound              = errors.New("small model not found in provider config")
+	errCoderAgentNotConfigured           = errors.New("coder agent not configured")
+	errModelProviderNotConfigured        = errors.New("model provider not configured")
+	errBuildModelNotSelected             = errors.New("build model not selected")
+	errCoderModelNotSelected             = errors.New("coder model not selected")
+	errExploreModelNotSelected           = errors.New("explore model not selected")
+	errLargeModelNotSelected             = errors.New("large model not selected")
+	errSmallModelNotSelected             = errors.New("small model not selected")
+	errBuildModelProviderNotConfigured   = errors.New("build model provider not configured")
+	errCoderModelProviderNotConfigured   = errors.New("coder model provider not configured")
+	errExploreModelProviderNotConfigured = errors.New("explore model provider not configured")
+	errLargeModelProviderNotConfigured   = errors.New("large model provider not configured")
+	errSmallModelProviderNotConfigured   = errors.New("small model provider not configured")
+	errBuildModelNotFound                = errors.New("build model not found in provider config")
+	errCoderModelNotFound                = errors.New("coder model not found in provider config")
+	errExploreModelNotFound              = errors.New("explore model not found in provider config")
+	errLargeModelNotFound                = errors.New("large model not found in provider config")
+	errSmallModelNotFound                = errors.New("small model not found in provider config")
 )
 
 // Copilot models that use the Responses API instead of Chat Completions.
@@ -96,9 +110,13 @@ type coordinator struct {
 	filetracker filetracker.Service
 	lspManager  *lsp.Manager
 	notify      pubsub.Publisher[notify.Notification]
+	runtime     *agentruntime.RuntimeSession
+	traceMu     sync.RWMutex
+	lastRuntime *agentruntime.RuntimeSession
 
-	currentAgent SessionAgent
-	agents       map[string]SessionAgent
+	currentAgent     SessionAgent
+	currentAgentName string
+	agents           map[string]SessionAgent
 
 	// Skills discovery results (session-start snapshot).
 	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
@@ -136,25 +154,55 @@ func NewCoordinator(
 		allSkills:    allSkills,
 		activeSkills: activeSkills,
 		skillTracker: skillTracker,
+		runtime:      agentruntime.NewSession(cfg.WorkingDir(), nil),
 	}
 
-	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
+	agentName := config.AgentBuild
+	agentCfg, ok := cfg.Config().Agents[agentName]
+	if !ok {
+		agentName = config.AgentBuild
+		agentCfg, ok = cfg.Config().Agents[agentName]
+	}
 	if !ok {
 		return nil, errCoderAgentNotConfigured
 	}
 
-	// TODO: make this dynamic when we support multiple agents
-	prompt, err := coderPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	systemPrompt, err := promptForAgentRole(agentName, prompt.WithWorkingDir(c.cfg.WorkingDir()))
 	if err != nil {
 		return nil, err
 	}
 
-	agent, err := c.buildAgent(ctx, prompt, agentCfg, false)
+	agent, err := c.buildAgent(ctx, systemPrompt, agentCfg, false)
 	if err != nil {
 		return nil, err
 	}
 	c.currentAgent = agent
-	c.agents[config.AgentCoder] = agent
+	c.currentAgentName = agentName
+	c.agents[config.AgentBuild] = agent
+
+	if coderCfg, ok := cfg.Config().Agents[config.AgentCoder]; ok {
+		coderSystemPrompt, err := promptForAgentRole(config.AgentCoder, prompt.WithWorkingDir(c.cfg.WorkingDir()))
+		if err != nil {
+			return nil, err
+		}
+		coderAgent, err := c.buildAgent(ctx, coderSystemPrompt, coderCfg, true)
+		if err != nil {
+			return nil, err
+		}
+		c.agents[config.AgentCoder] = coderAgent
+	}
+
+	if exploreCfg, ok := cfg.Config().Agents[config.AgentExplore]; ok {
+		exploreSystemPrompt, err := promptForAgentRole(config.AgentExplore, prompt.WithWorkingDir(c.cfg.WorkingDir()))
+		if err != nil {
+			return nil, err
+		}
+		exploreAgent, err := c.buildAgent(ctx, exploreSystemPrompt, exploreCfg, true)
+		if err != nil {
+			return nil, err
+		}
+		c.agents[config.AgentExplore] = exploreAgent
+	}
 	return c, nil
 }
 
@@ -200,30 +248,110 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	}
 
 	run := func() (*fantasy.AgentResult, error) {
-		return c.currentAgent.Run(ctx, SessionAgentCall{
-			SessionID:        sessionID,
-			Prompt:           prompt,
-			Attachments:      attachments,
-			MaxOutputTokens:  maxTokens,
-			ProviderOptions:  mergedOptions,
-			Temperature:      temp,
-			TopP:             topP,
-			TopK:             topK,
-			FrequencyPenalty: freqPenalty,
-			PresencePenalty:  presPenalty,
-		})
+		taskRuntime := c.newTaskRuntime(sessionID)
+		c.setLastRuntime(taskRuntime)
+		taskScheduler := scheduler.NewAgentScheduler(taskRuntime)
+		taskNode := c.ensureRootTask(taskScheduler, sessionID, prompt, maxTokens)
+		if taskNode == nil {
+			return nil, errors.New("failed to create root task")
+		}
+		taskScheduler.BuildDefaultWorkflow(taskNode)
+		c.preBindTaskTreeModels(taskNode)
+
+		var result *fantasy.AgentResult
+		err := taskScheduler.Dispatch(ctx, taskNode, scheduler.WorkerFunc(func(taskCtx context.Context, node *scheduler.TaskNode, intent provider.RequestIntent) (string, error) {
+			callMaxTokens := maxTokens
+			if intent.MaxOutputTokens > 0 {
+				callMaxTokens = int64(intent.MaxOutputTokens)
+			}
+			taskPrompt := c.composeTaskPrompt(taskRuntime, node, prompt)
+			agent := c.agentForProfile(node.Profile)
+			if agent == nil {
+				return "", fmt.Errorf("agent not configured for profile %s", node.Profile)
+			}
+			model := agent.Model()
+			c.bindTaskNodeModel(node, model)
+			c.appendTaskInputTrace(taskRuntime, node, taskPrompt)
+			requestStartedAt := time.Now()
+			res, err := agent.Run(taskCtx, SessionAgentCall{
+				SessionID:        sessionID,
+				Prompt:           taskPrompt,
+				Attachments:      attachments,
+				MaxOutputTokens:  callMaxTokens,
+				ProviderOptions:  mergedOptions,
+				Temperature:      temp,
+				TopP:             topP,
+				TopK:             topK,
+				FrequencyPenalty: freqPenalty,
+				PresencePenalty:  presPenalty,
+				TraceRuntime:     taskRuntime,
+				TaskNodeID:       node.ID,
+				TaskParentID:     nodeParentIDForCall(node),
+				TaskProfile:      string(node.Profile),
+				ProviderID:       node.ProviderID,
+				ProviderType:     node.ProviderType,
+				ModelID:          node.ModelID,
+			})
+			node.FinishedAt = time.Now()
+			if node.StartedAt.IsZero() {
+				node.StartedAt = requestStartedAt
+			}
+			node.DurationMs = node.FinishedAt.Sub(node.StartedAt).Milliseconds()
+			if err != nil {
+				return "", err
+			}
+			if res == nil {
+				return "", errors.New("agent returned no result")
+			}
+			result = res
+			output := res.Response.Content.Text()
+			c.bindTaskNodeUsage(node, model, res.TotalUsage, taskPrompt, output)
+			c.appendTaskOutputTrace(taskRuntime, node, output)
+			c.recordTaskOutcome(taskRuntime, node, taskPrompt, output)
+			return output, nil
+		}))
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 	beforeLoaded := c.skillTracker.LoadedNames()
 	result, originalErr := run()
-	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
 
 	if c.isUnauthorized(originalErr) {
 		if err := c.retryAfterUnauthorized(ctx, providerCfg); err == nil {
-			return run()
+			retryResult, retryErr := run()
+			logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
+			return retryResult, retryErr
 		}
 	}
 
+	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
+
 	return result, originalErr
+}
+
+// TraceEntries returns the trace entries recorded by the most recent run.
+func (c *coordinator) TraceEntries() []agentruntime.TaskTrace {
+	if c == nil {
+		return nil
+	}
+	c.traceMu.RLock()
+	lastRuntime := c.lastRuntime
+	c.traceMu.RUnlock()
+	if lastRuntime == nil {
+		return nil
+	}
+	return lastRuntime.TraceEntries()
+}
+
+func (c *coordinator) setLastRuntime(runtime *agentruntime.RuntimeSession) {
+	if c == nil {
+		return
+	}
+	c.traceMu.Lock()
+	c.lastRuntime = runtime
+	c.traceMu.Unlock()
 }
 
 func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.ProviderOptions {
@@ -420,7 +548,7 @@ func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderO
 }
 
 func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
-	large, small, err := c.buildAgentModels(ctx, isSubAgent)
+	large, small, err := c.buildAgentModels(ctx, agent, isSubAgent)
 	if err != nil {
 		return nil, err
 	}
@@ -440,23 +568,17 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Notify:               c.notify,
 	})
 
-	c.readyWg.Go(func() error {
-		systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
-		if err != nil {
-			return err
-		}
-		result.SetSystemPrompt(systemPrompt)
-		return nil
-	})
+	systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
+	if err != nil {
+		return nil, err
+	}
+	result.SetSystemPrompt(systemPrompt)
 
-	c.readyWg.Go(func() error {
-		tools, err := c.buildTools(ctx, agent, isSubAgent)
-		if err != nil {
-			return err
-		}
-		result.SetTools(tools)
-		return nil
-	})
+	tools, err := c.buildTools(ctx, agent, isSubAgent)
+	if err != nil {
+		return nil, err
+	}
+	result.SetTools(tools)
 
 	return result, nil
 }
@@ -481,7 +603,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	// Get the model name for the agent
 	modelID := ""
-	if modelCfg, ok := c.cfg.Config().Models[agent.Model]; ok {
+	if modelCfg, ok := c.cfg.Config().SelectedModelForType(agent.Model); ok {
 		if model := c.cfg.Config().GetModel(modelCfg.Provider, modelCfg.Model); model != nil {
 			modelID = model.ID
 		}
@@ -498,6 +620,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	allTools = append(
 		allTools,
 		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelID),
+		tools.NewCommandDAGTool(c.cfg.WorkingDir()),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
 		tools.NewJobOutputTool(),
@@ -517,7 +640,14 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).
 	if len(c.cfg.Config().LSP) > 0 || c.cfg.Config().Options.AutoLSP == nil || *c.cfg.Config().Options.AutoLSP {
-		allTools = append(allTools, tools.NewDiagnosticsTool(c.lspManager), tools.NewReferencesTool(c.lspManager), tools.NewLSPRestartTool(c.lspManager))
+		allTools = append(allTools,
+			tools.NewDiagnosticsTool(c.lspManager),
+			tools.NewReferencesTool(c.lspManager),
+			tools.NewLSPRestartTool(c.lspManager),
+			tools.NewLSPMacroExpandTool(c.lspManager),
+			tools.NewLSPSafeToDeleteTool(c.lspManager),
+			tools.NewLSPProjectMapsTool(c.lspManager),
+		)
 	}
 
 	if len(c.cfg.Config().MCP) > 0 {
@@ -569,93 +699,121 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// itself is still wrapped from the coder's side.
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
 
+	if c.runtime != nil {
+		for _, tool := range filteredTools {
+			c.runtime.RegisterTool(tool.Info().Name)
+		}
+	}
+
 	return filteredTools, nil
 }
 
-// TODO: when we support multiple agents we need to change this so that we pass in the agent specific model config
-func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Model, Model, error) {
-	largeModelCfg, ok := c.cfg.Config().Models[config.SelectedModelTypeLarge]
-	if !ok {
-		return Model{}, Model{}, errLargeModelNotSelected
+func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, isSubAgent bool) (Model, Model, error) {
+	primaryType := agent.Model
+	if primaryType == "" {
+		primaryType = selectedModelTypeForAgent(agent.ID)
 	}
-	smallModelCfg, ok := c.cfg.Config().Models[config.SelectedModelTypeSmall]
-	if !ok {
-		return Model{}, Model{}, errSmallModelNotSelected
-	}
-
-	largeProviderCfg, ok := c.cfg.Config().Providers.Get(largeModelCfg.Provider)
-	if !ok {
-		return Model{}, Model{}, errLargeModelProviderNotConfigured
+	secondaryType := config.SelectedModelTypeExplore
+	if primaryType == secondaryType {
+		secondaryType = primaryType
 	}
 
-	largeProvider, err := c.buildProvider(largeProviderCfg, largeModelCfg, isSubAgent)
+	large, err := c.buildModelForType(ctx, primaryType, isSubAgent)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
-
-	smallProviderCfg, ok := c.cfg.Config().Providers.Get(smallModelCfg.Provider)
-	if !ok {
-		return Model{}, Model{}, errSmallModelProviderNotConfigured
-	}
-
-	smallProvider, err := c.buildProvider(smallProviderCfg, smallModelCfg, true)
+	small, err := c.buildModelForType(ctx, secondaryType, true)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
+	return large, small, nil
+}
 
-	var largeCatwalkModel *catwalk.Model
-	var smallCatwalkModel *catwalk.Model
+func selectedModelTypeForAgent(agentID string) config.SelectedModelType {
+	switch agentID {
+	case config.AgentBuild:
+		return config.SelectedModelTypeBuild
+	case config.AgentCoder:
+		return config.SelectedModelTypeCoder
+	case config.AgentExplore:
+		return config.SelectedModelTypeExplore
+	default:
+		return config.SelectedModelTypeBuild
+	}
+}
 
-	for _, m := range largeProviderCfg.Models {
-		if m.ID == largeModelCfg.Model {
-			largeCatwalkModel = &m
+func (c *coordinator) buildModelForType(ctx context.Context, modelType config.SelectedModelType, isSubAgent bool) (Model, error) {
+	selectedModelCfg, ok := c.cfg.Config().SelectedModelForType(modelType)
+	if !ok {
+		switch modelType {
+		case config.SelectedModelTypeBuild:
+			return Model{}, errBuildModelNotSelected
+		case config.SelectedModelTypeCoder:
+			return Model{}, errCoderModelNotSelected
+		case config.SelectedModelTypeExplore, config.SelectedModelTypeSmall:
+			return Model{}, errExploreModelNotSelected
+		default:
+			return Model{}, errBuildModelNotSelected
 		}
 	}
-	for _, m := range smallProviderCfg.Models {
-		if m.ID == smallModelCfg.Model {
-			smallCatwalkModel = &m
+
+	providerCfg, ok := c.cfg.Config().Providers.Get(selectedModelCfg.Provider)
+	if !ok {
+		switch modelType {
+		case config.SelectedModelTypeBuild:
+			return Model{}, errBuildModelProviderNotConfigured
+		case config.SelectedModelTypeCoder:
+			return Model{}, errCoderModelProviderNotConfigured
+		case config.SelectedModelTypeExplore, config.SelectedModelTypeSmall:
+			return Model{}, errExploreModelProviderNotConfigured
+		default:
+			return Model{}, errBuildModelProviderNotConfigured
 		}
 	}
 
-	if largeCatwalkModel == nil {
-		return Model{}, Model{}, errLargeModelNotFound
-	}
-
-	if smallCatwalkModel == nil {
-		return Model{}, Model{}, errSmallModelNotFound
-	}
-
-	largeModelID := largeModelCfg.Model
-	smallModelID := smallModelCfg.Model
-
-	if largeModelCfg.Provider == openrouter.Name && isExactoSupported(largeModelID) {
-		largeModelID += ":exacto"
-	}
-
-	if smallModelCfg.Provider == openrouter.Name && isExactoSupported(smallModelID) {
-		smallModelID += ":exacto"
-	}
-
-	largeModel, err := largeProvider.LanguageModel(ctx, largeModelID)
+	provider, err := c.buildProvider(providerCfg, selectedModelCfg, isSubAgent)
 	if err != nil {
-		return Model{}, Model{}, err
+		return Model{}, err
 	}
-	smallModel, err := smallProvider.LanguageModel(ctx, smallModelID)
+
+	var catwalkModel *catwalk.Model
+	for _, m := range providerCfg.Models {
+		if m.ID == selectedModelCfg.Model {
+			candidate := m
+			catwalkModel = &candidate
+			break
+		}
+	}
+	if catwalkModel == nil {
+		switch modelType {
+		case config.SelectedModelTypeBuild:
+			return Model{}, errBuildModelNotFound
+		case config.SelectedModelTypeCoder:
+			return Model{}, errCoderModelNotFound
+		case config.SelectedModelTypeExplore, config.SelectedModelTypeSmall:
+			return Model{}, errExploreModelNotFound
+		default:
+			return Model{}, errBuildModelNotFound
+		}
+	}
+
+	modelID := selectedModelCfg.Model
+	if selectedModelCfg.Provider == openrouter.Name && isExactoSupported(modelID) {
+		modelID += ":exacto"
+	}
+
+	languageModel, err := provider.LanguageModel(ctx, modelID)
 	if err != nil {
-		return Model{}, Model{}, err
+		return Model{}, err
 	}
 
 	return Model{
-			Model:      largeModel,
-			CatwalkCfg: *largeCatwalkModel,
-			ModelCfg:   largeModelCfg,
-			FlatRate:   largeProviderCfg.FlatRate,
-		}, Model{
-			Model:      smallModel,
-			CatwalkCfg: *smallCatwalkModel,
-			ModelCfg:   smallModelCfg,
-			FlatRate:   smallProviderCfg.FlatRate,
-		}, nil
+		Model:        languageModel,
+		CatwalkCfg:   *catwalkModel,
+		ModelCfg:     selectedModelCfg,
+		ProviderType: providerCfg.Type,
+		FlatRate:     providerCfg.FlatRate,
+	}, nil
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
@@ -942,24 +1100,51 @@ func (c *coordinator) Model() Model {
 	return c.currentAgent.Model()
 }
 
+func (c *coordinator) agentForProfile(profile scheduler.WorkerProfile) SessionAgent {
+	if c == nil {
+		return nil
+	}
+	switch profile {
+	case scheduler.ProfileWorkerAgent:
+		if agent, ok := c.agents[config.AgentCoder]; ok {
+			return agent
+		}
+	case scheduler.ProfileToolsAgent:
+		if agent, ok := c.agents[config.AgentExplore]; ok {
+			return agent
+		}
+	default:
+		if agent, ok := c.agents[config.AgentBuild]; ok {
+			return agent
+		}
+	}
+	return c.currentAgent
+}
+
 func (c *coordinator) UpdateModels(ctx context.Context) error {
-	// build the models again so we make sure we get the latest config
-	large, small, err := c.buildAgentModels(ctx, false)
-	if err != nil {
-		return err
+	for _, agentName := range []string{config.AgentBuild, config.AgentCoder, config.AgentExplore} {
+		agent, ok := c.agents[agentName]
+		if !ok || agent == nil {
+			continue
+		}
+		agentCfg, ok := c.cfg.Config().Agents[agentName]
+		if !ok {
+			continue
+		}
+		large, small, err := c.buildAgentModels(ctx, agentCfg, agentName != config.AgentBuild)
+		if err != nil {
+			return err
+		}
+		agent.SetModels(large, small)
+		tools, err := c.buildTools(ctx, agentCfg, agentName != config.AgentBuild)
+		if err != nil {
+			return err
+		}
+		agent.SetTools(tools)
+		if agentName == config.AgentBuild {
+			c.currentAgent = agent
+		}
 	}
-	c.currentAgent.SetModels(large, small)
-
-	agentCfg, ok := c.cfg.Config().Agents[config.AgentCoder]
-	if !ok {
-		return errCoderAgentNotConfigured
-	}
-
-	tools, err := c.buildTools(ctx, agentCfg, false)
-	if err != nil {
-		return err
-	}
-	c.currentAgent.SetTools(tools)
 	return nil
 }
 
@@ -1087,26 +1272,93 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		maxTokens = model.ModelCfg.MaxTokens
 	}
 
+	taskRuntime := c.newTaskRuntime(session.ID)
+	taskScheduler := scheduler.NewAgentScheduler(taskRuntime)
+	taskNode := c.ensureChildTask(taskScheduler, params.SessionID, session.ID, params.Prompt, maxTokens)
+	if taskNode == nil {
+		return fantasy.ToolResponse{}, errors.New("failed to create child task")
+	}
+	taskScheduler.BuildDefaultWorkflow(taskNode)
+
 	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
 	if !ok {
 		return fantasy.ToolResponse{}, errModelProviderNotConfigured
 	}
 
-	// Run the agent
-	result, err := params.Agent.Run(ctx, SessionAgentCall{
-		SessionID:        session.ID,
-		Prompt:           params.Prompt,
-		MaxOutputTokens:  maxTokens,
-		ProviderOptions:  getProviderOptions(model, providerCfg),
-		Temperature:      model.ModelCfg.Temperature,
-		TopP:             model.ModelCfg.TopP,
-		TopK:             model.ModelCfg.TopK,
-		FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
-		PresencePenalty:  model.ModelCfg.PresencePenalty,
-		NonInteractive:   true,
+	var result *fantasy.AgentResult
+	taskWorker := scheduler.WorkerFunc(func(taskCtx context.Context, node *scheduler.TaskNode, intent provider.RequestIntent) (string, error) {
+		callMaxTokens := maxTokens
+		if intent.MaxOutputTokens > 0 {
+			callMaxTokens = int64(intent.MaxOutputTokens)
+		}
+		taskPrompt := c.composeTaskPrompt(taskRuntime, node, params.Prompt)
+		c.bindTaskNodeModel(node, model)
+		c.appendTaskInputTrace(taskRuntime, node, taskPrompt)
+		requestStartedAt := time.Now()
+		runResult, runErr := params.Agent.Run(taskCtx, SessionAgentCall{
+			SessionID:        session.ID,
+			Prompt:           taskPrompt,
+			MaxOutputTokens:  callMaxTokens,
+			ProviderOptions:  getProviderOptions(model, providerCfg),
+			Temperature:      model.ModelCfg.Temperature,
+			TopP:             model.ModelCfg.TopP,
+			TopK:             model.ModelCfg.TopK,
+			FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
+			PresencePenalty:  model.ModelCfg.PresencePenalty,
+			NonInteractive:   true,
+			TraceRuntime:     taskRuntime,
+			TaskNodeID:       node.ID,
+			TaskParentID:     nodeParentIDForCall(node),
+			TaskProfile:      string(node.Profile),
+			ProviderID:       node.ProviderID,
+			ProviderType:     node.ProviderType,
+			ModelID:          node.ModelID,
+		})
+		node.FinishedAt = time.Now()
+		if node.StartedAt.IsZero() {
+			node.StartedAt = requestStartedAt
+		}
+		node.DurationMs = node.FinishedAt.Sub(node.StartedAt).Milliseconds()
+		if runErr != nil {
+			if taskRuntime != nil {
+				taskRuntime.AppendTrace(agentruntime.TaskTrace{
+					StartedAt:             node.StartedAt,
+					FinishedAt:            node.FinishedAt,
+					DurationMs:            node.DurationMs,
+					ConversationSessionID: node.ConversationSessionID,
+					SessionID:             node.SessionID,
+					NodeID:                node.ID,
+					ParentID:              node.Intent.ParentID,
+					Depth:                 taskNodeDepth(node),
+					Profile:               string(node.Profile),
+					ProviderID:            node.ProviderID,
+					ProviderType:          node.ProviderType,
+					ModelID:               node.ModelID,
+					Kind:                  agentruntime.TraceKindTaskFailed,
+					Status:                "failed",
+					Goal:                  node.Intent.Goal,
+					Scope:                 append([]string(nil), node.Intent.Scope...),
+					Error:                 runErr.Error(),
+				})
+			}
+			return "", runErr
+		}
+		if runResult == nil {
+			return "", errors.New("sub-agent returned no result")
+		}
+		result = runResult
+		output := runResult.Response.Content.Text()
+		c.bindTaskNodeUsage(node, model, runResult.TotalUsage, taskPrompt, output)
+		c.appendTaskOutputTrace(taskRuntime, node, output)
+		c.recordTaskOutcome(taskRuntime, node, taskPrompt, output)
+		return output, nil
 	})
-	if err != nil {
+
+	if err := taskScheduler.Dispatch(ctx, taskNode, taskWorker); err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
+	}
+	if result == nil {
+		return fantasy.ToolResponse{}, errors.New("sub-agent returned no result")
 	}
 
 	// Update parent session cost
@@ -1136,6 +1388,242 @@ func (c *coordinator) updateParentSessionCost(ctx context.Context, childSessionI
 	}
 
 	return nil
+}
+
+func (c *coordinator) newTaskRuntime(sessionID string) *agentruntime.RuntimeSession {
+	if c == nil {
+		return nil
+	}
+	if c.runtime == nil {
+		c.runtime = agentruntime.NewSession(c.cfg.WorkingDir(), nil)
+	}
+	return c.runtime.CloneForRun(sessionID)
+}
+
+func (c *coordinator) ensureRootTask(taskScheduler *scheduler.AgentScheduler, sessionID, goal string, maxTokens int64) *scheduler.TaskNode {
+	if c == nil || taskScheduler == nil {
+		return nil
+	}
+	node := taskScheduler.EnsureRoot(sessionID, goal, nil, scheduler.ProfileBuildAgent)
+	if node == nil {
+		return nil
+	}
+	node.Kind = scheduler.TaskEdit
+	node.Mode = scheduler.TaskWrite
+	node.MaxRetries = 0
+	node.Intent.BudgetTokens = int(maxTokens)
+	return node
+}
+
+func (c *coordinator) ensureChildTask(taskScheduler *scheduler.AgentScheduler, parentSessionID, sessionID, goal string, maxTokens int64) *scheduler.TaskNode {
+	if c == nil || taskScheduler == nil {
+		return nil
+	}
+	parent, ok := taskScheduler.Root(parentSessionID)
+	if !ok || parent == nil {
+		parent = taskScheduler.EnsureRoot(parentSessionID, "", nil, scheduler.ProfileBuildAgent)
+	}
+	node := taskScheduler.SpawnChild(parent, sessionID, goal, scheduler.ProfileWorkerAgent, nil, "")
+	if node == nil {
+		return nil
+	}
+	node.Kind = scheduler.TaskEdit
+	node.Mode = scheduler.TaskWrite
+	node.MaxRetries = 0
+	node.Intent.BudgetTokens = int(maxTokens)
+	return node
+}
+
+func (c *coordinator) composeTaskPrompt(runtime *agentruntime.RuntimeSession, node *scheduler.TaskNode, fallback string) string {
+	if node == nil {
+		return fallback
+	}
+
+	prompt := node.Intent.Goal
+	if prompt == "" {
+		prompt = fallback
+	}
+	if runtime == nil {
+		return prompt
+	}
+
+	switch node.Kind {
+	case scheduler.TaskEdit:
+		if plan, ok := runtime.Fact("task.plan"); ok && strings.TrimSpace(plan) != "" {
+			return prompt + "\n\nImplementation plan:\n" + plan
+		}
+	case scheduler.TaskVerify:
+		if output, ok := runtime.Fact("task.output"); ok && strings.TrimSpace(output) != "" {
+			return prompt + "\n\nImplementation output:\n" + output
+		}
+	}
+
+	return prompt
+}
+
+func (c *coordinator) recordTaskOutcome(runtime *agentruntime.RuntimeSession, node *scheduler.TaskNode, prompt, output string) {
+	if runtime == nil || node == nil {
+		return
+	}
+
+	goal := strings.TrimSpace(node.Intent.Goal)
+	if goal == "" {
+		goal = strings.TrimSpace(prompt)
+	}
+	if goal != "" {
+		runtime.AppendCompactHistory(goal)
+	}
+	if output != "" {
+		runtime.AppendCompactHistory(output)
+	}
+
+	switch node.Kind {
+	case scheduler.TaskResearch, scheduler.TaskExplore:
+		if node.Parent != nil && len(node.Parent.Children) > 1 && node.Parent.Children[0] == node {
+			runtime.SetFact("task.plan", output)
+		} else {
+			runtime.SetFact("task.insight", output)
+		}
+	case scheduler.TaskEdit:
+		runtime.SetFact("task.output", output)
+	case scheduler.TaskVerify:
+		runtime.SetFact("task.verify", output)
+	case scheduler.TaskSummarize:
+		runtime.SetFact("task.summary", output)
+	}
+}
+
+// preBindTaskTreeModels walks the task tree before Dispatch and binds the
+// model attached to each node's profile, so task_started traces carry
+// provider/model/request_id rather than empty strings. The worker's per-call
+// bindTaskNodeUsage still owns token/cost numbers populated after the LLM
+// response returns.
+func (c *coordinator) preBindTaskTreeModels(node *scheduler.TaskNode) {
+	if node == nil {
+		return
+	}
+	if node.Profile != "" {
+		if agent := c.agentForProfile(node.Profile); agent != nil {
+			c.bindTaskNodeModel(node, agent.Model())
+		}
+	}
+	for _, child := range node.Children {
+		c.preBindTaskTreeModels(child)
+	}
+}
+
+func (c *coordinator) bindTaskNodeModel(node *scheduler.TaskNode, model Model) {
+	if node == nil {
+		return
+	}
+	node.ProviderID = model.ModelCfg.Provider
+	node.ProviderType = string(model.ProviderType)
+	node.ModelID = model.ModelCfg.Model
+	node.RequestID = node.ID
+}
+
+func (c *coordinator) bindTaskNodeUsage(node *scheduler.TaskNode, model Model, usage fantasy.Usage, input, output string) {
+	if node == nil {
+		return
+	}
+	node.InputBytes = len(input)
+	node.OutputBytes = len(output)
+	node.InputTokens = usage.InputTokens
+	node.OutputTokens = usage.OutputTokens
+	node.TotalTokens = usage.TotalTokens
+	node.ReasoningTokens = usage.ReasoningTokens
+	node.CacheCreationTokens = usage.CacheCreationTokens
+	node.CacheReadTokens = usage.CacheReadTokens
+	node.EstimatedCostUSD = estimateUsageCost(model, usage)
+}
+
+func (c *coordinator) appendTaskInputTrace(runtime *agentruntime.RuntimeSession, node *scheduler.TaskNode, input string) {
+	if runtime == nil || node == nil {
+		return
+	}
+	runtime.AppendTrace(agentruntime.TaskTrace{
+		StartedAt:             node.StartedAt,
+		ConversationSessionID: node.ConversationSessionID,
+		SessionID:             node.SessionID,
+		NodeID:                node.ID,
+		ParentID:              nodeParentIDForCall(node),
+		Depth:                 taskNodeDepth(node),
+		Profile:               string(node.Profile),
+		ProviderID:            node.ProviderID,
+		ProviderType:          node.ProviderType,
+		ModelID:               node.ModelID,
+		RequestID:             node.RequestID,
+		Kind:                  agentruntime.TraceKindTaskInput,
+		Status:                "dispatching",
+		Goal:                  node.Intent.Goal,
+		Scope:                 append([]string(nil), node.Intent.Scope...),
+		Input:                 input,
+		InputBytes:            len(input),
+	})
+}
+
+func (c *coordinator) appendTaskOutputTrace(runtime *agentruntime.RuntimeSession, node *scheduler.TaskNode, output string) {
+	if runtime == nil || node == nil {
+		return
+	}
+	runtime.AppendTrace(agentruntime.TaskTrace{
+		StartedAt:             node.StartedAt,
+		FinishedAt:            node.FinishedAt,
+		DurationMs:            node.DurationMs,
+		ConversationSessionID: node.ConversationSessionID,
+		SessionID:             node.SessionID,
+		NodeID:                node.ID,
+		ParentID:              nodeParentIDForCall(node),
+		Depth:                 taskNodeDepth(node),
+		Profile:               string(node.Profile),
+		ProviderID:            node.ProviderID,
+		ProviderType:          node.ProviderType,
+		ModelID:               node.ModelID,
+		RequestID:             node.RequestID,
+		Kind:                  agentruntime.TraceKindTaskOutput,
+		Status:                "completed",
+		Success:               true,
+		Goal:                  node.Intent.Goal,
+		Scope:                 append([]string(nil), node.Intent.Scope...),
+		Output:                output,
+		OutputBytes:           len(output),
+		InputTokens:           node.InputTokens,
+		OutputTokens:          node.OutputTokens,
+		TotalTokens:           node.TotalTokens,
+		ReasoningTokens:       node.ReasoningTokens,
+		CacheCreationTokens:   node.CacheCreationTokens,
+		CacheReadTokens:       node.CacheReadTokens,
+		EstimatedCostUSD:      node.EstimatedCostUSD,
+	})
+}
+
+func estimateUsageCost(model Model, usage fantasy.Usage) float64 {
+	if model.FlatRate {
+		return 0
+	}
+	modelConfig := model.CatwalkCfg
+	return modelConfig.CostPer1MInCached/1e6*float64(usage.CacheCreationTokens) +
+		modelConfig.CostPer1MOutCached/1e6*float64(usage.CacheReadTokens) +
+		modelConfig.CostPer1MIn/1e6*float64(usage.InputTokens) +
+		modelConfig.CostPer1MOut/1e6*float64(usage.OutputTokens)
+}
+
+func nodeParentIDForCall(node *scheduler.TaskNode) string {
+	if node == nil {
+		return ""
+	}
+	if node.Parent != nil {
+		return node.Parent.ID
+	}
+	return node.Intent.ParentID
+}
+
+func taskNodeDepth(node *scheduler.TaskNode) int {
+	depth := 0
+	for current := node; current != nil && current.Parent != nil; current = current.Parent {
+		depth++
+	}
+	return depth
 }
 
 // discoverSkills runs the skill discovery pipeline and returns both the

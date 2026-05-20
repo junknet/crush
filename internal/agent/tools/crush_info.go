@@ -43,6 +43,7 @@ func buildCrushInfo(cfg *config.ConfigStore, lspManager *lsp.Manager, allSkills 
 	writeConfigFiles(&b, cfg)
 	writeConfigStaleness(&b, cfg)
 	writeModels(&b, cfg)
+	writeAgents(&b, cfg)
 	writeProviders(&b, cfg)
 	writeLSP(&b, lspManager, cfg)
 	writeMCP(&b, mcp.GetStates(), cfg)
@@ -97,16 +98,62 @@ func writeConfigStaleness(b *strings.Builder, cfg *config.ConfigStore) {
 
 func writeModels(b *strings.Builder, cfg *config.ConfigStore) {
 	c := cfg.Config()
-	if len(c.Models) == 0 {
+	if len(c.Models) == 0 && c.DefaultAgent == "" {
 		return
 	}
 	b.WriteString("[model]\n")
-	for _, typ := range []config.SelectedModelType{config.SelectedModelTypeLarge, config.SelectedModelTypeSmall} {
+	if c.DefaultAgent != "" {
+		fmt.Fprintf(b, "default_agent = %s\n", c.DefaultAgent)
+	}
+	for _, typ := range []config.SelectedModelType{
+		config.SelectedModelTypeBuild,
+		config.SelectedModelTypeCoder,
+		config.SelectedModelTypeExplore,
+		config.SelectedModelTypeLarge,
+		config.SelectedModelTypeSmall,
+	} {
 		m, ok := c.Models[typ]
 		if !ok {
 			continue
 		}
-		fmt.Fprintf(b, "%s = %s (%s)\n", typ, m.Model, m.Provider)
+		fmt.Fprintf(b, "%s = %s\n", typ, formatProviderModel(m.Provider, m.Model))
+	}
+	b.WriteString("\n")
+}
+
+func formatProviderModel(providerName, modelName string) string {
+	switch {
+	case providerName == "":
+		return modelName
+	case modelName == "":
+		return providerName
+	default:
+		return providerName + "/" + modelName
+	}
+}
+
+func writeAgents(b *strings.Builder, cfg *config.ConfigStore) {
+	c := cfg.Config()
+	if len(c.Agents) == 0 {
+		return
+	}
+	type entry struct {
+		name  string
+		agent config.Agent
+	}
+	var entries []entry
+	for name, agent := range c.Agents {
+		entries = append(entries, entry{name: name, agent: agent})
+	}
+	slices.SortFunc(entries, func(a, b entry) int { return strings.Compare(a.name, b.name) })
+
+	b.WriteString("[agents]\n")
+	for _, e := range entries {
+		status := "enabled"
+		if e.agent.Disabled {
+			status = "disabled"
+		}
+		fmt.Fprintf(b, "%s = %s (model=%s, tools=%d)\n", e.name, status, e.agent.Model, len(e.agent.AllowedTools))
 	}
 	b.WriteString("\n")
 }
@@ -348,19 +395,8 @@ func writeSkills(b *strings.Builder, allSkills []*skills.Skill, activeSkills []*
 
 func writePermissions(b *strings.Builder, cfg *config.ConfigStore) {
 	c := cfg.Config()
-	overrides := cfg.Overrides()
-
-	if c.Permissions == nil {
-		if !overrides.SkipPermissionRequests {
-			return
-		}
-	} else if !overrides.SkipPermissionRequests && len(c.Permissions.AllowedTools) == 0 {
-		return
-	}
 	b.WriteString("[permissions]\n")
-	if overrides.SkipPermissionRequests {
-		b.WriteString("mode = yolo\n")
-	}
+	b.WriteString("mode = yolo\n")
 	if c.Permissions != nil && len(c.Permissions.AllowedTools) > 0 {
 		sorted := slices.Clone(c.Permissions.AllowedTools)
 		slices.Sort(sorted)

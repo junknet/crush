@@ -55,18 +55,31 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	}
 
 	// Load workspace config last so it has highest priority.
-	if wsData, err := os.ReadFile(store.workspacePath); err == nil && len(wsData) > 0 {
-		if !json.Valid(wsData) {
-			return nil, fmt.Errorf("invalid JSON in config file %s", store.workspacePath)
+	if workspacePath, err := store.configPath(ScopeWorkspace); err == nil {
+		if wsData, readErr := readConfigFile(workspacePath); readErr == nil && len(wsData) > 0 {
+			merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, wsData))
+			if mergeErr == nil {
+				// Preserve defaults that setDefaults already applied.
+				dataDir := cfg.Options.DataDirectory
+				*cfg = *merged
+				cfg.setDefaults(workingDir, dataDir)
+				store.config = cfg
+				store.loadedPaths = append(store.loadedPaths, workspacePath)
+			}
+		} else if readErr != nil && !os.IsNotExist(readErr) {
+			return nil, fmt.Errorf("failed to read workspace config file %s: %w", workspacePath, readErr)
 		}
-		merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, wsData))
-		if mergeErr == nil {
-			// Preserve defaults that setDefaults already applied.
-			dataDir := cfg.Options.DataDirectory
-			*cfg = *merged
-			cfg.setDefaults(workingDir, dataDir)
-			store.config = cfg
-			store.loadedPaths = append(store.loadedPaths, store.workspacePath)
+	}
+	if llmPath, err := store.llmConfigPath(ScopeWorkspace); err == nil {
+		if llmData, readErr := readConfigFile(llmPath); readErr == nil && len(llmData) > 0 {
+			merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, llmData))
+			if mergeErr == nil {
+				dataDir := cfg.Options.DataDirectory
+				*cfg = *merged
+				cfg.setDefaults(workingDir, dataDir)
+				store.config = cfg
+				store.loadedPaths = append(store.loadedPaths, llmPath)
+			}
 		}
 	}
 
@@ -438,6 +451,20 @@ func (c *Config) setDefaults(workingDir, dataDir string) {
 	if c.RecentModels == nil {
 		c.RecentModels = make(map[SelectedModelType][]SelectedModel)
 	}
+	if build, ok := c.Models[SelectedModelTypeBuild]; ok {
+		if _, ok := c.Models[SelectedModelTypeLarge]; !ok {
+			c.Models[SelectedModelTypeLarge] = build
+		}
+	} else if large, ok := c.Models[SelectedModelTypeLarge]; ok {
+		c.Models[SelectedModelTypeBuild] = large
+	}
+	if explore, ok := c.Models[SelectedModelTypeExplore]; ok {
+		if _, ok := c.Models[SelectedModelTypeSmall]; !ok {
+			c.Models[SelectedModelTypeSmall] = explore
+		}
+	} else if small, ok := c.Models[SelectedModelTypeSmall]; ok {
+		c.Models[SelectedModelTypeExplore] = small
+	}
 	if c.MCP == nil {
 		c.MCP = make(map[string]MCPConfig)
 	}
@@ -606,95 +633,14 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 	if err != nil {
 		return fmt.Errorf("failed to select default models: %w", err)
 	}
-	large, small := defaultLarge, defaultSmall
-
 	largeModelSelected, largeModelConfigured := c.Models[SelectedModelTypeLarge]
-	if largeModelConfigured {
-		if largeModelSelected.Model != "" {
-			large.Model = largeModelSelected.Model
-		}
-		if largeModelSelected.Provider != "" {
-			large.Provider = largeModelSelected.Provider
-		}
-		model := c.GetModel(large.Provider, large.Model)
-		if model == nil {
-			large = defaultLarge
-			if persist {
-				if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeLarge, large); err != nil {
-					return fmt.Errorf("failed to update preferred large model: %w", err)
-				}
-			}
-		} else {
-			if largeModelSelected.MaxTokens > 0 {
-				large.MaxTokens = largeModelSelected.MaxTokens
-			} else {
-				large.MaxTokens = model.DefaultMaxTokens
-			}
-			if largeModelSelected.ReasoningEffort != "" {
-				large.ReasoningEffort = largeModelSelected.ReasoningEffort
-			}
-			large.Think = largeModelSelected.Think
-			if largeModelSelected.Temperature != nil {
-				large.Temperature = largeModelSelected.Temperature
-			}
-			if largeModelSelected.TopP != nil {
-				large.TopP = largeModelSelected.TopP
-			}
-			if largeModelSelected.TopK != nil {
-				large.TopK = largeModelSelected.TopK
-			}
-			if largeModelSelected.FrequencyPenalty != nil {
-				large.FrequencyPenalty = largeModelSelected.FrequencyPenalty
-			}
-			if largeModelSelected.PresencePenalty != nil {
-				large.PresencePenalty = largeModelSelected.PresencePenalty
-			}
-		}
-	}
 	smallModelSelected, smallModelConfigured := c.Models[SelectedModelTypeSmall]
-	if smallModelConfigured {
-		if smallModelSelected.Model != "" {
-			small.Model = smallModelSelected.Model
-		}
-		if smallModelSelected.Provider != "" {
-			small.Provider = smallModelSelected.Provider
-		}
+	buildModelSelected, buildModelConfigured := c.Models[SelectedModelTypeBuild]
+	coderModelSelected, coderModelConfigured := c.Models[SelectedModelTypeCoder]
+	exploreModelSelected, exploreModelConfigured := c.Models[SelectedModelTypeExplore]
 
-		model := c.GetModel(small.Provider, small.Model)
-		if model == nil {
-			small = defaultSmall
-			if persist {
-				if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeSmall, small); err != nil {
-					return fmt.Errorf("failed to update preferred small model: %w", err)
-				}
-			}
-		} else {
-			if smallModelSelected.MaxTokens > 0 {
-				small.MaxTokens = smallModelSelected.MaxTokens
-			} else {
-				small.MaxTokens = model.DefaultMaxTokens
-			}
-			if smallModelSelected.ReasoningEffort != "" {
-				small.ReasoningEffort = smallModelSelected.ReasoningEffort
-			}
-			if smallModelSelected.Temperature != nil {
-				small.Temperature = smallModelSelected.Temperature
-			}
-			if smallModelSelected.TopP != nil {
-				small.TopP = smallModelSelected.TopP
-			}
-			if smallModelSelected.TopK != nil {
-				small.TopK = smallModelSelected.TopK
-			}
-			if smallModelSelected.FrequencyPenalty != nil {
-				small.FrequencyPenalty = smallModelSelected.FrequencyPenalty
-			}
-			if smallModelSelected.PresencePenalty != nil {
-				small.PresencePenalty = smallModelSelected.PresencePenalty
-			}
-			small.Think = smallModelSelected.Think
-		}
-	}
+	large, largeValid := normalizeSelectedModel(c, largeModelSelected, defaultLarge)
+	small, smallValid := normalizeSelectedModel(c, smallModelSelected, defaultSmall)
 
 	// When small isn't explicitly configured and the provider isn't a
 	// known built-in, use the large model as the small model. This
@@ -714,9 +660,71 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 		}
 	}
 
+	build, _ := normalizeSelectedModel(c, buildModelSelected, large)
+	coder, _ := normalizeSelectedModel(c, coderModelSelected, build)
+	explore, _ := normalizeSelectedModel(c, exploreModelSelected, small)
+
+	if persist {
+		if largeModelConfigured && !largeValid {
+			if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeLarge, large); err != nil {
+				return fmt.Errorf("failed to update preferred large model: %w", err)
+			}
+		}
+		if smallModelConfigured && !smallValid {
+			if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeSmall, small); err != nil {
+				return fmt.Errorf("failed to update preferred small model: %w", err)
+			}
+		}
+	}
+
+	if !buildModelConfigured && largeModelConfigured {
+		build = large
+	}
+	if !coderModelConfigured {
+		coder = build
+	}
+	if !exploreModelConfigured && smallModelConfigured {
+		explore = small
+	}
+
+	c.Models[SelectedModelTypeBuild] = build
+	c.Models[SelectedModelTypeCoder] = coder
+	c.Models[SelectedModelTypeExplore] = explore
 	c.Models[SelectedModelTypeLarge] = large
 	c.Models[SelectedModelTypeSmall] = small
 	return nil
+}
+
+func normalizeSelectedModel(c *Config, selected SelectedModel, fallback SelectedModel) (SelectedModel, bool) {
+	resolved := fallback
+	if selected.Model != "" {
+		resolved.Model = selected.Model
+	}
+	if selected.Provider != "" {
+		resolved.Provider = selected.Provider
+	}
+	model := c.GetModel(resolved.Provider, resolved.Model)
+	if model == nil {
+		return fallback, false
+	}
+	if selected.MaxTokens > 0 {
+		resolved.MaxTokens = selected.MaxTokens
+	} else {
+		resolved.MaxTokens = model.DefaultMaxTokens
+	}
+	if selected.ReasoningEffort != "" {
+		resolved.ReasoningEffort = selected.ReasoningEffort
+	} else {
+		resolved.ReasoningEffort = model.DefaultReasoningEffort
+	}
+	resolved.Think = selected.Think
+	resolved.Temperature = selected.Temperature
+	resolved.TopP = selected.TopP
+	resolved.TopK = selected.TopK
+	resolved.FrequencyPenalty = selected.FrequencyPenalty
+	resolved.PresencePenalty = selected.PresencePenalty
+	resolved.ProviderOptions = selected.ProviderOptions
+	return resolved, true
 }
 
 // lookupConfigs searches config files starting at cwd and walking up
@@ -726,24 +734,36 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 // up. Global user-level config locations are always included
 // regardless of the boundary.
 func lookupConfigs(cwd string) []string {
-	// prepend default config paths
-	configPaths := []string{
-		GlobalConfig(),
-		GlobalConfigData(),
+	configPaths := append([]string{}, configCandidates(GlobalConfig())...)
+	configPaths = append(configPaths, llmConfigCandidates(GlobalConfig())...)
+	configPaths = append(configPaths, configCandidates(GlobalConfigData())...)
+	configPaths = append(configPaths, llmConfigCandidates(GlobalConfigData())...)
+
+	baseNames := []string{
+		appName + ".json",
+		appName + ".yaml",
+		appName + ".yml",
+		"." + appName + ".json",
+		"." + appName + ".yaml",
+		"." + appName + ".yml",
+	}
+	llmNames := []string{
+		appName + ".llm.yaml",
+		appName + ".llm.yml",
+		"." + appName + ".llm.yaml",
+		"." + appName + ".llm.yml",
 	}
 
-	configNames := []string{appName + ".json", "." + appName + ".json"}
-
-	foundConfigs, err := fsext.LookupBounded(cwd, projectBoundary(cwd), configNames...)
-	if err != nil {
-		// returns at least default configs
-		return configPaths
+	if foundConfigs, err := fsext.LookupBounded(cwd, projectBoundary(cwd), baseNames...); err == nil {
+		slices.Reverse(foundConfigs)
+		configPaths = append(configPaths, foundConfigs...)
+	}
+	if foundConfigs, err := fsext.LookupBounded(cwd, projectBoundary(cwd), llmNames...); err == nil {
+		slices.Reverse(foundConfigs)
+		configPaths = append(configPaths, foundConfigs...)
 	}
 
-	// reverse order so last config has more priority
-	slices.Reverse(foundConfigs)
-
-	return append(configPaths, foundConfigs...)
+	return configPaths
 }
 
 func loadFromConfigPaths(configPaths []string) (*Config, []string, error) {
@@ -751,18 +771,15 @@ func loadFromConfigPaths(configPaths []string) (*Config, []string, error) {
 	var loaded []string
 
 	for _, path := range configPaths {
-		data, err := os.ReadFile(path)
+		data, err := readConfigFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return nil, nil, fmt.Errorf("failed to open config file %s: %w", path, err)
+			return nil, nil, err
 		}
 		if len(data) == 0 {
 			continue
-		}
-		if !json.Valid(data) {
-			return nil, nil, fmt.Errorf("invalid JSON in config file %s", path)
 		}
 		configs = append(configs, data)
 		loaded = append(loaded, path)
@@ -788,7 +805,44 @@ func loadFromBytes(configs [][]byte) (*Config, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
+	normalizeLoadedConfig(&config)
 	return &config, nil
+}
+
+func normalizeLoadedConfig(config *Config) {
+	if config == nil || config.Providers == nil {
+		return
+	}
+
+	providers := config.Providers.Copy()
+	for id, provider := range providers {
+		provider.Models = deduplicateProviderModels(provider.Models)
+		providers[id] = provider
+	}
+	config.Providers.Reset(providers)
+}
+
+func deduplicateProviderModels(models []catwalk.Model) []catwalk.Model {
+	if len(models) <= 1 {
+		return append([]catwalk.Model(nil), models...)
+	}
+
+	seen := make(map[string]struct{}, len(models))
+	deduplicated := make([]catwalk.Model, 0, len(models))
+	for i := len(models) - 1; i >= 0; i-- {
+		model := models[i]
+		if _, ok := seen[model.ID]; ok {
+			continue
+		}
+		seen[model.ID] = struct{}{}
+		if model.Name == "" {
+			model.Name = model.ID
+		}
+		deduplicated = append(deduplicated, model)
+	}
+
+	slices.Reverse(deduplicated)
+	return deduplicated
 }
 
 func hasAWSCredentials(env env.Env) bool {

@@ -37,6 +37,23 @@ func TestConfig_LoadFromBytes(t *testing.T) {
 	require.Equal(t, "https://api.openai.com/v2", pc.BaseURL)
 }
 
+func TestConfig_LoadFromBytes_DeduplicatesProviderModels(t *testing.T) {
+	data1 := []byte(`{"providers": {"waitai-openai": {"models": [{"id": "gpt-5.5", "name": "GPT 5.5 v1"}]}}}`)
+	data2 := []byte(`{"providers": {"waitai-openai": {"models": [{"id": "gpt-5.5", "name": "GPT 5.5 v2"}, {"id": "gpt-4o", "name": "GPT 4o"}]}}}`)
+
+	loadedConfig, err := loadFromBytes([][]byte{data1, data2})
+
+	require.NoError(t, err)
+	require.NotNil(t, loadedConfig)
+	require.Equal(t, 1, loadedConfig.Providers.Len())
+	prov, ok := loadedConfig.Providers.Get("waitai-openai")
+	require.True(t, ok)
+	require.Len(t, prov.Models, 2)
+	require.Equal(t, "gpt-5.5", prov.Models[0].ID)
+	require.Equal(t, "GPT 5.5 v2", prov.Models[0].Name)
+	require.Equal(t, "gpt-4o", prov.Models[1].ID)
+}
+
 func TestLookupConfigs_BoundedByProject(t *testing.T) {
 	// Force GlobalConfig and GlobalConfigData to point at locations we
 	// control so they can be present in the result without polluting
@@ -161,6 +178,39 @@ func TestLoadFromConfigPaths_InvalidJSON(t *testing.T) {
 	})
 }
 
+func TestLoadFromConfigPaths_YAML(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "crush.llm.yaml")
+	require.NoError(t, os.WriteFile(yamlPath, []byte(`
+providers:
+  waitai-openai:
+    id: waitai-openai
+    name: WaitAI OpenAI
+    base_url: http://127.0.0.1:43917/v1
+    api_key: test-key
+    models:
+      - id: gpt-5.5
+        name: GPT 5.5
+models:
+  large:
+    model: claude-opus-4-7
+    provider: waitai-openai
+`), 0o644))
+
+	cfg, loaded, err := loadFromConfigPaths([]string{yamlPath})
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Equal(t, []string{yamlPath}, loaded)
+
+	prov, ok := cfg.Providers.Get("waitai-openai")
+	require.True(t, ok)
+	require.Equal(t, "test-key", prov.APIKey)
+	require.Equal(t, "http://127.0.0.1:43917/v1", prov.BaseURL)
+	require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypeLarge].Model)
+}
+
 // testStore wraps a Config in a minimal ConfigStore for testing.
 func testStore(cfg *Config) *ConfigStore {
 	return &ConfigStore{config: cfg}
@@ -181,7 +231,7 @@ func TestConfig_setDefaults(t *testing.T) {
 		require.NotNil(t, cfg.LSP)
 		require.NotNil(t, cfg.MCP)
 		require.Equal(t, filepath.Join(workingDir, ".crush"), cfg.Options.DataDirectory)
-		require.Equal(t, "AGENTS.md", cfg.Options.InitializeAs)
+		require.Equal(t, "CLAUDE.md", cfg.Options.InitializeAs)
 		for _, path := range defaultContextPaths {
 			require.Contains(t, cfg.Options.ContextPaths, path)
 		}
@@ -705,13 +755,17 @@ func TestConfig_setupAgentsWithNoDisabledTools(t *testing.T) {
 	}
 
 	cfg.SetupAgents()
+	buildAgent, ok := cfg.Agents[AgentBuild]
+	require.True(t, ok)
+	assert.Equal(t, allToolNames(), buildAgent.AllowedTools)
+
 	coderAgent, ok := cfg.Agents[AgentCoder]
 	require.True(t, ok)
 	assert.Equal(t, allToolNames(), coderAgent.AllowedTools)
 
-	taskAgent, ok := cfg.Agents[AgentTask]
+	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)
-	assert.Equal(t, []string{"glob", "grep", "ls", "sourcegraph", "view"}, taskAgent.AllowedTools)
+	assert.Equal(t, []string{"glob", "grep", "ls", "sourcegraph", "view"}, exploreAgent.AllowedTools)
 }
 
 func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {
@@ -726,14 +780,18 @@ func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {
 	}
 
 	cfg.SetupAgents()
+	buildAgent, ok := cfg.Agents[AgentBuild]
+	require.True(t, ok)
+	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_macro_expand", "lsp_safe_to_delete", "lsp_project_maps", "fetch", "agentic_fetch", "glob", "ls", "sourcegraph", "todos", "view", "write", "list_mcp_resources", "read_mcp_resource"}, buildAgent.AllowedTools)
+
 	coderAgent, ok := cfg.Agents[AgentCoder]
 	require.True(t, ok)
 
-	assert.Equal(t, []string{"agent", "bash", "crush_info", "crush_logs", "job_output", "job_kill", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "agentic_fetch", "glob", "ls", "sourcegraph", "todos", "view", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
+	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_macro_expand", "lsp_safe_to_delete", "lsp_project_maps", "fetch", "agentic_fetch", "glob", "ls", "sourcegraph", "todos", "view", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
 
-	taskAgent, ok := cfg.Agents[AgentTask]
+	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)
-	assert.Equal(t, []string{"glob", "ls", "sourcegraph", "view"}, taskAgent.AllowedTools)
+	assert.Equal(t, []string{"glob", "ls", "sourcegraph", "view"}, exploreAgent.AllowedTools)
 }
 
 func TestConfig_setupAgentsWithEveryReadOnlyToolDisabled(t *testing.T) {
@@ -750,13 +808,43 @@ func TestConfig_setupAgentsWithEveryReadOnlyToolDisabled(t *testing.T) {
 	}
 
 	cfg.SetupAgents()
+	buildAgent, ok := cfg.Agents[AgentBuild]
+	require.True(t, ok)
+	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "download", "edit", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_macro_expand", "lsp_safe_to_delete", "lsp_project_maps", "fetch", "agentic_fetch", "todos", "write", "list_mcp_resources", "read_mcp_resource"}, buildAgent.AllowedTools)
+
 	coderAgent, ok := cfg.Agents[AgentCoder]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agent", "bash", "crush_info", "crush_logs", "job_output", "job_kill", "download", "edit", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "fetch", "agentic_fetch", "todos", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
+	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "download", "edit", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_macro_expand", "lsp_safe_to_delete", "lsp_project_maps", "fetch", "agentic_fetch", "todos", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
 
-	taskAgent, ok := cfg.Agents[AgentTask]
+	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)
-	assert.Len(t, taskAgent.AllowedTools, 0)
+	assert.Len(t, exploreAgent.AllowedTools, 0)
+}
+
+func TestConfig_setupAgentsOverlaysCustomAgents(t *testing.T) {
+	cfg := &Config{
+		Options: &Options{
+			DisabledTools: []string{},
+		},
+		Agents: map[string]Agent{
+			"review": {
+				Name:         "Review",
+				Description:  "Custom review agent",
+				Model:        SelectedModelTypeSmall,
+				AllowedTools: []string{"glob", "grep"},
+				ContextPaths: []string{"docs"},
+			},
+		},
+	}
+
+	cfg.SetupAgents()
+	review, ok := cfg.Agents["review"]
+	require.True(t, ok)
+	require.Equal(t, "Review", review.Name)
+	require.Equal(t, SelectedModelTypeSmall, review.Model)
+	require.Equal(t, []string{"glob", "grep"}, review.AllowedTools)
+	require.Contains(t, review.ContextPaths, "docs")
+	require.Equal(t, AgentBuild, cfg.DefaultAgent)
 }
 
 func TestConfig_configureProvidersWithDisabledProvider(t *testing.T) {
@@ -1549,6 +1637,73 @@ func TestConfig_setDefaultsDisableDefaultProvidersEnvVar(t *testing.T) {
 }
 
 func TestConfig_configureSelectedModels(t *testing.T) {
+	t.Run("preserves role model profiles from llm config", func(t *testing.T) {
+		cfg := &Config{
+			Options: &Options{DisableDefaultProviders: true},
+			Providers: csync.NewMapFrom(map[string]ProviderConfig{
+				"waitai-anthropic": {
+					ID:      "waitai-anthropic",
+					Name:    "WaitAI Anthropic",
+					Type:    catwalk.TypeAnthropic,
+					BaseURL: "http://127.0.0.1:43917",
+					APIKey:  "test-key",
+					Models: []catwalk.Model{
+						{ID: "claude-opus-4-7", DefaultMaxTokens: 16000, CanReason: true},
+						{ID: "claude-sonnet-4-6", DefaultMaxTokens: 12000, CanReason: true},
+						{ID: "claude-haiku-4-5-20251001", DefaultMaxTokens: 8000},
+					},
+				},
+			}),
+			Models: map[SelectedModelType]SelectedModel{
+				SelectedModelTypeBuild: {
+					Provider:  "waitai-anthropic",
+					Model:     "claude-opus-4-7",
+					Think:     true,
+					MaxTokens: 16000,
+				},
+				SelectedModelTypeCoder: {
+					Provider:  "waitai-anthropic",
+					Model:     "claude-sonnet-4-6",
+					Think:     true,
+					MaxTokens: 12000,
+				},
+				SelectedModelTypeExplore: {
+					Provider:  "waitai-anthropic",
+					Model:     "claude-haiku-4-5-20251001",
+					MaxTokens: 8000,
+				},
+				SelectedModelTypeLarge: {
+					Provider:  "waitai-anthropic",
+					Model:     "claude-opus-4-7",
+					Think:     true,
+					MaxTokens: 16000,
+				},
+				SelectedModelTypeSmall: {
+					Provider:  "waitai-anthropic",
+					Model:     "claude-haiku-4-5-20251001",
+					MaxTokens: 8000,
+				},
+			},
+		}
+		cfg.setDefaults("/tmp", "")
+		env := env.NewFromMap(map[string]string{})
+		resolver := NewShellVariableResolver(env)
+		err := cfg.configureProviders(testStore(cfg), env, resolver, nil)
+		require.NoError(t, err)
+
+		err = configureSelectedModels(testStore(cfg), nil, false)
+		require.NoError(t, err)
+
+		require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypeBuild].Model)
+		require.Equal(t, "claude-sonnet-4-6", cfg.Models[SelectedModelTypeCoder].Model)
+		require.Equal(t, "claude-haiku-4-5-20251001", cfg.Models[SelectedModelTypeExplore].Model)
+		require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypeLarge].Model)
+		require.Equal(t, "claude-haiku-4-5-20251001", cfg.Models[SelectedModelTypeSmall].Model)
+		require.True(t, cfg.Models[SelectedModelTypeBuild].Think)
+		require.True(t, cfg.Models[SelectedModelTypeCoder].Think)
+		require.False(t, cfg.Models[SelectedModelTypeExplore].Think)
+	})
+
 	t.Run("reload mode should not persist fallback defaults", func(t *testing.T) {
 		dir := t.TempDir()
 		globalPath := filepath.Join(dir, "crush.json")
@@ -2096,4 +2251,28 @@ func TestConfig_configureProviders_UnsetAzureEndpointSkipsProvider(t *testing.T)
 	require.Equal(t, 0, cfg.Providers.Len(), "azure provider with unset endpoint must be skipped")
 	_, exists := cfg.Providers.Get("azure")
 	require.False(t, exists)
+}
+
+func TestContextPathsExist_OnlyClaudeMd(t *testing.T) {
+	t.Run("ignores legacy agent files", func(t *testing.T) {
+		dir := t.TempDir()
+
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(""), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "GEMINI.md"), []byte(""), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "CLAUDE.local.md"), []byte(""), 0o644))
+
+		exists, err := contextPathsExist(dir)
+		require.NoError(t, err)
+		require.False(t, exists)
+	})
+
+	t.Run("accepts claude md", func(t *testing.T) {
+		dir := t.TempDir()
+
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(""), 0o644))
+
+		exists, err := contextPathsExist(dir)
+		require.NoError(t, err)
+		require.True(t, exists)
+	})
 }

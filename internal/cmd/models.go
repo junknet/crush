@@ -88,10 +88,18 @@ crush models gpt5`,
 					fmt.Println(providerID + "/" + modelID)
 				}
 			}
+			for _, line := range agentModelLines(cfg.Config()) {
+				fmt.Println(line)
+			}
 			return nil
 		}
 
 		t := tree.New()
+		agentNode := tree.Root("agents")
+		for _, line := range agentModelLines(cfg.Config()) {
+			agentNode.Child(strings.TrimPrefix(line, "agent "))
+		}
+		t.Child(agentNode)
 		for _, providerID := range providerIDs {
 			providerNode := tree.Root(providerID)
 			for _, modelID := range providerModels[providerID] {
@@ -107,4 +115,40 @@ crush models gpt5`,
 
 func init() {
 	rootCmd.AddCommand(modelsCmd)
+}
+
+func agentModelLines(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	agentIDs := make([]string, 0, len(cfg.Agents))
+	for id, agent := range cfg.Agents {
+		if agent.Disabled {
+			continue
+		}
+		agentIDs = append(agentIDs, id)
+	}
+	sort.Strings(agentIDs)
+
+	lines := make([]string, 0, len(agentIDs))
+	for _, agentID := range agentIDs {
+		agent := cfg.Agents[agentID]
+		selected, ok := cfg.SelectedModelForType(agent.Model)
+		if !ok {
+			continue
+		}
+		providerCfg, ok := cfg.Providers.Get(selected.Provider)
+		if !ok {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf(
+			"agent %s -> %s/%s type=%s profile=%s",
+			agentID,
+			selected.Provider,
+			selected.Model,
+			providerCfg.Type,
+			agent.Model,
+		))
+	}
+	return lines
 }

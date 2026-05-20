@@ -70,7 +70,7 @@ func DefaultKeyMap() KeyMap {
 	km := KeyMap{
 		Quit: key.NewBinding(
 			key.WithKeys("ctrl+c"),
-			key.WithHelp("ctrl+c", "quit"),
+			key.WithHelp("ctrl+c", "clear/quit"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("ctrl+g"),

@@ -40,6 +40,7 @@ import (
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/stringext"
 	"github.com/charmbracelet/crush/internal/version"
@@ -81,6 +82,13 @@ type SessionAgentCall struct {
 	FrequencyPenalty *float64
 	PresencePenalty  *float64
 	NonInteractive   bool
+	TraceRuntime     *agentruntime.RuntimeSession
+	TaskNodeID       string
+	TaskParentID     string
+	TaskProfile      string
+	ProviderID       string
+	ProviderType     string
+	ModelID          string
 }
 
 type SessionAgent interface {
@@ -100,10 +108,11 @@ type SessionAgent interface {
 }
 
 type Model struct {
-	Model      fantasy.LanguageModel
-	CatwalkCfg catwalk.Model
-	ModelCfg   config.SelectedModel
-	FlatRate   bool
+	Model        fantasy.LanguageModel
+	CatwalkCfg   catwalk.Model
+	ModelCfg     config.SelectedModel
+	ProviderType catwalk.Type
+	FlatRate     bool
 }
 
 type sessionAgent struct {
@@ -239,6 +248,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	// Add the session to the context.
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
+	ctx = tools.WithTraceContext(ctx, call.TraceRuntime, call.TaskNodeID, call.TaskParentID, call.TaskProfile, call.ProviderID, call.ProviderType, call.ModelID)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	a.activeRequests.Set(call.SessionID, cancel)
@@ -255,7 +265,28 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 	}()
 
-	history, files := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, call.Attachments...)
+	history, files := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, largeModel.ProviderType, call.Attachments...)
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		roles := make([]string, 0, len(history))
+		emptyCount := 0
+		for _, msg := range history {
+			roles = append(roles, string(msg.Role))
+			if len(msg.Content) == 0 {
+				emptyCount++
+			}
+		}
+		slog.Debug(
+			"Prepared agent payload",
+			"session_id", call.SessionID,
+			"prompt_len", len(call.Prompt),
+			"history_len", len(history),
+			"history_roles", roles,
+			"empty_messages", emptyCount,
+			"file_parts", len(files),
+			"sub_agent", a.isSubAgent,
+			"supports_images", largeModel.CatwalkCfg.SupportsImages,
+		)
+	}
 
 	startTime := time.Now()
 	a.eventPromptSent(call.SessionID)
@@ -297,7 +328,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
 			}
 
-			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
+			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel.ProviderType)
 
 			lastSystemRoleInx := 0
 			systemMessageUpdated := false
@@ -656,7 +687,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
-	aiMsgs, _ := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages)
+	aiMsgs, _ := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, largeModel.ProviderType)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	a.activeRequests.Set(sessionID, cancel)
@@ -811,7 +842,7 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 	return msg, nil
 }
 
-func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
+func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool, providerType catwalk.Type, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
 	if !a.isSubAgent {
 		history = append(history, fantasy.NewUserMessage(
@@ -852,6 +883,9 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		}
 		if m.Role == message.Tool {
 			if msg, ok := filterOrphanedToolResults(m, knownToolCallIDs); ok {
+				if providerType == catwalk.Type(catwalk.InferenceProviderAnthropic) || providerType == catwalk.Type(catwalk.InferenceProviderBedrock) {
+					msg = ensureAnthropicToolResultVisibility(msg)
+				}
 				history = append(history, msg)
 			}
 			continue
@@ -863,6 +897,9 @@ If not, please feel free to ignore. Again do not mention this message to the use
 					aiMsgs[i].Content = filterFileParts(aiMsgs[i].Content)
 				}
 			}
+		}
+		if len(aiMsgs) == 0 || len(aiMsgs[0].Content) == 0 {
+			continue
 		}
 		history = append(history, aiMsgs...)
 
@@ -887,6 +924,22 @@ If not, please feel free to ignore. Again do not mention this message to the use
 
 	return history, files
 }
+
+func ensureAnthropicToolResultVisibility(msg fantasy.Message) fantasy.Message {
+	if msg.Role != fantasy.MessageRoleTool {
+		return msg
+	}
+	for _, part := range msg.Content {
+		switch part.GetType() {
+		case fantasy.ContentTypeText, fantasy.ContentTypeFile:
+			return msg
+		}
+	}
+	msg.Content = append(msg.Content, fantasy.TextPart{Text: anthropicToolResultFallbackText})
+	return msg
+}
+
+const anthropicToolResultFallbackText = "Tool result available."
 
 // filterFileParts removes fantasy.FilePart entries from a slice of message
 // parts. Used to strip image attachments from historical user messages when
@@ -1321,9 +1374,9 @@ func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) mes
 //
 //	BEFORE: [tool result: image data]
 //	AFTER:  [tool result: "Image loaded - see attached"], [user: image attachment]
-func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Message, largeModel Model) []fantasy.Message {
-	providerSupportsMedia := largeModel.ModelCfg.Provider == string(catwalk.InferenceProviderAnthropic) ||
-		largeModel.ModelCfg.Provider == string(catwalk.InferenceProviderBedrock)
+func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Message, providerType catwalk.Type) []fantasy.Message {
+	providerSupportsMedia := providerType == catwalk.Type(catwalk.InferenceProviderAnthropic) ||
+		providerType == catwalk.Type(catwalk.InferenceProviderBedrock)
 
 	if providerSupportsMedia {
 		return messages

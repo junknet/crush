@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/x/vcr"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -680,7 +681,7 @@ func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 	require.NoError(t, err)
 
 	// When supportsImages is false, image attachments should be stripped.
-	history, _ := agent.preparePrompt(msgs, false)
+	history, _ := agent.preparePrompt(msgs, false, catwalk.Type(""))
 	// First message is the system reminder, second is the user message.
 	require.Len(t, history, 2)
 	require.Len(t, history[1].Content, 1)
@@ -690,7 +691,7 @@ func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 	require.Contains(t, text.Text, "important notes")
 
 	// When supportsImages is true, image attachments should remain.
-	history, _ = agent.preparePrompt(msgs, true)
+	history, _ = agent.preparePrompt(msgs, true, catwalk.Type(""))
 	require.Len(t, history, 2)
 	require.Len(t, history[1].Content, 2)
 	text, ok = fantasy.AsMessagePart[fantasy.TextPart](history[1].Content[0])
@@ -699,6 +700,90 @@ func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 	file, ok := fantasy.AsMessagePart[fantasy.FilePart](history[1].Content[1])
 	require.True(t, ok)
 	require.Equal(t, "image.png", file.Filename)
+}
+
+func TestPreparePrompt_DropsUserMessageAfterUnsupportedAttachmentFiltering(t *testing.T) {
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test")
+	require.NoError(t, err)
+
+	// User message with only an image attachment. When the model does not
+	// support images, the message becomes empty and should be dropped rather
+	// than sent to the provider as an invalid empty user message.
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.BinaryContent{Path: "image.png", MIMEType: "image/png", Data: []byte("fake-image-data")},
+		},
+	})
+	require.NoError(t, err)
+
+	msgs, err := env.messages.List(ctx, sess.ID)
+	require.NoError(t, err)
+
+	history, _ := agent.preparePrompt(msgs, false, catwalk.Type(""))
+	require.Len(t, history, 1)
+	require.Equal(t, fantasy.MessageRoleUser, history[0].Role)
+	require.NotEmpty(t, history[0].Content)
+}
+
+func TestPreparePrompt_AddsAnthropicToolResultFallbackText(t *testing.T) {
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test")
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "hello"},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Assistant,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "running a tool"},
+			message.ToolCall{
+				ID:       "call_1",
+				Name:     "view",
+				Input:    `{"path":"README.md"}`,
+				Finished: true,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.Tool,
+		Parts: []message.ContentPart{
+			message.ToolResult{
+				ToolCallID: "call_1",
+				Name:       "view",
+				Content:    "file contents",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	msgs, err := env.messages.List(ctx, sess.ID)
+	require.NoError(t, err)
+
+	history, _ := agent.preparePrompt(msgs, true, catwalk.Type(catwalk.InferenceProviderAnthropic))
+	require.Len(t, history, 4)
+	require.Equal(t, fantasy.MessageRoleTool, history[3].Role)
+	require.GreaterOrEqual(t, len(history[3].Content), 2)
+	text, ok := fantasy.AsMessagePart[fantasy.TextPart](history[3].Content[len(history[3].Content)-1])
+	require.True(t, ok)
+	require.Equal(t, anthropicToolResultFallbackText, text.Text)
 }
 
 func TestPreparePrompt_OrphanedToolUse(t *testing.T) {
@@ -747,7 +832,7 @@ func TestPreparePrompt_OrphanedToolUse(t *testing.T) {
 	msgs, err := env.messages.List(ctx, sess.ID)
 	require.NoError(t, err)
 
-	history, _ := agent.preparePrompt(msgs, true)
+	history, _ := agent.preparePrompt(msgs, true, catwalk.Type(""))
 
 	// The history must contain a synthetic tool result for the orphaned call.
 	found := false
@@ -821,7 +906,7 @@ func TestPreparePrompt_OrphanedToolUseMixed(t *testing.T) {
 	msgs, err := env.messages.List(ctx, sess.ID)
 	require.NoError(t, err)
 
-	history, _ := agent.preparePrompt(msgs, true)
+	history, _ := agent.preparePrompt(msgs, true, catwalk.Type(""))
 
 	// Should have a synthetic result only for the orphaned call.
 	var syntheticCount int
