@@ -88,7 +88,10 @@ const TextareaMaxHeight = 15
 const editorHeightMargin = 2
 
 // TextareaMinHeight is the minimum height of the prompt textarea.
-const TextareaMinHeight = 3
+// One row so the `:::` continuation prompts only appear when the user
+// is actually typing a multi-line message — single-line prompts sit
+// flush against the editor's `>` glyph with no empty `:::` filler.
+const TextareaMinHeight = 1
 
 // uiFocusState represents the current focus state of the UI.
 type uiFocusState uint8

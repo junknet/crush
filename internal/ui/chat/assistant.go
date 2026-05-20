@@ -516,12 +516,16 @@ func (a *AssistantMessageItem) renderMarkdown(content string, width int) string 
 }
 
 func (a *AssistantMessageItem) renderSpinning() string {
+	label := "Working"
 	if a.message.IsThinking() {
-		a.anim.SetLabel("Thinking")
+		label = "Thinking"
 	} else if a.message.IsSummaryMessage {
-		a.anim.SetLabel("Summarizing")
+		label = "Summarizing"
 	}
-	return a.anim.Render()
+	// One-cell braille spinner + label. The anim instance still drives
+	// the tea.Tick cycle so list-cache invalidation continues at 20fps
+	// while spinning; we just discard anim's noisy visual output.
+	return renderBrailleSpinner(a.sty, label)
 }
 
 // renderError renders an error message.
