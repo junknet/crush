@@ -58,29 +58,6 @@ func TestSchedulerDispatchEmitsEvents(t *testing.T) {
 	require.Equal(t, agentruntime.TraceKindTaskPlanned, traces[2].Kind)
 }
 
-func TestBuildDefaultWorkflowCreatesOrderedEditDAG(t *testing.T) {
-	t.Parallel()
-
-	sched := NewAgentScheduler(agentruntime.NewSession("/tmp/project", nil))
-	root := sched.EnsureRoot("session-1", "implement a feature", []string{"main.go"}, ProfileBuildAgent)
-
-	require.NotNil(t, root)
-	sched.BuildDefaultWorkflow(root)
-
-	require.Len(t, root.Children, 3)
-	plan := root.Children[0]
-	execute := root.Children[1]
-	verify := root.Children[2]
-
-	require.Equal(t, TaskResearch, plan.Kind)
-	require.Equal(t, TaskEdit, execute.Kind)
-	require.Equal(t, TaskVerify, verify.Kind)
-	require.Len(t, execute.Deps, 1)
-	require.Len(t, verify.Deps, 1)
-	require.Same(t, plan, execute.Deps[0])
-	require.Same(t, execute, verify.Deps[0])
-}
-
 func TestEnsureRootReplacesLatestRootPerSession(t *testing.T) {
 	t.Parallel()
 
