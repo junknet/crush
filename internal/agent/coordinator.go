@@ -1271,6 +1271,11 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.ToolResponse{}, fmt.Errorf("create session: %w", err)
 	}
 
+	// Phase 6: notify sidebar/listeners that a sub-agent has been dispatched.
+	// All three Started/Finished/Failed events share SubAgentToolCallID so the
+	// UI can update a single row in place.
+	c.publishSubAgentEvent(notify.TypeSubAgentStarted, params, session.ID, "")
+
 	// Call session setup function if provided
 	if params.SessionSetup != nil {
 		params.SessionSetup(session.ID)
@@ -1365,18 +1370,38 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	})
 
 	if err := taskScheduler.Dispatch(ctx, taskNode, taskWorker); err != nil {
+		c.publishSubAgentEvent(notify.TypeSubAgentFailed, params, session.ID, err.Error())
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
 	}
 	if result == nil {
+		c.publishSubAgentEvent(notify.TypeSubAgentFailed, params, session.ID, "sub-agent returned no result")
 		return fantasy.ToolResponse{}, errors.New("sub-agent returned no result")
 	}
 
 	// Update parent session cost
 	if err := c.updateParentSessionCost(ctx, session.ID, params.SessionID); err != nil {
+		c.publishSubAgentEvent(notify.TypeSubAgentFailed, params, session.ID, err.Error())
 		return fantasy.ToolResponse{}, err
 	}
 
+	c.publishSubAgentEvent(notify.TypeSubAgentFinished, params, session.ID, "")
 	return fantasy.NewTextResponse(result.Response.Content.Text()), nil
+}
+
+// publishSubAgentEvent fires a Started/Finished/Failed notification for the
+// given sub-agent run. Safe to call with nil notify publisher (no-op).
+func (c *coordinator) publishSubAgentEvent(t notify.Type, params subAgentParams, sessionID, errText string) {
+	if c.notify == nil {
+		return
+	}
+	c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+		SessionID:          sessionID,
+		SessionTitle:       params.SessionTitle,
+		Type:               t,
+		SubAgentToolCallID: params.ToolCallID,
+		SubAgentPrompt:     params.Prompt,
+		SubAgentError:      errText,
+	})
 }
 
 // updateParentSessionCost accumulates the cost from a child session to its parent session.

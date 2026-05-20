@@ -200,6 +200,12 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 		sidebarParts = append(sidebarParts, "", skillsSection)
 	}
 
+	// Phase 6: surface live sub-agent activity below skills. Hidden when
+	// there's no history.
+	if subAgentSection := m.subAgentInfo(width, subAgentHistoryMax); subAgentSection != "" {
+		sidebarParts = append(sidebarParts, "", subAgentSection)
+	}
+
 	uv.NewStyledString(
 		lipgloss.NewStyle().
 			MaxWidth(width).
