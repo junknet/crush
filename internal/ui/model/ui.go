@@ -38,6 +38,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/ui/anim"
@@ -116,6 +117,8 @@ type openEditorMsg struct {
 type (
 	// cancelTimerExpiredMsg is sent when the cancel timer expires.
 	cancelTimerExpiredMsg struct{}
+	// ctrlCTimerExpiredMsg is sent when the Ctrl+C quit arm expires.
+	ctrlCTimerExpiredMsg struct{}
 	// userCommandsLoadedMsg is sent when user commands are loaded.
 	userCommandsLoadedMsg struct {
 		Commands []commands.CustomCommand
@@ -193,6 +196,10 @@ type UI struct {
 
 	// isCanceling tracks whether the user has pressed escape once to cancel.
 	isCanceling bool
+	// ctrlCArmed tracks whether a second Ctrl+C should quit the app.
+	ctrlCArmed bool
+	// ctrlCArmedAt records when the quit arm was last activated.
+	ctrlCArmedAt time.Time
 
 	header *header
 
@@ -659,6 +666,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case mcp.EventResourcesListChanged:
 			return m, handleMCPResourcesEvent(m.com.Workspace, msg.Payload.Name)
 		}
+	case pubsub.Event[scheduler.Event]:
+		if cmd := m.handleSchedulerEvent(msg.Payload); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case pubsub.Event[permission.PermissionRequest]:
 		if cmd := m.openPermissionsDialog(msg.Payload); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -673,6 +684,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handlePermissionNotification(msg.Payload)
 	case cancelTimerExpiredMsg:
 		m.isCanceling = false
+	case ctrlCTimerExpiredMsg:
+		m.ctrlCArmed = false
+		m.ctrlCArmedAt = time.Time{}
 	case tea.TerminalVersionMsg:
 		termVersion := strings.ToLower(msg.Name)
 		// Only enable progress bar for the following terminals.
@@ -1344,9 +1358,15 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 
 	// Command dialog messages.
 	case dialog.ActionToggleYoloMode:
-		yolo := !m.com.Workspace.PermissionSkipRequests()
-		m.com.Workspace.PermissionSetSkipRequests(yolo)
-		m.setEditorPrompt(yolo)
+		m.com.Workspace.PermissionSetSkipRequests(true)
+		m.setEditorPrompt(true)
+		if m.status != nil {
+			m.status.SetInfoMsg(util.InfoMsg{
+				Type: util.InfoTypeInfo,
+				Msg:  "Permissions are always open",
+				TTL:  3 * time.Second,
+			})
+		}
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleNotifications:
 		cfg := m.com.Config()
@@ -1411,7 +1431,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 				return util.ReportError(errors.New("configuration not found"))()
 			}
 
-			agentCfg, ok := cfg.Agents[config.AgentCoder]
+			agentCfg, ok := cfg.Agents[config.AgentBuild]
 			if !ok {
 				return util.ReportError(errors.New("agent configuration not found"))()
 			}
@@ -1482,7 +1502,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			break
 		}
 
-		agentCfg, ok := cfg.Agents[config.AgentCoder]
+		agentCfg, ok := cfg.Agents[config.AgentBuild]
 		if !ok {
 			cmds = append(cmds, util.ReportError(errors.New("agent configuration not found")))
 			break
@@ -1792,18 +1812,25 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		return false
 	}
 
-	if key.Matches(msg, m.keyMap.Quit) && !m.dialog.ContainsDialog(dialog.QuitID) {
-		// Always handle quit keys first
-		if cmd := m.openQuitDialog(); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-
-		return tea.Batch(cmds...)
-	}
-
 	// Route all messages to dialog if one is open.
 	if m.dialog.HasDialogs() {
 		return m.handleDialogMsg(msg)
+	}
+
+	if key.Matches(msg, m.keyMap.Quit) {
+		if m.ctrlCArmed && !m.ctrlCArmedAt.IsZero() && time.Since(m.ctrlCArmedAt) <= ctrlCTimerDuration {
+			m.ctrlCArmed = false
+			m.ctrlCArmedAt = time.Time{}
+			return tea.Quit
+		}
+
+		if cmd := m.clearComposer(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		m.ctrlCArmed = true
+		m.ctrlCArmedAt = time.Now()
+		cmds = append(cmds, util.ReportWarn("Press ctrl+c again to quit"), ctrlCTimerCmd())
+		return tea.Batch(cmds...)
 	}
 
 	// Handle cancel key when agent is busy.
@@ -2494,7 +2521,7 @@ func (m *UI) currentModelSupportsImages() bool {
 	if cfg == nil {
 		return false
 	}
-	agentCfg, ok := cfg.Agents[config.AgentCoder]
+	agentCfg, ok := cfg.Agents[config.AgentBuild]
 	if !ok {
 		return false
 	}
@@ -3193,6 +3220,15 @@ func cancelTimerCmd() tea.Cmd {
 	})
 }
 
+const ctrlCTimerDuration = 2 * time.Second
+
+// ctrlCTimerCmd creates a command that expires the Ctrl+C quit arm.
+func ctrlCTimerCmd() tea.Cmd {
+	return tea.Tick(ctrlCTimerDuration, func(time.Time) tea.Msg {
+		return ctrlCTimerExpiredMsg{}
+	})
+}
+
 // cancelAgent handles the cancel key press. The first press sets isCanceling to true
 // and starts a timer. The second press (before the timer expires) actually
 // cancels the agent.
@@ -3224,6 +3260,27 @@ func (m *UI) cancelAgent() tea.Cmd {
 	// First escape press - set canceling state and start timer.
 	m.isCanceling = true
 	return cancelTimerCmd()
+}
+
+// clearComposer clears the current draft, attachments, and completion state.
+func (m *UI) clearComposer() tea.Cmd {
+	prevHeight := m.textarea.Height()
+	m.textarea.Reset()
+	if m.attachments != nil {
+		m.attachments.Reset()
+	}
+	if m.completions != nil {
+		m.closeCompletions()
+	} else {
+		m.completionsOpen = false
+		m.completionsQuery = ""
+		m.completionsStartIndex = 0
+	}
+	m.historyReset()
+	if m.status == nil || m.chat == nil {
+		return nil
+	}
+	return m.handleTextareaHeightChange(prevHeight)
 }
 
 // openDialog opens a dialog by its ID.
@@ -3436,7 +3493,7 @@ func (m *UI) handleReAuthenticate(providerID string) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	agentCfg, ok := cfg.Agents[config.AgentCoder]
+	agentCfg, ok := cfg.Agents[config.AgentBuild]
 	if !ok {
 		return nil
 	}
@@ -3474,6 +3531,7 @@ func (m *UI) newSession() tea.Cmd {
 
 // handlePasteMsg handles a paste message.
 func (m *UI) handlePasteMsg(msg tea.PasteMsg) tea.Cmd {
+	m.ctrlCArmed = false
 	// Normalize \r\n before the textarea sanitizer sees it.
 	msg.Content = strings.ReplaceAll(msg.Content, "\r\n", "\n")
 
@@ -3815,6 +3873,86 @@ func (m *UI) disableDockerMCP() tea.Msg {
 	}
 
 	return util.NewInfoMsg("Docker MCP disabled successfully")
+}
+
+func (m *UI) handleSchedulerEvent(ev scheduler.Event) tea.Cmd {
+	if m.status == nil {
+		return nil
+	}
+	if !m.shouldHandleSchedulerEvent(ev) {
+		return nil
+	}
+
+	taskLabel := ev.Goal
+	if taskLabel == "" {
+		taskLabel = ev.NodeID
+	}
+	if len(ev.Scope) > 0 && taskLabel != "" {
+		taskLabel = fmt.Sprintf("%s (%s)", taskLabel, strings.Join(ev.Scope, ", "))
+	}
+
+	switch ev.Kind {
+	case scheduler.EventTaskPlanned:
+		m.status.SetInfoMsg(util.InfoMsg{
+			Type: util.InfoTypeInfo,
+			Msg:  "Task planned: " + taskLabel,
+			TTL:  3 * time.Second,
+		})
+		return clearInfoMsgCmd(3 * time.Second)
+	case scheduler.EventTaskStarted:
+		m.status.SetInfoMsg(util.InfoMsg{
+			Type: util.InfoTypeInfo,
+			Msg:  "Task started: " + taskLabel,
+			TTL:  3 * time.Second,
+		})
+		return clearInfoMsgCmd(3 * time.Second)
+	case scheduler.EventTaskProgress:
+		msg := ev.Status
+		if msg == "" {
+			msg = taskLabel
+		}
+		m.status.SetInfoMsg(util.InfoMsg{
+			Type: util.InfoTypeInfo,
+			Msg:  "Task progress: " + msg,
+			TTL:  3 * time.Second,
+		})
+		return clearInfoMsgCmd(3 * time.Second)
+	case scheduler.EventTaskFinished:
+		m.status.SetInfoMsg(util.InfoMsg{
+			Type: util.InfoTypeSuccess,
+			Msg:  "Task finished: " + taskLabel,
+			TTL:  4 * time.Second,
+		})
+		return clearInfoMsgCmd(4 * time.Second)
+	case scheduler.EventTaskFailed:
+		msg := ev.Error
+		if msg == "" {
+			msg = "Task failed: " + taskLabel
+		}
+		m.status.SetInfoMsg(util.InfoMsg{
+			Type: util.InfoTypeError,
+			Msg:  msg,
+			TTL:  6 * time.Second,
+		})
+		return clearInfoMsgCmd(6 * time.Second)
+	default:
+		m.status.SetInfoMsg(util.InfoMsg{
+			Type: util.InfoTypeInfo,
+			Msg:  "Task event: " + taskLabel,
+			TTL:  3 * time.Second,
+		})
+		return clearInfoMsgCmd(3 * time.Second)
+	}
+}
+
+func (m *UI) shouldHandleSchedulerEvent(ev scheduler.Event) bool {
+	if m == nil || m.session == nil {
+		return true
+	}
+	if ev.ConversationSessionID == "" {
+		return true
+	}
+	return ev.ConversationSessionID == m.session.ID
 }
 
 // renderLogo renders the Crush logo with the given styles and dimensions.

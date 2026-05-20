@@ -90,9 +90,9 @@ func TestRunSubAgent(t *testing.T) {
 		parentSession, err := env.sessions.Create(t.Context(), "Parent")
 		require.NoError(t, err)
 
+		calls := make([]SessionAgentCall, 0, 3)
 		agent := newMockAgent(providerID, 4096, func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
-			assert.Equal(t, "do something", call.Prompt)
-			assert.Equal(t, int64(4096), call.MaxOutputTokens)
+			calls = append(calls, call)
 			return agentResultWithText("done"), nil
 		})
 
@@ -107,6 +107,13 @@ func TestRunSubAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "done", resp.Content)
 		assert.False(t, resp.IsError)
+		require.Len(t, calls, 3)
+		assert.Equal(t, "Plan the implementation for: do something", calls[0].Prompt)
+		assert.Equal(t, int64(1024), calls[0].MaxOutputTokens)
+		assert.Equal(t, "do something\n\nImplementation plan:\ndone", calls[1].Prompt)
+		assert.Equal(t, int64(4096), calls[1].MaxOutputTokens)
+		assert.Equal(t, "Verify the result of: do something\n\nImplementation output:\ndone", calls[2].Prompt)
+		assert.Equal(t, int64(1024), calls[2].MaxOutputTokens)
 	})
 
 	t.Run("ModelCfg.MaxTokens overrides default", func(t *testing.T) {
@@ -116,6 +123,7 @@ func TestRunSubAgent(t *testing.T) {
 		parentSession, err := env.sessions.Create(t.Context(), "Parent")
 		require.NoError(t, err)
 
+		calls := make([]SessionAgentCall, 0, 3)
 		agent := &mockSessionAgent{
 			model: Model{
 				CatwalkCfg: catwalk.Model{
@@ -127,7 +135,7 @@ func TestRunSubAgent(t *testing.T) {
 				},
 			},
 			runFunc: func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
-				assert.Equal(t, int64(8192), call.MaxOutputTokens)
+				calls = append(calls, call)
 				return agentResultWithText("ok"), nil
 			},
 		}
@@ -142,6 +150,10 @@ func TestRunSubAgent(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "ok", resp.Content)
+		require.Len(t, calls, 3)
+		assert.Equal(t, int64(2048), calls[0].MaxOutputTokens)
+		assert.Equal(t, int64(8192), calls[1].MaxOutputTokens)
+		assert.Equal(t, int64(2048), calls[2].MaxOutputTokens)
 	})
 
 	t.Run("session creation failure with canceled context", func(t *testing.T) {
@@ -249,16 +261,20 @@ func TestRunSubAgent(t *testing.T) {
 		parentSession, err := env.sessions.Create(t.Context(), "Parent")
 		require.NoError(t, err)
 
+		callCount := 0
 		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			callCount++
 			// Simulate the agent incurring cost by updating the child session.
-			childSession, err := env.sessions.Get(ctx, call.SessionID)
-			if err != nil {
-				return nil, err
-			}
-			childSession.Cost = 0.05
-			_, err = env.sessions.Save(ctx, childSession)
-			if err != nil {
-				return nil, err
+			if callCount == 2 {
+				childSession, err := env.sessions.Get(ctx, call.SessionID)
+				if err != nil {
+					return nil, err
+				}
+				childSession.Cost = 0.05
+				_, err = env.sessions.Save(ctx, childSession)
+				if err != nil {
+					return nil, err
+				}
 			}
 			return agentResultWithText("ok"), nil
 		})

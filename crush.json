@@ -1,5 +1,61 @@
 {
   "$schema": "https://charm.land/crush.json",
+  "providers": {
+    "waitai-openai": {
+      "name": "WaitAI OpenAI",
+      "type": "openai-compat",
+      "base_url": "${WAITAI_CRUSH_BASE:-http://127.0.0.1:43917}/v1",
+      "api_key": "${WAITAI_API_KEY:-${NCODER_WAITAI_KEY:?set WAITAI_API_KEY or NCODER_WAITAI_KEY}}",
+      "models": [
+        {
+          "id": "gpt-5.5",
+          "name": "GPT 5.5",
+          "cost_per_1m_in": 1.25,
+          "cost_per_1m_out": 10,
+          "cost_per_1m_in_cached": 0.125,
+          "cost_per_1m_out_cached": 1.25,
+          "context_window": 1000000,
+          "default_max_tokens": 16384,
+          "can_reason": true,
+          "default_reasoning_effort": "low"
+        }
+      ]
+    },
+    "waitai-anthropic": {
+      "name": "WaitAI Anthropic",
+      "type": "anthropic",
+      "base_url": "${WAITAI_CRUSH_BASE:-http://127.0.0.1:43917}",
+      "api_key": "${WAITAI_API_KEY:-${NCODER_WAITAI_KEY:?set WAITAI_API_KEY or NCODER_WAITAI_KEY}}",
+      "models": [
+        {
+          "id": "claude-opus-4-7",
+          "name": "Claude Opus 4.7",
+          "cost_per_1m_in": 15,
+          "cost_per_1m_out": 75,
+          "cost_per_1m_in_cached": 1.5,
+          "cost_per_1m_out_cached": 18.75,
+          "context_window": 200000,
+          "default_max_tokens": 16384,
+          "can_reason": true,
+          "supports_attachments": true
+        }
+      ]
+    }
+  },
+  "models": {
+    "large": {
+      "model": "claude-opus-4-7",
+      "provider": "waitai-anthropic",
+      "think": true,
+      "max_tokens": 16384
+    },
+    "small": {
+      "model": "gpt-5.5",
+      "provider": "waitai-openai",
+      "reasoning_effort": "low",
+      "max_tokens": 16384
+    }
+  },
   "lsp": {
     "gopls": {
       "options": {
@@ -35,6 +91,22 @@
         ],
         "semanticTokens": true
       }
+    },
+    "nimlsp": {
+      "command": "/home/junknet/linege/nim-src/langserver/nimlangserver",
+      "env": {
+        "PATH": "/home/junknet/linege/nim-src/Nim/bin:${PATH}"
+      },
+      "filetypes": [
+        "nim",
+        "nims",
+        "nimble"
+      ],
+      "root_markers": [
+        "*.nimble",
+        "config.nims",
+        ".git"
+      ]
     }
   }
 }

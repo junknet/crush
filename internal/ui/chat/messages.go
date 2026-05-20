@@ -344,13 +344,12 @@ func (a *AssistantInfoItem) renderContent(width int) string {
 	if model == nil {
 		model = &catwalk.Model{Name: "Unknown Model"}
 	}
-	modelFormatted := a.sty.Messages.AssistantInfoModel.Render(model.Name)
 	providerName := a.message.Provider
 	if providerConfig, ok := a.cfg.Providers.Get(a.message.Provider); ok {
 		providerName = providerConfig.Name
 	}
-	provider := a.sty.Messages.AssistantInfoProvider.Render(fmt.Sprintf("via %s", providerName))
-	assistant := fmt.Sprintf("%s %s %s %s", icon, modelFormatted, provider, infoMsg)
+	modelFormatted := a.sty.Messages.AssistantInfoModel.Render(common.FormatModelDisplayName(providerName, model.Name))
+	assistant := fmt.Sprintf("%s %s %s", icon, modelFormatted, infoMsg)
 	return common.Section(a.sty, assistant, width)
 }
 

@@ -33,6 +33,15 @@ func taskPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 	return systemPrompt, nil
 }
 
+func promptForAgentRole(role string, opts ...prompt.Option) (*prompt.Prompt, error) {
+	switch role {
+	case config.AgentExplore:
+		return taskPrompt(opts...)
+	default:
+		return coderPrompt(opts...)
+	}
+}
+
 func InitializePrompt(cfg *config.ConfigStore) (string, error) {
 	systemPrompt, err := prompt.NewPrompt("initialize", string(initializePromptTmpl))
 	if err != nil {

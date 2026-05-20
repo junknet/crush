@@ -22,26 +22,11 @@ import (
 const (
 	appName              = "crush"
 	defaultDataDirectory = ".crush"
-	defaultInitializeAs  = "AGENTS.md"
+	defaultInitializeAs  = "CLAUDE.md"
 )
 
 var defaultContextPaths = []string{
-	".github/copilot-instructions.md",
-	".cursorrules",
-	".cursor/rules/",
 	"CLAUDE.md",
-	"CLAUDE.local.md",
-	"GEMINI.md",
-	"gemini.md",
-	"crush.md",
-	"crush.local.md",
-	"Crush.md",
-	"Crush.local.md",
-	"CRUSH.md",
-	"CRUSH.local.md",
-	"AGENTS.md",
-	"agents.md",
-	"Agents.md",
 }
 
 type SelectedModelType string
@@ -52,13 +37,18 @@ func (s SelectedModelType) String() string {
 }
 
 const (
-	SelectedModelTypeLarge SelectedModelType = "large"
-	SelectedModelTypeSmall SelectedModelType = "small"
+	SelectedModelTypeLarge   SelectedModelType = "large"
+	SelectedModelTypeSmall   SelectedModelType = "small"
+	SelectedModelTypeBuild   SelectedModelType = "build"
+	SelectedModelTypeCoder   SelectedModelType = "coder"
+	SelectedModelTypeExplore SelectedModelType = "explore"
 )
 
 const (
-	AgentCoder string = "coder"
-	AgentTask  string = "task"
+	AgentBuild   string = "build"
+	AgentCoder   string = "coder"
+	AgentExplore string = "explore"
+	AgentTask           = AgentCoder
 )
 
 type SelectedModel struct {
@@ -259,7 +249,7 @@ func (Attribution) JSONSchemaExtend(schema *jsonschema.Schema) {
 }
 
 type Options struct {
-	ContextPaths         []string    `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
+	ContextPaths         []string    `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=CLAUDE.md"`
 	SkillsPaths          []string    `json:"skills_paths,omitempty" jsonschema:"description=Paths to directories containing Agent Skills (folders with SKILL.md files),example=~/.config/crush/skills,example=./skills"`
 	TUI                  *TUIOptions `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
 	Debug                bool        `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
@@ -275,7 +265,7 @@ type Options struct {
 	DisableDefaultProviders   bool         `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled\\, providers must be fully specified in the config file with base_url\\, models\\, and api_key - no merging with defaults occurs,default=false"`
 	Attribution               *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
 	DisableMetrics            bool         `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
-	InitializeAs              string       `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
+	InitializeAs              string       `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=CLAUDE.md,example=CLAUDE.md,example=docs/LLMs.md"`
 	AutoLSP                   *bool        `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
 	Progress                  *bool        `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
@@ -499,7 +489,7 @@ type Agent struct {
 	// This is the id of the system prompt used by the agent
 	Disabled bool `json:"disabled,omitempty"`
 
-	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=large,enum=small,default=large"`
+	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=build,enum=coder,enum=explore,enum=large,enum=small,default=build"`
 
 	// The available tools for the agent
 	//  if this is nil, all tools are available
@@ -565,8 +555,8 @@ func (h *HookConfig) TimeoutDuration() time.Duration {
 type Config struct {
 	Schema string `json:"$schema,omitempty"`
 
-	// We currently only support large/small as values here.
-	Models map[SelectedModelType]SelectedModel `json:"models,omitempty" jsonschema:"description=Model configurations for different model types,example={\"large\":{\"model\":\"gpt-4o\",\"provider\":\"openai\"}}"`
+	// Model profiles used by the built-in roles and legacy aliases.
+	Models map[SelectedModelType]SelectedModel `json:"models,omitempty" jsonschema:"description=Model configurations for different model types,example={\"build\":{\"model\":\"claude-opus-4-7\",\"provider\":\"waitai-anthropic\"}}"`
 
 	// Recently used models stored in the data directory config.
 	RecentModels map[SelectedModelType][]SelectedModel `json:"recent_models,omitempty" jsonschema:"-"`
@@ -586,7 +576,8 @@ type Config struct {
 
 	Hooks map[string][]HookConfig `json:"hooks,omitempty" jsonschema:"description=User-defined shell commands that fire on hook events (e.g. PreToolUse)"`
 
-	Agents map[string]Agent `json:"-"`
+	DefaultAgent string           `json:"default_agent,omitempty" jsonschema:"description=Default primary agent name,example=coder"`
+	Agents       map[string]Agent `json:"agents,omitempty" jsonschema:"description=Agent configurations"`
 }
 
 func (c *Config) EnabledProviders() []ProviderConfig {
@@ -618,7 +609,17 @@ func (c *Config) GetModel(provider, model string) *catwalk.Model {
 func (c *Config) GetProviderForModel(modelType SelectedModelType) *ProviderConfig {
 	model, ok := c.Models[modelType]
 	if !ok {
-		return nil
+		switch modelType {
+		case SelectedModelTypeBuild, SelectedModelTypeLarge:
+			model, ok = c.Models[SelectedModelTypeLarge]
+		case SelectedModelTypeCoder:
+			model, ok = c.Models[SelectedModelTypeLarge]
+		case SelectedModelTypeExplore, SelectedModelTypeSmall:
+			model, ok = c.Models[SelectedModelTypeSmall]
+		}
+		if !ok {
+			return nil
+		}
 	}
 	if providerConfig, ok := c.Providers.Get(model.Provider); ok {
 		return &providerConfig
@@ -627,27 +628,101 @@ func (c *Config) GetProviderForModel(modelType SelectedModelType) *ProviderConfi
 }
 
 func (c *Config) GetModelByType(modelType SelectedModelType) *catwalk.Model {
-	model, ok := c.Models[modelType]
+	selected, ok := c.SelectedModelForType(modelType)
 	if !ok {
 		return nil
 	}
-	return c.GetModel(model.Provider, model.Model)
+	return c.GetModel(selected.Provider, selected.Model)
 }
 
 func (c *Config) LargeModel() *catwalk.Model {
-	model, ok := c.Models[SelectedModelTypeLarge]
-	if !ok {
-		return nil
-	}
-	return c.GetModel(model.Provider, model.Model)
+	return c.BuildModel()
 }
 
 func (c *Config) SmallModel() *catwalk.Model {
-	model, ok := c.Models[SelectedModelTypeSmall]
-	if !ok {
-		return nil
+	return c.ExploreModel()
+}
+
+// BuildModel returns the configured model for the build role.
+func (c *Config) BuildModel() *catwalk.Model {
+	return c.getModelByTypeWithFallbacks(SelectedModelTypeBuild, SelectedModelTypeLarge)
+}
+
+// CoderModel returns the configured model for the coder role.
+func (c *Config) CoderModel() *catwalk.Model {
+	return c.getModelByTypeWithFallbacks(SelectedModelTypeCoder, SelectedModelTypeBuild, SelectedModelTypeLarge)
+}
+
+// ExploreModel returns the configured model for the explore role.
+func (c *Config) ExploreModel() *catwalk.Model {
+	return c.getModelByTypeWithFallbacks(SelectedModelTypeExplore, SelectedModelTypeSmall, SelectedModelTypeBuild, SelectedModelTypeLarge)
+}
+
+func (c *Config) getModelByTypeWithFallbacks(modelTypes ...SelectedModelType) *catwalk.Model {
+	for _, modelType := range modelTypes {
+		model, ok := c.Models[modelType]
+		if !ok {
+			continue
+		}
+		if resolved := c.GetModel(model.Provider, model.Model); resolved != nil {
+			return resolved
+		}
 	}
-	return c.GetModel(model.Provider, model.Model)
+	return nil
+}
+
+// SelectedModelForType returns the configured model selection for a model type.
+func (c *Config) SelectedModelForType(modelType SelectedModelType) (SelectedModel, bool) {
+	if c == nil {
+		return SelectedModel{}, false
+	}
+	switch modelType {
+	case SelectedModelTypeBuild:
+		if model, ok := c.Models[SelectedModelTypeBuild]; ok {
+			return model, true
+		}
+		if model, ok := c.Models[SelectedModelTypeLarge]; ok {
+			return model, true
+		}
+	case SelectedModelTypeCoder:
+		if model, ok := c.Models[SelectedModelTypeCoder]; ok {
+			return model, true
+		}
+		if model, ok := c.Models[SelectedModelTypeBuild]; ok {
+			return model, true
+		}
+		if model, ok := c.Models[SelectedModelTypeLarge]; ok {
+			return model, true
+		}
+	case SelectedModelTypeExplore:
+		if model, ok := c.Models[SelectedModelTypeExplore]; ok {
+			return model, true
+		}
+		if model, ok := c.Models[SelectedModelTypeSmall]; ok {
+			return model, true
+		}
+		if model, ok := c.Models[SelectedModelTypeBuild]; ok {
+			return model, true
+		}
+		if model, ok := c.Models[SelectedModelTypeLarge]; ok {
+			return model, true
+		}
+	case SelectedModelTypeLarge:
+		if model, ok := c.Models[SelectedModelTypeLarge]; ok {
+			return model, true
+		}
+		if model, ok := c.Models[SelectedModelTypeBuild]; ok {
+			return model, true
+		}
+	case SelectedModelTypeSmall:
+		if model, ok := c.Models[SelectedModelTypeSmall]; ok {
+			return model, true
+		}
+		if model, ok := c.Models[SelectedModelTypeExplore]; ok {
+			return model, true
+		}
+	}
+	return SelectedModel{}, false
 }
 
 const maxRecentModelsPerType = 5
@@ -656,6 +731,7 @@ func allToolNames() []string {
 	return []string{
 		"agent",
 		"bash",
+		"command_dag",
 		"crush_info",
 		"crush_logs",
 		"job_output",
@@ -666,6 +742,9 @@ func allToolNames() []string {
 		"lsp_diagnostics",
 		"lsp_references",
 		"lsp_restart",
+		"lsp_macro_expand",
+		"lsp_safe_to_delete",
+		"lsp_project_maps",
 		"fetch",
 		"agentic_fetch",
 		"glob",
@@ -707,30 +786,103 @@ func filterSlice(data []string, mask []string, include bool) []string {
 }
 
 func (c *Config) SetupAgents() {
+	if c.Options == nil {
+		c.Options = &Options{}
+	}
 	allowedTools := resolveAllowedTools(allToolNames(), c.Options.DisabledTools)
 
-	agents := map[string]Agent{
-		AgentCoder: {
-			ID:           AgentCoder,
-			Name:         "Coder",
-			Description:  "An agent that helps with executing coding tasks.",
-			Model:        SelectedModelTypeLarge,
+	defaultAgents := map[string]Agent{
+		AgentBuild: {
+			ID:           AgentBuild,
+			Name:         "Build",
+			Description:  "A main-brain agent that plans and reviews changes.",
+			Model:        SelectedModelTypeBuild,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: allowedTools,
 		},
-
-		AgentTask: {
-			ID:           AgentTask,
-			Name:         "Task",
-			Description:  "An agent that helps with searching for context and finding implementation details.",
-			Model:        SelectedModelTypeLarge,
+		AgentCoder: {
+			ID:           AgentCoder,
+			Name:         "Coder",
+			Description:  "An agent that executes coding tasks.",
+			Model:        SelectedModelTypeCoder,
+			ContextPaths: c.Options.ContextPaths,
+			AllowedTools: allowedTools,
+		},
+		AgentExplore: {
+			ID:           AgentExplore,
+			Name:         "Explore",
+			Description:  "A fast tool-oriented agent for search and inspection.",
+			Model:        SelectedModelTypeExplore,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: resolveReadOnlyTools(allowedTools),
 			// NO MCPs or LSPs by default
 			AllowedMCP: map[string][]string{},
 		},
 	}
+
+	agents := make(map[string]Agent, len(defaultAgents)+len(c.Agents))
+	for name, agent := range defaultAgents {
+		agents[name] = agent
+	}
+
+	for name, agent := range c.Agents {
+		if agent.Disabled {
+			if name == AgentBuild || name == AgentCoder || name == AgentExplore {
+				continue
+			}
+			delete(agents, name)
+			continue
+		}
+
+		current, ok := agents[name]
+		if !ok {
+			current = Agent{
+				ID:           name,
+				Name:         name,
+				Description:  agent.Description,
+				Model:        cmp.Or(agent.Model, defaultAgentModelType(name)),
+				AllowedTools: allowedTools,
+				AllowedMCP:   map[string][]string{},
+				ContextPaths: c.Options.ContextPaths,
+				Disabled:     false,
+			}
+		}
+		current.ID = cmp.Or(agent.ID, current.ID)
+		current.Name = cmp.Or(agent.Name, current.Name)
+		current.Description = cmp.Or(agent.Description, current.Description)
+		if agent.Model != "" {
+			current.Model = agent.Model
+		}
+		if agent.AllowedTools != nil {
+			current.AllowedTools = agent.AllowedTools
+		}
+		if agent.AllowedMCP != nil {
+			current.AllowedMCP = agent.AllowedMCP
+		}
+		if agent.ContextPaths != nil {
+			current.ContextPaths = agent.ContextPaths
+		}
+		current.Disabled = agent.Disabled
+		agents[name] = current
+	}
+
+	if current, ok := agents[c.DefaultAgent]; c.DefaultAgent == "" || !ok || current.Disabled {
+		c.DefaultAgent = AgentBuild
+	}
 	c.Agents = agents
+}
+
+func defaultAgentModelType(agentName string) SelectedModelType {
+	switch agentName {
+	case AgentBuild:
+		return SelectedModelTypeBuild
+	case AgentCoder:
+		return SelectedModelTypeCoder
+	case AgentExplore:
+		return SelectedModelTypeExplore
+	default:
+		return SelectedModelTypeBuild
+	}
 }
 
 func (c *ProviderConfig) TestConnection(resolver VariableResolver) error {

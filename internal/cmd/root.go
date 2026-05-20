@@ -32,6 +32,7 @@ import (
 	crushlog "github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/projects"
 	"github.com/charmbracelet/crush/internal/proto"
+	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/server"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -52,6 +53,7 @@ func init() {
 	rootCmd.PersistentFlags().StringP("cwd", "c", "", "Current working directory")
 	rootCmd.PersistentFlags().StringP("data-dir", "D", "", "Custom crush data directory")
 	rootCmd.PersistentFlags().BoolP("debug", "d", false, "Debug")
+	rootCmd.PersistentFlags().String("trace-file", "", "Write runtime trace entries to this JSONL file")
 	rootCmd.PersistentFlags().StringVarP(&clientHost, "host", "H", server.DefaultHost(), "Connect to a specific crush server host (for advanced users)")
 	rootCmd.Flags().BoolP("help", "h", false, "Help")
 	rootCmd.Flags().BoolP("yolo", "y", false, "Automatically accept all permissions (dangerous mode)")
@@ -298,7 +300,30 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 	}
 
 	ws := workspace.NewAppWorkspace(appInstance, store)
-	cleanup := func() { appInstance.Shutdown() }
+	traceFile, _ := cmd.Flags().GetString("trace-file")
+	cleanup := func() {
+		appInstance.Shutdown()
+		if traceFile == "" {
+			return
+		}
+		traceSource, ok := appInstance.AgentCoordinator.(interface {
+			TraceEntries() []agentruntime.TaskTrace
+		})
+		if !ok {
+			slog.Warn("Trace file requested but coordinator does not expose trace entries", "path", traceFile)
+			return
+		}
+		traces := traceSource.TraceEntries()
+		if len(traces) == 0 {
+			slog.Info("No runtime trace entries recorded", "path", traceFile)
+			return
+		}
+		if err := agentruntime.WriteTraceJSONLFile(traceFile, traces); err != nil {
+			slog.Error("Failed to write runtime trace file", "path", traceFile, "error", err)
+			return
+		}
+		slog.Info("Wrote runtime trace file", "path", traceFile, "entries", len(traces))
+	}
 	return ws, cleanup, nil
 }
 

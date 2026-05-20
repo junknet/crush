@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/permission"
+	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/shell"
 )
 
@@ -38,9 +39,14 @@ type BashPermissionsParams struct {
 type BashResponseMetadata struct {
 	StartTime        int64  `json:"start_time"`
 	EndTime          int64  `json:"end_time"`
+	DurationMs       int64  `json:"duration_ms"`
 	Output           string `json:"output"`
 	Description      string `json:"description"`
 	WorkingDirectory string `json:"working_directory"`
+	ExitCode         int    `json:"exit_code"`
+	Outcome          string `json:"outcome"`
+	StdoutBytes      int    `json:"stdout_bytes"`
+	StderrBytes      int    `json:"stderr_bytes"`
 	Background       bool   `json:"background,omitempty"`
 	ShellID          string `json:"shell_id,omitempty"`
 }
@@ -264,16 +270,26 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 						return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 					}
 
+					semantics := deriveCommandSemantics(params.Command, stdout, execErr)
+					stdoutBytes := len(stdout)
+					stderrBytes := len(stderr)
 					stdout = formatOutput(stdout, stderr, execErr)
+					endTime := time.Now()
 
 					metadata := BashResponseMetadata{
 						StartTime:        startTime.UnixMilli(),
-						EndTime:          time.Now().UnixMilli(),
+						EndTime:          endTime.UnixMilli(),
+						DurationMs:       endTime.Sub(startTime).Milliseconds(),
 						Output:           stdout,
 						Description:      params.Description,
 						Background:       params.RunInBackground,
 						WorkingDirectory: bgShell.WorkingDir,
+						ExitCode:         semantics.ExitCode,
+						Outcome:          string(semantics.Outcome),
+						StdoutBytes:      stdoutBytes,
+						StderrBytes:      stderrBytes,
 					}
+					appendBashCommandTrace(ctx, call.ID, params, metadata, stdout)
 					if stdout == "" {
 						return fantasy.WithResponseMetadata(fantasy.NewTextResponse(BashNoOutput), metadata), nil
 					}
@@ -285,12 +301,15 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				metadata := BashResponseMetadata{
 					StartTime:        startTime.UnixMilli(),
 					EndTime:          time.Now().UnixMilli(),
+					DurationMs:       time.Since(startTime).Milliseconds(),
 					Description:      params.Description,
 					WorkingDirectory: bgShell.WorkingDir,
 					Background:       true,
 					ShellID:          bgShell.ID,
+					Outcome:          "background_started",
 				}
 				response := fmt.Sprintf("Background shell started with ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
+				appendBashCommandTrace(ctx, call.ID, params, metadata, response)
 				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 			}
 
@@ -348,16 +367,26 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 					return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 				}
 
+				semantics := deriveCommandSemantics(params.Command, stdout, execErr)
+				stdoutBytes := len(stdout)
+				stderrBytes := len(stderr)
 				stdout = formatOutput(stdout, stderr, execErr)
+				endTime := time.Now()
 
 				metadata := BashResponseMetadata{
 					StartTime:        startTime.UnixMilli(),
-					EndTime:          time.Now().UnixMilli(),
+					EndTime:          endTime.UnixMilli(),
+					DurationMs:       endTime.Sub(startTime).Milliseconds(),
 					Output:           stdout,
 					Description:      params.Description,
 					Background:       params.RunInBackground,
 					WorkingDirectory: bgShell.WorkingDir,
+					ExitCode:         semantics.ExitCode,
+					Outcome:          string(semantics.Outcome),
+					StdoutBytes:      stdoutBytes,
+					StderrBytes:      stderrBytes,
 				}
+				appendBashCommandTrace(ctx, call.ID, params, metadata, stdout)
 				if stdout == "" {
 					return fantasy.WithResponseMetadata(fantasy.NewTextResponse(BashNoOutput), metadata), nil
 				}
@@ -369,12 +398,15 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			metadata := BashResponseMetadata{
 				StartTime:        startTime.UnixMilli(),
 				EndTime:          time.Now().UnixMilli(),
+				DurationMs:       time.Since(startTime).Milliseconds(),
 				Description:      params.Description,
 				WorkingDirectory: bgShell.WorkingDir,
 				Background:       true,
 				ShellID:          bgShell.ID,
+				Outcome:          "background_started",
 			}
 			response := fmt.Sprintf("Command is taking longer than expected and has been moved to background.\n\nBackground shell ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
+			appendBashCommandTrace(ctx, call.ID, params, metadata, response)
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 		},
 	)
@@ -447,4 +479,41 @@ func normalizeWorkingDir(path string) string {
 		path = strings.ReplaceAll(path, fsext.WindowsWorkingDirDrive(), "")
 	}
 	return filepath.ToSlash(path)
+}
+
+func appendBashCommandTrace(ctx context.Context, toolCallID string, params BashParams, metadata BashResponseMetadata, output string) {
+	startedAt := time.UnixMilli(metadata.StartTime)
+	finishedAt := time.UnixMilli(metadata.EndTime)
+	success := metadata.Outcome == string(commandOutcomeSucceeded) ||
+		metadata.Outcome == string(commandOutcomeNoMatch) ||
+		metadata.Outcome == "background_started"
+	kind := agentruntime.TraceKindCommandDone
+	if !success {
+		kind = agentruntime.TraceKindCommandFail
+	}
+	var exitCode *int
+	if metadata.Outcome != "background_started" {
+		exitCode = &metadata.ExitCode
+	}
+	AppendTraceFromContext(ctx, agentruntime.TaskTrace{
+		StartedAt:   startedAt,
+		FinishedAt:  finishedAt,
+		DurationMs:  metadata.DurationMs,
+		Kind:        kind,
+		Status:      metadata.Outcome,
+		Success:     success,
+		ToolName:    BashToolName,
+		ToolCallID:  toolCallID,
+		ToolInput:   params.Command,
+		ToolOutput:  output,
+		Command:     params.Command,
+		WorkingDir:  metadata.WorkingDirectory,
+		ExitCode:    exitCode,
+		Outcome:     metadata.Outcome,
+		StdoutBytes: metadata.StdoutBytes,
+		StderrBytes: metadata.StderrBytes,
+		ShellID:     metadata.ShellID,
+		Output:      output,
+		OutputBytes: len(output),
+	})
 }

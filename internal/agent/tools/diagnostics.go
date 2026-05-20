@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -245,13 +246,32 @@ func formatDiagnostic(pth string, diagnostic protocol.Diagnostic, source string)
 		}
 	}
 
-	return fmt.Sprintf("%s: %s [%s]%s%s %s",
+	dataMsg := ""
+	if diagnostic.Data != nil {
+		var customData struct {
+			ID       string `json:"id"`
+			Title    string `json:"title"`
+			Doc      string `json:"doc"`
+			Fix      string `json:"fix"`
+			Severity string `json:"severity"`
+			Category string `json:"category"`
+		}
+		if err := json.Unmarshal(*diagnostic.Data, &customData); err == nil && customData.ID != "" {
+			dataMsg = fmt.Sprintf(" (Rule: %s, Title: %s, Fix: %s, Doc: %s)",
+				customData.ID, customData.Title, customData.Fix, customData.Doc)
+		} else {
+			dataMsg = fmt.Sprintf(" (Data: %s)", string(*diagnostic.Data))
+		}
+	}
+
+	return fmt.Sprintf("%s: %s [%s]%s%s %s%s",
 		severity,
 		location,
 		sourceInfo,
 		codeInfo,
 		tagsInfo,
-		diagnostic.Message)
+		diagnostic.Message,
+		dataMsg)
 }
 
 func countSeverity(diagnostics []string, severity string) int {

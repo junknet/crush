@@ -470,6 +470,26 @@ func TestSetConfigField_AutoReloadSkipsWhenNoWorkingDir(t *testing.T) {
 	require.Contains(t, string(data), "foo")
 }
 
+func TestSetConfigField_WritesLLMYaml(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "crush.json")
+	store := &ConfigStore{
+		config:         &Config{},
+		globalDataPath: basePath,
+	}
+
+	require.NoError(t, store.SetConfigField(ScopeGlobal, "providers.waitai-openai.api_key", "secret"))
+
+	llmPath := filepath.Join(dir, "crush.llm.yaml")
+	data, err := os.ReadFile(llmPath)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "providers:")
+	require.Contains(t, string(data), "waitai-openai:")
+	require.Contains(t, string(data), "api_key: secret")
+}
+
 // TestAutoReloadDisabledDuringReload verifies that auto-reload is suppressed
 // during ReloadFromDisk to prevent re-entrant/nested reload calls.
 func TestAutoReloadDisabledDuringReload(t *testing.T) {

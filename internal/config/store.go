@@ -41,8 +41,8 @@ type ConfigStore struct {
 	config             *Config
 	workingDir         string
 	resolver           VariableResolver
-	globalDataPath     string   // ~/.local/share/crush/crush.json
-	workspacePath      string   // .crush/crush.json
+	globalDataPath     string   // ~/.local/share/crush/crush.{json|yaml|yml}
+	workspacePath      string   // .crush/crush.{json|yaml|yml}
 	loadedPaths        []string // config files that were successfully loaded
 	knownProviders     []catwalk.Provider
 	overrides          RuntimeOverrides
@@ -102,24 +102,83 @@ func (s *ConfigStore) configPath(scope Scope) (string, error) {
 		if s.workspacePath == "" {
 			return "", ErrNoWorkspaceConfig
 		}
+		if resolved := resolveFirstExistingPath(configCandidates(s.workspacePath)); resolved != "" {
+			return resolved, nil
+		}
 		return s.workspacePath, nil
 	default:
+		if resolved := resolveFirstExistingPath(configCandidates(s.globalDataPath)); resolved != "" {
+			return resolved, nil
+		}
 		return s.globalDataPath, nil
 	}
+}
+
+func (s *ConfigStore) llmConfigPath(scope Scope) (string, error) {
+	switch scope {
+	case ScopeWorkspace:
+		if s.workspacePath == "" {
+			return "", ErrNoWorkspaceConfig
+		}
+		if resolved := resolveFirstExistingPath(llmConfigCandidates(s.workspacePath)); resolved != "" {
+			return resolved, nil
+		}
+		candidates := llmConfigCandidates(s.workspacePath)
+		if len(candidates) == 0 {
+			return "", ErrNoWorkspaceConfig
+		}
+		return candidates[0], nil
+	default:
+		if resolved := resolveFirstExistingPath(llmConfigCandidates(s.globalDataPath)); resolved != "" {
+			return resolved, nil
+		}
+		candidates := llmConfigCandidates(s.globalDataPath)
+		if len(candidates) == 0 {
+			return "", fmt.Errorf("no llm config path configured")
+		}
+		return candidates[0], nil
+	}
+}
+
+func (s *ConfigStore) configPathForKey(scope Scope, key string) (string, error) {
+	if isLLMConfigKey(key) {
+		return s.llmConfigPath(scope)
+	}
+	return s.configPath(scope)
+}
+
+func (s *ConfigStore) configPathsForKey(scope Scope, key string) ([]string, error) {
+	path, err := s.configPathForKey(scope, key)
+	if err != nil {
+		return nil, err
+	}
+	if !isLLMConfigKey(key) {
+		return []string{path}, nil
+	}
+	basePath, err := s.configPath(scope)
+	if err != nil {
+		return nil, err
+	}
+	return []string{path, basePath}, nil
 }
 
 // HasConfigField checks whether a key exists in the config file for the given
 // scope.
 func (s *ConfigStore) HasConfigField(scope Scope, key string) bool {
-	path, err := s.configPath(scope)
+	paths, err := s.configPathsForKey(scope, key)
 	if err != nil {
 		return false
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
+	for _, path := range paths {
+		data, err := readConfigFile(path)
+		if err != nil {
+			continue
+		}
+		if gjson.Get(string(data), key).Exists() {
+			return true
+		}
 	}
-	return gjson.Get(string(data), key).Exists()
+	return false
 }
 
 // SetConfigField sets a key/value pair in the config file for the given scope.
@@ -135,31 +194,42 @@ func (s *ConfigStore) SetConfigField(scope Scope, key string, value any) error {
 // SetConfigField calls when writing several fields atomically to avoid
 // intermediate reloads with partial state.
 func (s *ConfigStore) SetConfigFields(scope Scope, kv map[string]any) error {
-	path, err := s.configPath(scope)
-	if err != nil {
-		return fmt.Errorf("%v: %w", kv, err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			data = []byte("{}")
-		} else {
-			return fmt.Errorf("failed to read config file: %w", err)
+	grouped := map[string]map[string]any{}
+	for key, value := range kv {
+		path, err := s.configPathForKey(scope, key)
+		if err != nil {
+			return fmt.Errorf("%v: %w", kv, err)
 		}
+		if _, ok := grouped[path]; !ok {
+			grouped[path] = make(map[string]any)
+		}
+		grouped[path][key] = value
 	}
 
-	newValue := string(data)
-	for key, value := range kv {
-		newValue, err = sjson.Set(newValue, key, value)
+	for path, fields := range grouped {
+		data, err := readConfigFile(path)
 		if err != nil {
-			return fmt.Errorf("failed to set config field %s: %w", key, err)
+			if os.IsNotExist(err) {
+				data = []byte("{}")
+			} else {
+				return fmt.Errorf("failed to read config file: %w", err)
+			}
 		}
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("failed to create config directory %q: %w", path, err)
-	}
-	if err := atomicWriteFile(path, []byte(newValue), 0o600); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
+
+		newValue := string(data)
+		var setErr error
+		for key, value := range fields {
+			newValue, setErr = sjson.Set(newValue, key, value)
+			if setErr != nil {
+				return fmt.Errorf("failed to set config field %s: %w", key, setErr)
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("failed to create config directory %q: %w", path, err)
+		}
+		if err := writeConfigFile(path, []byte(newValue)); err != nil {
+			return fmt.Errorf("failed to write config file: %w", err)
+		}
 	}
 
 	// Auto-reload to keep in-memory state fresh after config edits.
@@ -177,13 +247,37 @@ func (s *ConfigStore) SetConfigFields(scope Scope, kv map[string]any) error {
 // After a successful write, it automatically reloads config to keep in-memory
 // state fresh.
 func (s *ConfigStore) RemoveConfigField(scope Scope, key string) error {
-	path, err := s.configPath(scope)
+	paths, err := s.configPathsForKey(scope, key)
 	if err != nil {
 		return fmt.Errorf("%s: %w", key, err)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
+
+	var (
+		path string
+		data []byte
+	)
+	for _, candidate := range paths {
+		readData, readErr := readConfigFile(candidate)
+		if readErr != nil {
+			continue
+		}
+		if !gjson.Get(string(readData), key).Exists() {
+			continue
+		}
+		path = candidate
+		data = readData
+		break
+	}
+	if path == "" {
+		path = paths[0]
+		readData, readErr := readConfigFile(path)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				return nil
+			}
+			return fmt.Errorf("failed to read config file: %w", readErr)
+		}
+		data = readData
 	}
 
 	newValue, err := sjson.Delete(string(data), key)
@@ -193,7 +287,7 @@ func (s *ConfigStore) RemoveConfigField(scope Scope, key string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("failed to create config directory %q: %w", path, err)
 	}
-	if err := atomicWriteFile(path, []byte(newValue), 0o600); err != nil {
+	if err := writeConfigFile(path, []byte(newValue)); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -208,14 +302,30 @@ func (s *ConfigStore) RemoveConfigField(scope Scope, key string) error {
 // UpdatePreferredModel updates the preferred model for the given type and
 // persists it to the config file at the given scope.
 func (s *ConfigStore) UpdatePreferredModel(scope Scope, modelType SelectedModelType, model SelectedModel) error {
-	s.config.Models[modelType] = model
-	if err := s.SetConfigField(scope, fmt.Sprintf("models.%s", modelType), model); err != nil {
+	modelTypes := selectedModelTypeAliases(modelType)
+	updates := make(map[string]any, len(modelTypes))
+	for _, alias := range modelTypes {
+		s.config.Models[alias] = model
+		updates[fmt.Sprintf("models.%s", alias)] = model
+	}
+	if err := s.SetConfigFields(scope, updates); err != nil {
 		return fmt.Errorf("failed to update preferred model: %w", err)
 	}
 	if err := s.recordRecentModel(scope, modelType, model); err != nil {
 		return err
 	}
 	return nil
+}
+
+func selectedModelTypeAliases(modelType SelectedModelType) []SelectedModelType {
+	switch modelType {
+	case SelectedModelTypeBuild, SelectedModelTypeLarge:
+		return []SelectedModelType{SelectedModelTypeBuild, SelectedModelTypeLarge}
+	case SelectedModelTypeExplore, SelectedModelTypeSmall:
+		return []SelectedModelType{SelectedModelTypeExplore, SelectedModelTypeSmall}
+	default:
+		return []SelectedModelType{modelType}
+	}
 }
 
 // SetCompactMode sets the compact mode setting and persists it.
@@ -664,16 +774,30 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 
 	// Merge workspace config if present
 	workspacePath := filepath.Join(cfg.Options.DataDirectory, fmt.Sprintf("%s.json", appName))
-	if wsData, err := os.ReadFile(workspacePath); err == nil && len(wsData) > 0 {
-		if !json.Valid(wsData) {
-			return fmt.Errorf("invalid JSON in config file %s", workspacePath)
-		}
+	if resolvedWorkspacePath, err := s.configPath(ScopeWorkspace); err == nil {
+		workspacePath = resolvedWorkspacePath
+	}
+	if wsData, err := readConfigFile(workspacePath); err == nil && len(wsData) > 0 {
 		merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, wsData))
 		if mergeErr == nil {
 			dataDir := cfg.Options.DataDirectory
 			*cfg = *merged
 			cfg.setDefaults(s.workingDir, dataDir)
 			loadedPaths = append(loadedPaths, workspacePath)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read workspace config file %s: %w", workspacePath, err)
+	}
+
+	if llmPath, err := s.llmConfigPath(ScopeWorkspace); err == nil {
+		if llmData, readErr := readConfigFile(llmPath); readErr == nil && len(llmData) > 0 {
+			merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, llmData))
+			if mergeErr == nil {
+				dataDir := cfg.Options.DataDirectory
+				*cfg = *merged
+				cfg.setDefaults(s.workingDir, dataDir)
+				loadedPaths = append(loadedPaths, llmPath)
+			}
 		}
 	}
 

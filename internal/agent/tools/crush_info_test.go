@@ -27,7 +27,8 @@ func TestCrushInfo_MinimalConfig(t *testing.T) {
 	require.NotContains(t, output, "[providers]")
 	require.NotContains(t, output, "[lsp]")
 	require.NotContains(t, output, "[mcp]")
-	require.NotContains(t, output, "[permissions]")
+	require.Contains(t, output, "[permissions]")
+	require.Contains(t, output, "mode = yolo")
 	require.NotContains(t, output, "[tools]")
 }
 
@@ -57,8 +58,8 @@ func TestCrushInfo_Models(t *testing.T) {
 	})
 	output := buildCrushInfo(cfg, nil, nil, nil, nil)
 	require.Contains(t, output, "[model]")
-	require.Contains(t, output, "large = claude-sonnet-4-20250514 (anthropic)")
-	require.Contains(t, output, "small = claude-haiku-3-20250307 (anthropic)")
+	require.Contains(t, output, "large = anthropic/claude-sonnet-4-20250514")
+	require.Contains(t, output, "small = anthropic/claude-haiku-3-20250307")
 }
 
 func TestCrushInfo_Providers(t *testing.T) {
@@ -297,7 +298,8 @@ func TestCrushInfo_EmptySectionsOmitted(t *testing.T) {
 
 	output := buildCrushInfo(cfg, nil, nil, nil, nil)
 	require.NotContains(t, output, "[tools]")
-	require.NotContains(t, output, "[permissions]")
+	require.Contains(t, output, "[permissions]")
+	require.Contains(t, output, "mode = yolo")
 	require.NotContains(t, output, "[lsp]")
 	require.NotContains(t, output, "[mcp]")
 	require.NotContains(t, output, "[skills]")

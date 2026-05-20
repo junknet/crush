@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"charm.land/fantasy"
@@ -15,6 +17,25 @@ import (
 
 type mockBashPermissionService struct {
 	*pubsub.Broker[permission.PermissionRequest]
+}
+
+func TestBashTool_GrepNoMatchIsNotCommandFailure(t *testing.T) {
+	workingDir := t.TempDir()
+	targetFile := filepath.Join(workingDir, "sample.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte("alpha\nbeta\n"), 0o644))
+	tool := newBashToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "grep no match",
+		Command:     "grep -n zzz " + targetFile,
+	})
+
+	require.False(t, resp.IsError)
+	var meta BashResponseMetadata
+	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
+	require.Equal(t, 1, meta.ExitCode)
+	require.Equal(t, "no_match", meta.Outcome)
 }
 
 func (m *mockBashPermissionService) Request(ctx context.Context, req permission.CreatePermissionRequest) (bool, error) {

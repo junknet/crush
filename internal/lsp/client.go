@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -668,4 +670,28 @@ func (c *Client) FindReferences(ctx context.Context, filepath string, line, char
 	// NOTE: line and character should be 0-based.
 	// See: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#position
 	return c.client.FindReferences(ctx, filepath, line-1, character-1, includeDeclaration)
+}
+
+// CallCustom sends a custom request to the underlying LSP server.
+func (c *Client) CallCustom(ctx context.Context, method string, params any, result any) error {
+	if c.client == nil {
+		return fmt.Errorf("underlying LSP client is nil")
+	}
+
+	val := reflect.ValueOf(c.client).Elem()
+	connField := val.FieldByName("conn")
+	if !connField.IsValid() {
+		return fmt.Errorf("field conn not found in powernap.Client")
+	}
+
+	ptr := unsafe.Pointer(connField.UnsafeAddr())
+	conn := *(**transport.Connection)(ptr)
+	if conn == nil {
+		return fmt.Errorf("LSP connection is nil")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	return conn.Call(ctx, method, params, result)
 }

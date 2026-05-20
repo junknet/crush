@@ -184,14 +184,21 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 		}
 	}
 
-	skillsCount := len(m.skillStatusItems())
+	skillsCount := len(m.customSkillStatusItems())
 
 	maxFiles, maxLSPs, maxMCPs, maxSkills := getDynamicHeightLimits(remainingHeight, filesCount, lspsCount, mcpsCount, skillsCount)
 
 	lspSection := m.lspInfo(width, maxLSPs, true)
 	mcpSection := m.mcpInfo(width, maxMCPs, true)
-	skillsSection := m.skillsInfo(width, maxSkills, true)
 	filesSection := m.filesInfo(m.com.Workspace.WorkingDir(), width, maxFiles, true)
+
+	var sidebarParts []string
+	sidebarParts = append(sidebarParts, sidebarHeader, filesSection, "", lspSection, "", mcpSection)
+
+	if skillsCount > 0 {
+		skillsSection := m.skillsInfo(width, maxSkills, true)
+		sidebarParts = append(sidebarParts, "", skillsSection)
+	}
 
 	uv.NewStyledString(
 		lipgloss.NewStyle().
@@ -200,14 +207,7 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 			Render(
 				lipgloss.JoinVertical(
 					lipgloss.Left,
-					sidebarHeader,
-					filesSection,
-					"",
-					lspSection,
-					"",
-					mcpSection,
-					"",
-					skillsSection,
+					sidebarParts...,
 				),
 			),
 	).Draw(scr, area)

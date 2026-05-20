@@ -202,3 +202,12 @@ func TestWaitForDiagnostics_NilClient(t *testing.T) {
 	// Should not panic.
 	c.WaitForDiagnostics(context.Background(), time.Second)
 }
+
+func TestClient_CallCustom_NilClient(t *testing.T) {
+	t.Parallel()
+
+	c := &Client{}
+	err := c.CallCustom(t.Context(), "some/method", nil, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "underlying LSP client is nil")
+}

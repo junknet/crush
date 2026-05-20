@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/charlievieth/fastwalk"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -119,7 +120,7 @@ func (s *Skill) Validate() error {
 	if s.Name == "" {
 		errs = append(errs, errors.New("name is required"))
 	} else {
-		if len(s.Name) > MaxNameLength {
+		if utf8.RuneCountInString(s.Name) > MaxNameLength {
 			errs = append(errs, fmt.Errorf("name exceeds %d characters", MaxNameLength))
 		}
 		if !namePattern.MatchString(s.Name) {
@@ -132,11 +133,11 @@ func (s *Skill) Validate() error {
 
 	if s.Description == "" {
 		errs = append(errs, errors.New("description is required"))
-	} else if len(s.Description) > MaxDescriptionLength {
+	} else if utf8.RuneCountInString(s.Description) > MaxDescriptionLength {
 		errs = append(errs, fmt.Errorf("description exceeds %d characters", MaxDescriptionLength))
 	}
 
-	if len(s.Compatibility) > MaxCompatibilityLength {
+	if utf8.RuneCountInString(s.Compatibility) > MaxCompatibilityLength {
 		errs = append(errs, fmt.Errorf("compatibility exceeds %d characters", MaxCompatibilityLength))
 	}
 
