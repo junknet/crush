@@ -642,10 +642,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		allTools = append(allTools,
 			tools.NewDiagnosticsTool(c.lspManager),
 			tools.NewReferencesTool(c.lspManager),
-			tools.NewLSPRestartTool(c.lspManager),
-			tools.NewLSPMacroExpandTool(c.lspManager),
-			tools.NewLSPSafeToDeleteTool(c.lspManager),
-			tools.NewLSPProjectMapsTool(c.lspManager),
+			tools.NewNimRestartTool(c.lspManager),
+			tools.NewNimMacroExpandTool(c.lspManager),
+			tools.NewNimSafeToDeleteTool(c.lspManager),
+			tools.NewNimProjectMapsTool(c.lspManager),
 		)
 	}
 

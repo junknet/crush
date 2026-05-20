@@ -13,22 +13,22 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 )
 
-const LSPRestartToolName = "lsp_restart"
+const NimRestartToolName = "nim_restart"
 
-//go:embed lsp_restart.md
-var lspRestartDescription string
+//go:embed nim_restart.md
+var nimRestartDescription string
 
-type LSPRestartParams struct {
+type NimRestartParams struct {
 	// Name is the optional name of a specific LSP client to restart.
 	// If empty, all LSP clients will be restarted.
 	Name string `json:"name,omitempty"`
 }
 
-func NewLSPRestartTool(lspManager *lsp.Manager) fantasy.AgentTool {
+func NewNimRestartTool(lspManager *lsp.Manager) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
-		LSPRestartToolName,
-		lspRestartDescription,
-		func(ctx context.Context, params LSPRestartParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		NimRestartToolName,
+		nimRestartDescription,
+		func(ctx context.Context, params NimRestartParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if lspManager.Clients().Len() == 0 {
 				return fantasy.NewTextErrorResponse("no LSP clients available to restart"), nil
 			}

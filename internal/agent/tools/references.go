@@ -28,7 +28,7 @@ type referencesTool struct {
 	lspManager *lsp.Manager
 }
 
-const ReferencesToolName = "lsp_references"
+const ReferencesToolName = "nim_references"
 
 //go:embed references.md
 var referencesDescription string

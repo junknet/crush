@@ -782,12 +782,12 @@ func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {
 	cfg.SetupAgents()
 	buildAgent, ok := cfg.Agents[AgentBuild]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_macro_expand", "lsp_safe_to_delete", "lsp_project_maps", "fetch", "agentic_fetch", "glob", "ls", "sourcegraph", "todos", "view", "write", "list_mcp_resources", "read_mcp_resource"}, buildAgent.AllowedTools)
+	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "multiedit", "nim_diagnostics", "nim_references", "nim_restart", "nim_macro_expand", "nim_safe_to_delete", "nim_project_maps", "fetch", "agentic_fetch", "glob", "ls", "sourcegraph", "todos", "view", "write", "list_mcp_resources", "read_mcp_resource"}, buildAgent.AllowedTools)
 
 	coderAgent, ok := cfg.Agents[AgentCoder]
 	require.True(t, ok)
 
-	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_macro_expand", "lsp_safe_to_delete", "lsp_project_maps", "fetch", "agentic_fetch", "glob", "ls", "sourcegraph", "todos", "view", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
+	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "multiedit", "nim_diagnostics", "nim_references", "nim_restart", "nim_macro_expand", "nim_safe_to_delete", "nim_project_maps", "fetch", "agentic_fetch", "glob", "ls", "sourcegraph", "todos", "view", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
 
 	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)
@@ -810,11 +810,11 @@ func TestConfig_setupAgentsWithEveryReadOnlyToolDisabled(t *testing.T) {
 	cfg.SetupAgents()
 	buildAgent, ok := cfg.Agents[AgentBuild]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "download", "edit", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_macro_expand", "lsp_safe_to_delete", "lsp_project_maps", "fetch", "agentic_fetch", "todos", "write", "list_mcp_resources", "read_mcp_resource"}, buildAgent.AllowedTools)
+	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "download", "edit", "multiedit", "nim_diagnostics", "nim_references", "nim_restart", "nim_macro_expand", "nim_safe_to_delete", "nim_project_maps", "fetch", "agentic_fetch", "todos", "write", "list_mcp_resources", "read_mcp_resource"}, buildAgent.AllowedTools)
 
 	coderAgent, ok := cfg.Agents[AgentCoder]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "download", "edit", "multiedit", "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_macro_expand", "lsp_safe_to_delete", "lsp_project_maps", "fetch", "agentic_fetch", "todos", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
+	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "download", "edit", "multiedit", "nim_diagnostics", "nim_references", "nim_restart", "nim_macro_expand", "nim_safe_to_delete", "nim_project_maps", "fetch", "agentic_fetch", "todos", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
 
 	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)

@@ -139,7 +139,7 @@ tool names to specific types:
 | `chat/agent.go`       | Agent, AgenticFetch                            |
 | `chat/diagnostics.go` | Diagnostics                                    |
 | `chat/references.go`  | References                                     |
-| `chat/lsp_restart.go` | LSPRestart                                     |
+| `chat/nim_restart.go` | NimRestart                                     |
 | `chat/todos.go`       | Todos                                          |
 | `chat/mcp.go`         | MCP tools (`mcp_` prefix)                      |
 | `chat/generic.go`     | Fallback for unrecognized tools                |

@@ -12,7 +12,7 @@ import (
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
-type LSPSafeToDeleteParams struct {
+type NimSafeToDeleteParams struct {
 	FilePath  string `json:"file_path" description:"The absolute or relative path to the Nim source file."`
 	Line      int    `json:"line" description:"The 1-based line number of the cursor."`
 	Character int    `json:"character" description:"The 1-based character/column number of the cursor."`
@@ -30,16 +30,16 @@ type SafeToDeleteResult struct {
 	Reasons          []string            `json:"reasons"`
 }
 
-const LSPSafeToDeleteToolName = "lsp_safe_to_delete"
+const NimSafeToDeleteToolName = "nim_safe_to_delete"
 
-//go:embed lsp_safe_to_delete.md
-var lspSafeToDeleteDescription string
+//go:embed nim_safe_to_delete.md
+var nimSafeToDeleteDescription string
 
-func NewLSPSafeToDeleteTool(lspManager *lsp.Manager) fantasy.AgentTool {
+func NewNimSafeToDeleteTool(lspManager *lsp.Manager) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
-		LSPSafeToDeleteToolName,
-		lspSafeToDeleteDescription,
-		func(ctx context.Context, params LSPSafeToDeleteParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		NimSafeToDeleteToolName,
+		nimSafeToDeleteDescription,
+		func(ctx context.Context, params NimSafeToDeleteParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.FilePath == "" {
 				return fantasy.NewTextErrorResponse("file_path is required"), nil
 			}

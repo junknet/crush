@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# nimlsp_restart_via_manager.sh —— lsp_restart 工具的 Go 层验证。
+# nimnim_restart_via_manager.sh —— nim_restart 工具的 Go 层验证。
 #
-# lsp_restart 不走 LSP 自定义 method;它对每个已注册的 client 调 client.Restart()。
+# nim_restart 不走 LSP 自定义 method;它对每个已注册的 client 调 client.Restart()。
 # 已有的 internal/lsp 单测验证了 Restart() 本身;这里只跑这条测试链路,
 # 证明 restart 路径在当前 fork 上仍 green。
 
