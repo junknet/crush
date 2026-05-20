@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -109,115 +108,6 @@ func (s *AgentScheduler) EnsureRoot(sessionID, goal string, scope []string, prof
 	s.nodes[node.ID] = node
 	s.publishPlanned(node)
 	return node
-}
-
-// BuildDefaultWorkflow expands a root task into a small ordered DAG.
-func (s *AgentScheduler) BuildDefaultWorkflow(root *TaskNode) {
-	if s == nil || root == nil || len(root.Children) > 0 {
-		return
-	}
-
-	switch classifyTaskKind(root.Intent.Goal) {
-	case TaskSummarize:
-		root.Kind = TaskSummarize
-		root.Mode = TaskReadOnly
-		s.spawnSingleLeaf(root, TaskSummarize, ProfileToolsAgent, root.Intent.Goal, root.Intent.Scope, root.Intent.SuccessCriteria)
-	case TaskResearch, TaskExplore, TaskProbe:
-		root.Kind = TaskResearch
-		root.Mode = TaskReadOnly
-		s.spawnSingleLeaf(root, TaskResearch, ProfileToolsAgent, root.Intent.Goal, root.Intent.Scope, root.Intent.SuccessCriteria)
-	default:
-		root.Kind = TaskEdit
-		root.Mode = TaskWrite
-		s.buildEditWorkflow(root)
-	}
-}
-
-func (s *AgentScheduler) buildEditWorkflow(root *TaskNode) {
-	plan := s.SpawnChild(
-		root,
-		"",
-		"Plan the implementation for: "+root.Intent.Goal,
-		ProfileBuildAgent,
-		root.Intent.Scope,
-		"Return a concise implementation plan.",
-	)
-	if plan == nil {
-		return
-	}
-	plan.Kind = TaskResearch
-	plan.Mode = TaskReadOnly
-	plan.Intent.BudgetTokens = max(root.Intent.BudgetTokens/4, 1024)
-
-	execute := s.SpawnChild(
-		root,
-		"",
-		root.Intent.Goal,
-		ProfileWorkerAgent,
-		root.Intent.Scope,
-		"Implement the requested change.",
-	)
-	if execute == nil {
-		return
-	}
-	execute.Kind = TaskEdit
-	execute.Mode = TaskWrite
-	execute.Deps = []*TaskNode{plan}
-	execute.Intent.BudgetTokens = root.Intent.BudgetTokens
-
-	verify := s.SpawnChild(
-		root,
-		"",
-		"Verify the result of: "+root.Intent.Goal,
-		ProfileToolsAgent,
-		root.Intent.Scope,
-		"Confirm the implementation behaves as requested.",
-	)
-	if verify == nil {
-		return
-	}
-	verify.Kind = TaskVerify
-	verify.Mode = TaskReadOnly
-	verify.Deps = []*TaskNode{execute}
-	verify.Intent.BudgetTokens = max(root.Intent.BudgetTokens/4, 1024)
-}
-
-func (s *AgentScheduler) spawnSingleLeaf(parent *TaskNode, kind TaskKind, profile WorkerProfile, goal string, scope []string, successCriteria string) *TaskNode {
-	child := s.SpawnChild(parent, "", goal, profile, scope, successCriteria)
-	if child == nil {
-		return nil
-	}
-	child.Kind = kind
-	switch kind {
-	case TaskSummarize, TaskResearch, TaskExplore, TaskProbe:
-		child.Mode = TaskReadOnly
-	case TaskVerify:
-		child.Mode = TaskReadOnly
-	default:
-		child.Mode = TaskWrite
-	}
-	return child
-}
-
-func classifyTaskKind(goal string) TaskKind {
-	lower := strings.ToLower(goal)
-	switch {
-	case containsAny(lower, "summarize", "summary", "extract", "compress"):
-		return TaskSummarize
-	case containsAny(lower, "review", "inspect", "analyze", "analyse", "diagnose", "compare", "where", "why", "what"):
-		return TaskResearch
-	default:
-		return TaskEdit
-	}
-}
-
-func containsAny(text string, terms ...string) bool {
-	for _, term := range terms {
-		if strings.Contains(text, term) {
-			return true
-		}
-	}
-	return false
 }
 
 // SpawnChild creates a child task under a parent node.

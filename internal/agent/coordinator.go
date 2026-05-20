@@ -255,7 +255,6 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		if taskNode == nil {
 			return nil, errors.New("failed to create root task")
 		}
-		taskScheduler.BuildDefaultWorkflow(taskNode)
 		c.preBindTaskTreeModels(taskNode)
 
 		var result *fantasy.AgentResult
@@ -1278,7 +1277,6 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	if taskNode == nil {
 		return fantasy.ToolResponse{}, errors.New("failed to create child task")
 	}
-	taskScheduler.BuildDefaultWorkflow(taskNode)
 
 	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
 	if !ok {
