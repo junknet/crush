@@ -244,6 +244,10 @@ type UI struct {
 	// skills
 	skillStates []*skills.SkillState
 
+	// subAgents holds recent and active sub-agent events for the sidebar.
+	// Capped to subAgentHistoryMax entries; oldest gets evicted.
+	subAgents []subAgentEntry
+
 	// sidebarLogo keeps a cached version of the sidebar sidebarLogo.
 	sidebarLogo string
 
@@ -3443,6 +3447,9 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		return tea.Batch(cmds...)
 	case notify.TypeReAuthenticate:
 		return m.handleReAuthenticate(n.ProviderID)
+	case notify.TypeSubAgentStarted, notify.TypeSubAgentFinished, notify.TypeSubAgentFailed:
+		m.subAgents = recordSubAgentEvent(m.subAgents, n)
+		return nil
 	default:
 		return nil
 	}
