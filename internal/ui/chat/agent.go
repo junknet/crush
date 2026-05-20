@@ -174,9 +174,11 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	var parts []string
 	parts = append(parts, childTools.Enumerator(roundedEnumerator(2, taskTagWidth-5)).String())
 
-	// Show animation if still running.
+	// Show one-cell braille spinner if still running. opts.Anim still
+	// ticks the redraw cycle; we discard its 15-char cycling output and
+	// render a clean spinner+label instead.
 	if !opts.HasResult() && !opts.IsCanceled() {
-		parts = append(parts, "", opts.Anim.Render())
+		parts = append(parts, "", renderBrailleSpinner(sty, "Working"))
 	}
 
 	result := lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -341,9 +343,11 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 	var parts []string
 	parts = append(parts, childTools.Enumerator(roundedEnumerator(2, promptTagWidth-5)).String())
 
-	// Show animation if still running.
+	// Show one-cell braille spinner if still running. opts.Anim still
+	// ticks the redraw cycle; we discard its 15-char cycling output and
+	// render a clean spinner+label instead.
 	if !opts.HasResult() && !opts.IsCanceled() {
-		parts = append(parts, "", opts.Anim.Render())
+		parts = append(parts, "", renderBrailleSpinner(sty, "Working"))
 	}
 
 	result := lipgloss.JoinVertical(lipgloss.Left, parts...)
