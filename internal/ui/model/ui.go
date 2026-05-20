@@ -355,7 +355,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 
 	status := NewStatus(com, ui)
 
-	ui.setEditorPrompt(com.Workspace.PermissionSkipRequests())
+	ui.setEditorPrompt()
 	ui.randomizePlaceholders()
 	ui.textarea.Placeholder = ui.readyPlaceholder
 	ui.status = status
@@ -935,9 +935,6 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.textarea.Placeholder = m.readyPlaceholder
 		}
-		if m.com.Workspace.PermissionSkipRequests() {
-			m.textarea.Placeholder = "Yolo mode!"
-		}
 	}
 
 	// at this point this can only handle [message.Attachment] message, and we
@@ -1357,17 +1354,6 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 
 	// Command dialog messages.
-	case dialog.ActionToggleYoloMode:
-		m.com.Workspace.PermissionSetSkipRequests(true)
-		m.setEditorPrompt(true)
-		if m.status != nil {
-			m.status.SetInfoMsg(util.InfoMsg{
-				Type: util.InfoTypeInfo,
-				Msg:  "Permissions are always open",
-				TTL:  3 * time.Second,
-			})
-		}
-		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleNotifications:
 		cfg := m.com.Config()
 		if cfg != nil && cfg.Options != nil {
@@ -2882,18 +2868,13 @@ func (m *UI) openEditor(value string) tea.Cmd {
 	})
 }
 
-// setEditorPrompt configures the textarea prompt function based on whether
-// yolo mode is enabled.
-func (m *UI) setEditorPrompt(yolo bool) {
-	if yolo {
-		m.textarea.SetPromptFunc(4, m.yoloPromptFunc)
-		return
-	}
+// setEditorPrompt configures the textarea prompt function.
+func (m *UI) setEditorPrompt() {
 	m.textarea.SetPromptFunc(4, m.normalPromptFunc)
 }
 
-// normalPromptFunc returns the normal editor prompt style ("  > " on first
-// line, "::: " on subsequent lines).
+// normalPromptFunc returns the editor prompt style ("  > " on first line,
+// "::: " on subsequent lines).
 func (m *UI) normalPromptFunc(info textarea.PromptInfo) string {
 	t := m.com.Styles
 	if info.LineNumber == 0 {
@@ -2906,23 +2887,6 @@ func (m *UI) normalPromptFunc(info textarea.PromptInfo) string {
 		return t.Editor.PromptNormalFocused.Render()
 	}
 	return t.Editor.PromptNormalBlurred.Render()
-}
-
-// yoloPromptFunc returns the yolo mode editor prompt style with warning icon
-// and colored dots.
-func (m *UI) yoloPromptFunc(info textarea.PromptInfo) string {
-	t := m.com.Styles
-	if info.LineNumber == 0 {
-		if info.Focused {
-			return t.Editor.PromptYoloIconFocused.Render()
-		} else {
-			return t.Editor.PromptYoloIconBlurred.Render()
-		}
-	}
-	if info.Focused {
-		return t.Editor.PromptYoloDotsFocused.Render()
-	}
-	return t.Editor.PromptYoloDotsBlurred.Render()
 }
 
 // closeCompletions closes the completions popup and resets state.

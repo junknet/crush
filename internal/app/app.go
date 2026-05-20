@@ -83,7 +83,6 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	messages := message.NewService(q)
 	files := history.NewService(q, conn)
 	cfg := store.Config()
-	skipPermissionsRequests := store.Overrides().SkipPermissionRequests
 	var allowedTools []string
 	if cfg.Permissions != nil && cfg.Permissions.AllowedTools != nil {
 		allowedTools = cfg.Permissions.AllowedTools
@@ -93,7 +92,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		Sessions:    sessions,
 		Messages:    messages,
 		History:     files,
-		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
+		Permissions: permission.NewPermissionService(store.WorkingDir(), allowedTools),
 		FileTracker: filetracker.NewService(q),
 		LSPManager:  lsp.NewManager(store),
 

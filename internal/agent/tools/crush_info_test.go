@@ -28,7 +28,7 @@ func TestCrushInfo_MinimalConfig(t *testing.T) {
 	require.NotContains(t, output, "[lsp]")
 	require.NotContains(t, output, "[mcp]")
 	require.Contains(t, output, "[permissions]")
-	require.Contains(t, output, "mode = yolo")
+	require.Contains(t, output, "mode = always_open")
 	require.NotContains(t, output, "[tools]")
 }
 
@@ -151,20 +151,6 @@ func TestCrushInfo_MCPStates(t *testing.T) {
 	require.Less(t, filesystemIdx, githubIdx, "filesystem should appear before github")
 }
 
-func TestCrushInfo_YoloMode(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.NewTestStore(&config.Config{
-		Providers:   csync.NewMap[string, config.ProviderConfig](),
-		Permissions: &config.Permissions{},
-	})
-	cfg.Overrides().SkipPermissionRequests = true
-
-	output := buildCrushInfo(cfg, nil, nil, nil, nil)
-	require.Contains(t, output, "[permissions]")
-	require.Contains(t, output, "mode = yolo")
-}
-
 func TestCrushInfo_AllowedTools(t *testing.T) {
 	t.Parallel()
 
@@ -265,7 +251,6 @@ func TestCrushInfo_DeterministicOrdering(t *testing.T) {
 			AllowedTools: []string{"z-perm", "a-perm"},
 		},
 	})
-	cfg.Overrides().SkipPermissionRequests = true
 
 	// Test MCP ordering via writeMCP directly.
 	var mcpBuf strings.Builder
@@ -299,7 +284,7 @@ func TestCrushInfo_EmptySectionsOmitted(t *testing.T) {
 	output := buildCrushInfo(cfg, nil, nil, nil, nil)
 	require.NotContains(t, output, "[tools]")
 	require.Contains(t, output, "[permissions]")
-	require.Contains(t, output, "mode = yolo")
+	require.Contains(t, output, "mode = always_open")
 	require.NotContains(t, output, "[lsp]")
 	require.NotContains(t, output, "[mcp]")
 	require.NotContains(t, output, "[skills]")

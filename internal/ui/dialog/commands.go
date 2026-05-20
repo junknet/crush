@@ -512,7 +512,6 @@ func (c *Commands) defaultCommands() []*CommandItem {
 
 	commands = append(
 		commands,
-		NewCommandItem(c.com.Styles, "toggle_yolo", "Permissions Always Open", "", ActionToggleYoloMode{}),
 		NewCommandItem(c.com.Styles, "toggle_help", "Toggle Help", "ctrl+g", ActionToggleHelp{}),
 		NewCommandItem(c.com.Styles, "init", "Initialize Project", "", ActionInitializeProject{}),
 	)

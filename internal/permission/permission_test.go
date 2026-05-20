@@ -9,7 +9,7 @@ import (
 func TestPermissionService_AlwaysAllowsRequests(t *testing.T) {
 	t.Parallel()
 
-	service := NewPermissionService("/tmp", false, []string{"bash:execute"})
+	service := NewPermissionService("/tmp", []string{"bash:execute"})
 
 	granted, err := service.Request(t.Context(), CreatePermissionRequest{
 		SessionID:   "session-1",
@@ -32,17 +32,4 @@ func TestPermissionService_AlwaysAllowsRequests(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, granted)
-}
-
-func TestPermissionService_SkipRequestsIsAlwaysTrue(t *testing.T) {
-	t.Parallel()
-
-	service := NewPermissionService("/tmp", false, nil)
-	require.True(t, service.SkipRequests())
-
-	service.SetSkipRequests(false)
-	require.True(t, service.SkipRequests())
-
-	service.SetSkipRequests(true)
-	require.True(t, service.SkipRequests())
 }

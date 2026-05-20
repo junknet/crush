@@ -27,13 +27,6 @@ type fileSnapshot struct {
 	ModTime int64 // UnixNano
 }
 
-// RuntimeOverrides holds per-session settings that are never persisted to
-// disk. They are applied on top of the loaded Config and survive only for
-// the lifetime of the process (or workspace).
-type RuntimeOverrides struct {
-	SkipPermissionRequests bool
-}
-
 // ConfigStore is the single entry point for all config access. It owns the
 // pure-data Config, runtime state (working directory, resolver, known
 // providers), and persistence to both global and workspace config files.
@@ -45,7 +38,6 @@ type ConfigStore struct {
 	workspacePath      string   // .crush/crush.{json|yaml|yml}
 	loadedPaths        []string // config files that were successfully loaded
 	knownProviders     []catwalk.Provider
-	overrides          RuntimeOverrides
 	trackedConfigPaths []string                // unique, normalized config file paths
 	snapshots          map[string]fileSnapshot // path -> snapshot at last capture
 	autoReloadDisabled bool                    // set during load/reload to prevent re-entrancy
@@ -83,11 +75,6 @@ func (s *ConfigStore) KnownProviders() []catwalk.Provider {
 // SetupAgents configures the coder and task agents on the config.
 func (s *ConfigStore) SetupAgents() {
 	s.config.SetupAgents()
-}
-
-// Overrides returns the runtime overrides for this store.
-func (s *ConfigStore) Overrides() *RuntimeOverrides {
-	return &s.overrides
 }
 
 // LoadedPaths returns the config file paths that were successfully loaded.
@@ -807,9 +794,6 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 		return fmt.Errorf("invalid hook configuration on reload: %w", err)
 	}
 
-	// Preserve runtime overrides
-	overrides := s.overrides
-
 	// Reconfigure providers
 	env := env.New()
 	resolver := NewShellVariableResolver(env)
@@ -827,7 +811,6 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 	oldLoadedPaths := s.loadedPaths
 	oldResolver := s.resolver
 	oldKnownProviders := s.knownProviders
-	oldOverrides := s.overrides
 	oldWorkspacePath := s.workspacePath
 
 	// Update store state BEFORE running model/agent setup (so they see new config)
@@ -835,7 +818,6 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 	s.loadedPaths = loadedPaths
 	s.resolver = resolver
 	s.knownProviders = providers
-	s.overrides = overrides
 	s.workspacePath = workspacePath
 
 	// Mirror startup flow: setup models and agents against NEW config
@@ -856,7 +838,6 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 		s.loadedPaths = oldLoadedPaths
 		s.resolver = oldResolver
 		s.knownProviders = oldKnownProviders
-		s.overrides = oldOverrides
 		s.workspacePath = oldWorkspacePath
 		return setupErr
 	}

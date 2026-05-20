@@ -58,7 +58,7 @@ func TestHookedTool_AllowStampsHookApproval(t *testing.T) {
 	require.True(t, inner.called, "inner tool should have run")
 
 	// The inner tool's permission service can now treat call-1 as pre-approved.
-	svc := permission.NewPermissionService(t.TempDir(), false, nil)
+	svc := permission.NewPermissionService(t.TempDir(), nil)
 	granted, err := svc.Request(inner.gotCtx, permission.CreatePermissionRequest{
 		SessionID:  "s1",
 		ToolCallID: "call-1",
@@ -81,7 +81,7 @@ func TestHookedTool_SilentDoesNotStampApproval(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, inner.called)
 
-	svc := permission.NewPermissionService(t.TempDir(), false, nil)
+	svc := permission.NewPermissionService(t.TempDir(), nil)
 	granted, err := svc.Request(inner.gotCtx, permission.CreatePermissionRequest{
 		SessionID:  "s1",
 		ToolCallID: "call-2",

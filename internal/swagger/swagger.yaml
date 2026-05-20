@@ -47,6 +47,43 @@ definitions:
       top_p:
         type: number
     type: object
+  config.Agent:
+    properties:
+      allowed_mcp:
+        additionalProperties:
+          items:
+            type: string
+          type: array
+        description: |-
+          this tells us which MCPs are available for this agent
+           if this is empty all mcps are available
+           the string array is the list of tools from the AllowedMCP the agent has available
+           if the string array is nil, all tools from the AllowedMCP are available
+        type: object
+      allowed_tools:
+        description: |-
+          The available tools for the agent
+           if this is nil, all tools are available
+        items:
+          type: string
+        type: array
+      context_paths:
+        description: Overrides the context paths for this agent
+        items:
+          type: string
+        type: array
+      description:
+        type: string
+      disabled:
+        description: This is the id of the system prompt used by the agent
+        type: boolean
+      id:
+        type: string
+      model:
+        $ref: '#/definitions/config.SelectedModelType'
+      name:
+        type: string
+    type: object
   config.Attribution:
     properties:
       co_authored_by:
@@ -172,14 +209,6 @@ definitions:
           type: string
         type: array
     type: object
-  config.Scope:
-    enum:
-    - 0
-    - 1
-    type: integer
-    x-enum-varnames:
-    - ScopeGlobal
-    - ScopeWorkspace
   config.SelectedModel:
     properties:
       frequency_penalty:
@@ -222,10 +251,16 @@ definitions:
     enum:
     - large
     - small
+    - build
+    - coder
+    - explore
     type: string
     x-enum-varnames:
     - SelectedModelTypeLarge
     - SelectedModelTypeSmall
+    - SelectedModelTypeBuild
+    - SelectedModelTypeCoder
+    - SelectedModelTypeExplore
   config.TUIOptions:
     properties:
       compact_mode:
@@ -272,6 +307,12 @@ definitions:
     properties:
       $schema:
         type: string
+      agents:
+        additionalProperties:
+          $ref: '#/definitions/config.Agent'
+        type: object
+      default_agent:
+        type: string
       hooks:
         additionalProperties:
           items:
@@ -285,7 +326,7 @@ definitions:
       models:
         additionalProperties:
           $ref: '#/definitions/config.SelectedModel'
-        description: We currently only support large/small as values here.
+        description: Model profiles used by the built-in roles and legacy aliases.
         type: object
       options:
         $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Options'
@@ -355,6 +396,14 @@ definitions:
       tui:
         $ref: '#/definitions/config.TUIOptions'
     type: object
+  github_com_charmbracelet_crush_internal_config.Scope:
+    enum:
+    - 0
+    - 1
+    type: integer
+    x-enum-varnames:
+    - ScopeGlobal
+    - ScopeWorkspace
   github_com_charmbracelet_crush_internal_proto.Message:
     properties:
       created_at:
@@ -443,6 +492,10 @@ definitions:
         type: string
       title:
         type: string
+      todos:
+        items:
+          $ref: '#/definitions/proto.Todo'
+        type: array
       updated_at:
         type: integer
     type: object
@@ -464,7 +517,7 @@ definitions:
       enabled:
         type: boolean
       scope:
-        $ref: '#/definitions/config.Scope'
+        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigModelRequest:
     properties:
@@ -473,7 +526,7 @@ definitions:
       model_type:
         $ref: '#/definitions/config.SelectedModelType'
       scope:
-        $ref: '#/definitions/config.Scope'
+        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigProviderKeyRequest:
     properties:
@@ -486,28 +539,28 @@ definitions:
       provider_id:
         type: string
       scope:
-        $ref: '#/definitions/config.Scope'
+        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigRefreshOAuthRequest:
     properties:
       provider_id:
         type: string
       scope:
-        $ref: '#/definitions/config.Scope'
+        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigRemoveRequest:
     properties:
       key:
         type: string
       scope:
-        $ref: '#/definitions/config.Scope'
+        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigSetRequest:
     properties:
       key:
         type: string
       scope:
-        $ref: '#/definitions/config.Scope'
+        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
       value: {}
     type: object
   proto.Error:
@@ -665,11 +718,6 @@ definitions:
       tool_name:
         type: string
     type: object
-  proto.PermissionSkipRequest:
-    properties:
-      skip:
-        type: boolean
-    type: object
   proto.ProjectInitPromptResponse:
     properties:
       prompt:
@@ -705,8 +753,21 @@ definitions:
         type: string
       title:
         type: string
+      todos:
+        items:
+          $ref: '#/definitions/proto.Todo'
+        type: array
       updated_at:
         type: integer
+    type: object
+  proto.Todo:
+    properties:
+      active_form:
+        type: string
+      content:
+        type: string
+      status:
+        type: string
     type: object
   proto.VersionInfo:
     properties:
@@ -739,8 +800,6 @@ definitions:
         type: string
       version:
         type: string
-      yolo:
-        type: boolean
     type: object
   time.Duration:
     enum:
@@ -1997,65 +2056,6 @@ paths:
           schema:
             $ref: '#/definitions/proto.Error'
       summary: Grant permission
-      tags:
-      - permissions
-  /workspaces/{id}/permissions/skip:
-    get:
-      parameters:
-      - description: Workspace ID
-        in: path
-        name: id
-        required: true
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/proto.PermissionSkipRequest'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/proto.Error'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/proto.Error'
-      summary: Get skip permissions status
-      tags:
-      - permissions
-    post:
-      consumes:
-      - application/json
-      parameters:
-      - description: Workspace ID
-        in: path
-        name: id
-        required: true
-        type: string
-      - description: Permission skip request
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/proto.PermissionSkipRequest'
-      responses:
-        "200":
-          description: OK
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/proto.Error'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/proto.Error'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/proto.Error'
-      summary: Set skip permissions
       tags:
       - permissions
   /workspaces/{id}/project/init:

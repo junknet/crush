@@ -396,7 +396,7 @@ func writeSkills(b *strings.Builder, allSkills []*skills.Skill, activeSkills []*
 func writePermissions(b *strings.Builder, cfg *config.ConfigStore) {
 	c := cfg.Config()
 	b.WriteString("[permissions]\n")
-	b.WriteString("mode = yolo\n")
+	b.WriteString("mode = always_open\n")
 	if c.Permissions != nil && len(c.Permissions.AllowedTools) > 0 {
 		sorted := slices.Clone(c.Permissions.AllowedTools)
 		slices.Sort(sorted)
