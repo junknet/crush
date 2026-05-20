@@ -651,6 +651,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			tools.NewNimDocumentSymbolsTool(c.lspManager),
 			tools.NewNimWorkspaceSymbolsTool(c.lspManager),
 			tools.NewNimCheckFileTool(c.lspManager),
+			tools.NewNimCallHierarchyTool(c.lspManager),
 		)
 	}
 
