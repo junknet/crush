@@ -583,20 +583,27 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 
 func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubAgent bool) ([]fantasy.AgentTool, error) {
 	var allTools []fantasy.AgentTool
-	if slices.Contains(agent.AllowedTools, AgentToolName) {
-		agentTool, err := c.agentTool(ctx)
-		if err != nil {
-			return nil, err
-		}
-		allTools = append(allTools, agentTool)
-	}
 
-	if slices.Contains(agent.AllowedTools, tools.AgenticFetchToolName) {
-		agenticFetchTool, err := c.agenticFetchTool(ctx, nil)
-		if err != nil {
-			return nil, err
+	// Recursion guard: sub-agents never get the delegation tools. Even if a
+	// misconfigured AllowedTools includes "agent" or "agentic_fetch", we drop
+	// them here so a sub-agent can't spawn a sub-sub-agent. The current
+	// architecture has no depth budget, so one-level-only is the safe rule.
+	if !isSubAgent {
+		if slices.Contains(agent.AllowedTools, AgentToolName) {
+			agentTool, err := c.agentTool(ctx)
+			if err != nil {
+				return nil, err
+			}
+			allTools = append(allTools, agentTool)
 		}
-		allTools = append(allTools, agenticFetchTool)
+
+		if slices.Contains(agent.AllowedTools, tools.AgenticFetchToolName) {
+			agenticFetchTool, err := c.agenticFetchTool(ctx, nil)
+			if err != nil {
+				return nil, err
+			}
+			allTools = append(allTools, agenticFetchTool)
+		}
 	}
 
 	// Get the model name for the agent
