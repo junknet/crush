@@ -2,11 +2,11 @@
 """nimlsp_custom_endpoints.py — 验 crush 4 个 nimlsp 自定义工具的 LSP 后端契约。
 
 直接 spawn nimlangserver、过 init,在真 Nim 项目上跑 3 个自定义 method:
-  - extension/macroExpand     (lsp_macro_expand)
-  - nimlsp/projectMaps        (lsp_project_maps)
-  - nimlsp/safeToDelete       (lsp_safe_to_delete)
+  - extension/macroExpand     (nim_macro_expand)
+  - nimlsp/projectMaps        (nim_project_maps)
+  - nimlsp/safeToDelete       (nim_safe_to_delete)
 
-第 4 个 LLM 工具 lsp_restart 不走 LSP 自定义 method(只调 client.Restart()),
+第 4 个 LLM 工具 nim_restart 不走 LSP 自定义 method(只调 client.Restart()),
 通过 internal/lsp 已有的 Go 测试覆盖,这里不重复。
 
 退出码:

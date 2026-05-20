@@ -257,8 +257,8 @@ func NewToolMessageItem(
 		item = NewTodosToolMessageItem(sty, toolCall, result, canceled)
 	case tools.ReferencesToolName:
 		item = NewReferencesToolMessageItem(sty, toolCall, result, canceled)
-	case tools.LSPRestartToolName:
-		item = NewLSPRestartToolMessageItem(sty, toolCall, result, canceled)
+	case tools.NimRestartToolName:
+		item = NewNimRestartToolMessageItem(sty, toolCall, result, canceled)
 	default:
 		if IsDockerMCPTool(toolCall.Name) {
 			item = NewDockerMCPToolMessageItem(sty, toolCall, result, canceled)

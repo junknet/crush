@@ -9,18 +9,18 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 )
 
-type LSPProjectMapsParams struct{}
+type NimProjectMapsParams struct{}
 
-const LSPProjectMapsToolName = "lsp_project_maps"
+const NimProjectMapsToolName = "nim_project_maps"
 
-//go:embed lsp_project_maps.md
-var lspProjectMapsDescription string
+//go:embed nim_project_maps.md
+var nimProjectMapsDescription string
 
-func NewLSPProjectMapsTool(lspManager *lsp.Manager) fantasy.AgentTool {
+func NewNimProjectMapsTool(lspManager *lsp.Manager) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
-		LSPProjectMapsToolName,
-		lspProjectMapsDescription,
-		func(ctx context.Context, params LSPProjectMapsParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		NimProjectMapsToolName,
+		nimProjectMapsDescription,
+		func(ctx context.Context, params NimProjectMapsParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			var client *lsp.Client
 			for c := range lspManager.Clients().Seq() {
 				client = c

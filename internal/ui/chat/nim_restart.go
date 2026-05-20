@@ -8,34 +8,34 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/styles"
 )
 
-// LSPRestartToolMessageItem is a message item that represents a lsprestart tool call.
-type LSPRestartToolMessageItem struct {
+// NimRestartToolMessageItem is a message item that represents a lsprestart tool call.
+type NimRestartToolMessageItem struct {
 	*baseToolMessageItem
 }
 
-var _ ToolMessageItem = (*LSPRestartToolMessageItem)(nil)
+var _ ToolMessageItem = (*NimRestartToolMessageItem)(nil)
 
-// NewLSPRestartToolMessageItem creates a new [LSPRestartToolMessageItem].
-func NewLSPRestartToolMessageItem(
+// NewNimRestartToolMessageItem creates a new [NimRestartToolMessageItem].
+func NewNimRestartToolMessageItem(
 	sty *styles.Styles,
 	toolCall message.ToolCall,
 	result *message.ToolResult,
 	canceled bool,
 ) ToolMessageItem {
-	return newBaseToolMessageItem(sty, toolCall, result, &LSPRestartToolRenderContext{}, canceled)
+	return newBaseToolMessageItem(sty, toolCall, result, &NimRestartToolRenderContext{}, canceled)
 }
 
-// LSPRestartToolRenderContext renders lsprestart tool messages.
-type LSPRestartToolRenderContext struct{}
+// NimRestartToolRenderContext renders lsprestart tool messages.
+type NimRestartToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
-func (r *LSPRestartToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
+func (r *NimRestartToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if opts.IsPending() {
 		return pendingTool(sty, "Restart LSP", opts.Anim, opts.Compact)
 	}
 
-	var params tools.LSPRestartParams
+	var params tools.NimRestartParams
 	_ = json.Unmarshal([]byte(opts.ToolCall.Input), &params)
 
 	var toolParams []string

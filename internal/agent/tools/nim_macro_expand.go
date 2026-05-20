@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
-type LSPMacroExpandParams struct {
+type NimMacroExpandParams struct {
 	FilePath  string `json:"file_path" description:"The absolute or relative path to the Nim source file."`
 	Line      int    `json:"line" description:"The 1-based line number of the cursor."`
 	Character int    `json:"character" description:"The 1-based character/column number of the cursor."`
@@ -29,16 +29,16 @@ type ExpandResult struct {
 	Range   protocol.Range `json:"range"`
 }
 
-const LSPMacroExpandToolName = "lsp_macro_expand"
+const NimMacroExpandToolName = "nim_macro_expand"
 
-//go:embed lsp_macro_expand.md
-var lspMacroExpandDescription string
+//go:embed nim_macro_expand.md
+var nimMacroExpandDescription string
 
-func NewLSPMacroExpandTool(lspManager *lsp.Manager) fantasy.AgentTool {
+func NewNimMacroExpandTool(lspManager *lsp.Manager) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
-		LSPMacroExpandToolName,
-		lspMacroExpandDescription,
-		func(ctx context.Context, params LSPMacroExpandParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		NimMacroExpandToolName,
+		nimMacroExpandDescription,
+		func(ctx context.Context, params NimMacroExpandParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.FilePath == "" {
 				return fantasy.NewTextErrorResponse("file_path is required"), nil
 			}
