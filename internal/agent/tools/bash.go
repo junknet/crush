@@ -146,6 +146,15 @@ var bannedCommands = []string{
 	"pfctl",
 	"route",
 	"ufw",
+
+	// Interactive tools that hang non-interactive sessions
+	"vi",
+	"vim",
+	"view",
+	"nano",
+	"emacs",
+	"less",
+	"more",
 }
 
 func bashDescription(attribution *config.Attribution, modelID string) string {
