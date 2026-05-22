@@ -10,28 +10,24 @@ import (
 
 // ConfigSetRequest represents a request to set a config field.
 type ConfigSetRequest struct {
-	Scope config.Scope `json:"scope"`
-	Key   string       `json:"key"`
-	Value any          `json:"value"`
+	Key   string `json:"key"`
+	Value any    `json:"value"`
 }
 
 // ConfigRemoveRequest represents a request to remove a config field.
 type ConfigRemoveRequest struct {
-	Scope config.Scope `json:"scope"`
-	Key   string       `json:"key"`
+	Key string `json:"key"`
 }
 
 // ConfigModelRequest represents a request to update the preferred model.
 type ConfigModelRequest struct {
-	Scope     config.Scope             `json:"scope"`
 	ModelType config.SelectedModelType `json:"model_type"`
 	Model     config.SelectedModel     `json:"model"`
 }
 
 // ConfigCompactRequest represents a request to set compact mode.
 type ConfigCompactRequest struct {
-	Scope   config.Scope `json:"scope"`
-	Enabled bool         `json:"enabled"`
+	Enabled bool `json:"enabled"`
 }
 
 // APIKeyKind discriminates the kind of credential carried in a
@@ -51,7 +47,6 @@ const (
 // key. APIKey is the raw JSON for the credential; Kind selects the
 // concrete Go type APIKey should be decoded into via DecodeAPIKey.
 type ConfigProviderKeyRequest struct {
-	Scope      config.Scope    `json:"scope"`
 	ProviderID string          `json:"provider_id"`
 	Kind       APIKeyKind      `json:"kind"`
 	APIKey     json.RawMessage `json:"api_key"`
@@ -82,8 +77,7 @@ func (r ConfigProviderKeyRequest) DecodeAPIKey() (any, error) {
 
 // ConfigRefreshOAuthRequest represents a request to refresh an OAuth token.
 type ConfigRefreshOAuthRequest struct {
-	Scope      config.Scope `json:"scope"`
-	ProviderID string       `json:"provider_id"`
+	ProviderID string `json:"provider_id"`
 }
 
 // ImportCopilotResponse represents the response from importing Copilot credentials.

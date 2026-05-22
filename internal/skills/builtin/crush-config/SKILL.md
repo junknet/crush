@@ -92,12 +92,12 @@ reviewed.
 ```json
 {
   "models": {
-    "large": {
+    "brain": {
       "model": "claude-sonnet-4-20250514",
       "provider": "anthropic",
       "max_tokens": 16384
     },
-    "small": {
+    "explore": {
       "model": "claude-haiku-4-20250514",
       "provider": "anthropic"
     }
@@ -105,7 +105,7 @@ reviewed.
 }
 ```
 
-- `large` is the primary coding model; `small` is for summarization.
+- `brain` is the primary coding model; `explore` is for summarization.
 - Only `model` and `provider` are required.
 - Optional tuning: `reasoning_effort`, `think`, `max_tokens`, `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `provider_options`.
 

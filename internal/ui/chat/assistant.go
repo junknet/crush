@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/list"
 	"github.com/charmbracelet/crush/internal/ui/styles"
@@ -127,7 +127,6 @@ type AssistantMessageItem struct {
 
 	message           *message.Message
 	sty               *styles.Styles
-	anim              *anim.Anim
 	thinkingViewMode  thinkingViewMode
 	thinkingBoxHeight int // Tracks the rendered thinking box height for click detection.
 
@@ -160,14 +159,6 @@ func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) Messa
 		sty:                      sty,
 	}
 
-	a.anim = anim.New(anim.Settings{
-		ID:          a.ID(),
-		Size:        15,
-		GradColorA:  sty.WorkingGradFromColor,
-		GradColorB:  sty.WorkingGradToColor,
-		LabelColor:  sty.WorkingLabelColor,
-		CycleColors: true,
-	})
 	return a
 }
 
@@ -176,22 +167,22 @@ func (a *AssistantMessageItem) StartAnimation() tea.Cmd {
 	if !a.isSpinning() {
 		return nil
 	}
-	return a.anim.Start()
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return StepMsg{ID: a.ID()}
+	})
 }
 
 // Animate progresses the assistant message animation if it should be spinning.
-func (a *AssistantMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
+func (a *AssistantMessageItem) Animate(msg StepMsg) tea.Cmd {
 	if !a.isSpinning() {
 		return nil
 	}
 	// Bump the F6 list-cache version so the next draw re-renders
-	// this item: a spinner tick mutates anim's internal frame
-	// counter, which changes the rendered output but is invisible
-	// to the per-section content hashes. Without the bump the
-	// list cache would serve the previously rendered frame
-	// indefinitely and the spinner would appear frozen.
+	// this item.
 	a.Bump()
-	return a.anim.Animate(msg)
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return StepMsg{ID: a.ID()}
+	})
 }
 
 // ID implements MessageItem.

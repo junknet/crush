@@ -17,7 +17,15 @@ type toolResultContentWidths struct {
 func humanizedToolName(name string) string {
 	name = strings.ReplaceAll(name, "_", " ")
 	name = strings.ReplaceAll(name, "-", " ")
-	return stringext.Capitalize(name)
+	capitalized := stringext.Capitalize(name)
+	capitalized = strings.ReplaceAll(capitalized, " Dag", " DAG")
+	if strings.HasPrefix(capitalized, "Dag ") {
+		capitalized = "DAG " + capitalized[4:]
+	}
+	if capitalized == "Dag" {
+		capitalized = "DAG"
+	}
+	return capitalized
 }
 
 func looksLikeMarkdown(content string) bool {

@@ -211,6 +211,7 @@ type Styles struct {
 	// Files
 	Files struct {
 		Path           lipgloss.Style
+		Link           lipgloss.Style
 		Additions      lipgloss.Style
 		Deletions      lipgloss.Style
 		SectionTitle   lipgloss.Style // "Modified Files" heading
@@ -262,6 +263,7 @@ type Styles struct {
 		// Parameter list styles
 		ParamMain lipgloss.Style
 		ParamKey  lipgloss.Style
+		ParamLink lipgloss.Style
 
 		// Content rendering styles
 		ContentLine           lipgloss.Style // Individual content line with background and width
@@ -301,7 +303,7 @@ type Styles struct {
 		JobDescription lipgloss.Style // Description text
 
 		// Agent task styles
-		AgentTaskTag lipgloss.Style // Agent task tag (blue background, bold)
+		AgentWorkTag lipgloss.Style // Agent task tag (blue background, bold)
 		AgentPrompt  lipgloss.Style // Agent prompt text
 
 		// Agentic fetch styles

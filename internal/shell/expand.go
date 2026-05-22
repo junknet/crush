@@ -89,10 +89,11 @@ func ExpandValue(ctx context.Context, value string, env []string) (string, error
 		CmdSubst: func(w io.Writer, cs *syntax.CmdSubst) error {
 			stderrBuf.Reset()
 			runnerOpts := []interp.RunnerOption{
-				interp.StdIO(nil, w, &stderrBuf),
+				interp.StdIO(strings.NewReader(""), w, &stderrBuf),
 				interp.Interactive(false),
 				interp.Env(expand.ListEnviron(env...)),
 				interp.Dir(s.cwd),
+				interp.CallHandler(rewriteUnsupportedBuiltins),
 				interp.ExecHandlers(standardHandlers(s.blockFuncs)...),
 			}
 			if strict {

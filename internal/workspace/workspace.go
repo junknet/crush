@@ -85,8 +85,8 @@ type Workspace interface {
 	AgentClearQueue(sessionID string)
 	AgentSummarize(ctx context.Context, sessionID string) error
 	UpdateAgentModel(ctx context.Context) error
-	InitCoderAgent(ctx context.Context) error
-	GetDefaultSmallModel(providerID string) config.SelectedModel
+	InitBrainAgent(ctx context.Context) error
+	GetDefaultExploreModel(providerID string) config.SelectedModel
 
 	// Permissions
 	PermissionGrant(perm permission.PermissionRequest)
@@ -113,13 +113,13 @@ type Workspace interface {
 	Resolver() config.VariableResolver
 
 	// Config mutations (proxied to server in client mode)
-	UpdatePreferredModel(scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel) error
-	SetCompactMode(scope config.Scope, enabled bool) error
-	SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error
-	SetConfigField(scope config.Scope, key string, value any) error
-	RemoveConfigField(scope config.Scope, key string) error
+	UpdatePreferredModel(modelType config.SelectedModelType, model config.SelectedModel) error
+	SetCompactMode(enabled bool) error
+	SetProviderAPIKey(providerID string, apiKey any) error
+	SetConfigField(key string, value any) error
+	RemoveConfigField(key string) error
 	ImportCopilot() (*oauth.Token, bool)
-	RefreshOAuthToken(ctx context.Context, scope config.Scope, providerID string) error
+	RefreshOAuthToken(ctx context.Context, providerID string) error
 
 	// Project lifecycle
 	ProjectNeedsInitialization() (bool, error)

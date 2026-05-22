@@ -40,7 +40,7 @@ func (h *HTTPRoundTripLogger) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 
 	if slog.Default().Enabled(req.Context(), slog.LevelDebug) {
-		slog.Debug(
+		slog.DebugContext(req.Context(),
 			"HTTP Request",
 			"method", req.Method,
 			"url", req.URL,
@@ -68,7 +68,7 @@ func (h *HTTPRoundTripLogger) RoundTrip(req *http.Request) (*http.Response, erro
 		return resp, err
 	}
 	if slog.Default().Enabled(req.Context(), slog.LevelDebug) {
-		slog.Debug(
+		slog.DebugContext(req.Context(),
 			"HTTP Response",
 			"status_code", resp.StatusCode,
 			"status", resp.Status,

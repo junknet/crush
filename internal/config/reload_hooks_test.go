@@ -29,7 +29,8 @@ func TestReloadFromDisk_CompilesHookMatchers(t *testing.T) {
 
 	workDir := t.TempDir()
 	dataDir := t.TempDir()
-	configPath := filepath.Join(workDir, "crush.json")
+	configPath := config.GlobalConfig()
+	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o755))
 	cfgJSON := `{
         "hooks": {
             "PreToolUse": [
@@ -82,7 +83,8 @@ func TestSetConfigField_AutoReload_PreservesHookMatcherFiltering(t *testing.T) {
 
 	workDir := t.TempDir()
 	dataDir := t.TempDir()
-	configPath := filepath.Join(workDir, "crush.json")
+	configPath := config.GlobalConfig()
+	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o755))
 	cfgJSON := `{
         "hooks": {
             "PreToolUse": [
@@ -96,7 +98,7 @@ func TestSetConfigField_AutoReload_PreservesHookMatcherFiltering(t *testing.T) {
 	require.NoError(t, err)
 	assertHookFilters(t, store)
 
-	require.NoError(t, store.SetConfigField(config.ScopeGlobal, "options.debug", true))
+	require.NoError(t, store.SetConfigField("options.debug", true))
 
 	assertHookFilters(t, store)
 }

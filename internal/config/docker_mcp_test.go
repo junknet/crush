@@ -68,7 +68,7 @@ func TestEnableDockerMCP(t *testing.T) {
 		}
 		store := &ConfigStore{
 			config:         cfg,
-			globalDataPath: configPath,
+			configBase:     configPath,
 			resolver:       NewShellVariableResolver(env.New()),
 		}
 
@@ -84,8 +84,9 @@ func TestEnableDockerMCP(t *testing.T) {
 		require.Equal(t, []string{"mcp", "gateway", "run"}, mcpConfig.Args)
 		require.False(t, mcpConfig.Disabled)
 
-		// Check persisted config.
-		data, err := os.ReadFile(configPath)
+		// Check persisted config. "mcp.*" is declarative config, so it lands
+		// in the declarative file (crush.yaml) next to the config base.
+		data, err := os.ReadFile(store.configPath())
 		require.NoError(t, err)
 		require.Contains(t, string(data), "docker")
 		require.Contains(t, string(data), "gateway")
@@ -103,7 +104,7 @@ func TestEnableDockerMCP(t *testing.T) {
 		}
 		store := &ConfigStore{
 			config:         cfg,
-			globalDataPath: configPath,
+			configBase:     configPath,
 			resolver:       NewShellVariableResolver(env.New()),
 		}
 
@@ -135,7 +136,7 @@ func TestDisableDockerMCP(t *testing.T) {
 		}
 		store := &ConfigStore{
 			config:         cfg,
-			globalDataPath: configPath,
+			configBase:     configPath,
 			resolver:       NewShellVariableResolver(env.New()),
 		}
 
@@ -159,7 +160,7 @@ func TestDisableDockerMCP(t *testing.T) {
 		}
 		store := &ConfigStore{
 			config:         cfg,
-			globalDataPath: filepath.Join(t.TempDir(), "crush.json"),
+			configBase:     filepath.Join(t.TempDir(), "crush.json"),
 			resolver:       NewShellVariableResolver(env.New()),
 		}
 
@@ -183,7 +184,7 @@ func TestEnableDockerMCPWithRealDockerWhenAvailable(t *testing.T) {
 	}
 	store := &ConfigStore{
 		config:         cfg,
-		globalDataPath: configPath,
+		configBase:     configPath,
 		resolver:       NewShellVariableResolver(env.New()),
 	}
 

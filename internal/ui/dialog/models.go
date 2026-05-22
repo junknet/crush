@@ -20,29 +20,36 @@ import (
 type ModelType int
 
 const (
-	ModelTypeLarge ModelType = iota
-	ModelTypeSmall
+	ModelTypeBrain ModelType = iota
+	ModelTypeWorker
+	ModelTypeExplore
 )
 
 // String returns the string representation of the [ModelType].
 func (mt ModelType) String() string {
 	switch mt {
-	case ModelTypeLarge:
-		return "Large Task"
-	case ModelTypeSmall:
-		return "Small Task"
+	case ModelTypeBrain:
+		return "Brain"
+	case ModelTypeWorker:
+		return "Worker"
+	case ModelTypeExplore:
+		return "Explore"
 	default:
 		return "Unknown"
 	}
 }
 
-// Config returns the corresponding config model type.
+// Config returns the corresponding config model type. The persisted slot in
+// crush.json under `models.<role>` is keyed by this value, so the Switch Model
+// dialog and crush server agree on where the user's choice lives.
 func (mt ModelType) Config() config.SelectedModelType {
 	switch mt {
-	case ModelTypeLarge:
-		return config.SelectedModelTypeLarge
-	case ModelTypeSmall:
-		return config.SelectedModelTypeSmall
+	case ModelTypeBrain:
+		return config.SelectedModelTypeBrain
+	case ModelTypeWorker:
+		return config.SelectedModelTypeWorker
+	case ModelTypeExplore:
+		return config.SelectedModelTypeExplore
 	default:
 		return ""
 	}
@@ -51,10 +58,12 @@ func (mt ModelType) Config() config.SelectedModelType {
 // Placeholder returns the input placeholder for the model type.
 func (mt ModelType) Placeholder() string {
 	switch mt {
-	case ModelTypeLarge:
-		return largeModelInputPlaceholder
-	case ModelTypeSmall:
-		return smallModelInputPlaceholder
+	case ModelTypeBrain:
+		return brainModelInputPlaceholder
+	case ModelTypeWorker:
+		return workerModelInputPlaceholder
+	case ModelTypeExplore:
+		return exploreModelInputPlaceholder
 	default:
 		return ""
 	}
@@ -62,14 +71,22 @@ func (mt ModelType) Placeholder() string {
 
 const (
 	onboardingModelInputPlaceholder = "Find your fave"
-	largeModelInputPlaceholder      = "Choose a model for large, complex tasks"
-	smallModelInputPlaceholder      = "Choose a model for small, simple tasks"
+	brainModelInputPlaceholder      = "Choose a model for the brain role"
+	workerModelInputPlaceholder     = "Choose a model for the worker role"
+	exploreModelInputPlaceholder    = "Choose a model for the explore role"
 )
 
 // ModelsID is the identifier for the model selection dialog.
 const ModelsID = "models"
 
-const defaultModelsDialogMaxWidth = 73
+const (
+	defaultModelsDialogMaxWidth = 73
+	// defaultModelsDialogMaxHeight gives the Switch Model dialog more room
+	// than the generic 20-line dialog cap — each provider group needs a header
+	// line, separator, and N model rows, and with 5+ providers and 10+ models
+	// the 20-line list cropped most groups off-screen.
+	defaultModelsDialogMaxHeight = 40
+)
 
 // Models represents a model selection dialog.
 type Models struct {
@@ -206,11 +223,14 @@ func (m *Models) HandleMsg(msg tea.Msg) Action {
 			if m.isOnboarding {
 				break
 			}
-			if m.modelType == ModelTypeLarge {
-				m.modelType = ModelTypeSmall
-			} else {
-				m.modelType = ModelTypeLarge
+			// Cycle Brain → Worker → Explore → Brain. Shift+Tab reverses the
+			// cycle so the same key chord moves both directions through the
+			// three role slots.
+			dir := 1
+			if msg.String() == "shift+tab" {
+				dir = -1
 			}
+			m.modelType = ModelType((int(m.modelType) + dir + 3) % 3)
 			if err := m.setProviderItems(); err != nil {
 				return util.ReportError(err)
 			}
@@ -233,31 +253,28 @@ func (m *Models) Cursor() *tea.Cursor {
 	return InputCursor(m.com.Styles, m.input.Cursor())
 }
 
-// modelTypeRadioView returns the radio view for model type selection.
+// modelTypeRadioView renders the Brain / Worker / Explore radio strip. The
+// currently-active tab gets the `On` style; tab cycles through them.
 func (m *Models) modelTypeRadioView() string {
 	t := m.com.Styles
 	textStyle := t.Radio.Label
-	largeRadioStyle := t.Radio.Off
-	smallRadioStyle := t.Radio.Off
-	if m.modelType == ModelTypeLarge {
-		largeRadioStyle = t.Radio.On
-	} else {
-		smallRadioStyle = t.Radio.On
+	radioFor := func(active bool) string {
+		if active {
+			return t.Radio.On.Padding(0, 1).Render()
+		}
+		return t.Radio.Off.Padding(0, 1).Render()
 	}
-
-	largeRadio := largeRadioStyle.Padding(0, 1).Render()
-	smallRadio := smallRadioStyle.Padding(0, 1).Render()
-
-	return fmt.Sprintf("%s%s  %s%s",
-		largeRadio, textStyle.Render(ModelTypeLarge.String()),
-		smallRadio, textStyle.Render(ModelTypeSmall.String()))
+	return fmt.Sprintf("%s%s  %s%s  %s%s",
+		radioFor(m.modelType == ModelTypeBrain), textStyle.Render(ModelTypeBrain.String()),
+		radioFor(m.modelType == ModelTypeWorker), textStyle.Render(ModelTypeWorker.String()),
+		radioFor(m.modelType == ModelTypeExplore), textStyle.Render(ModelTypeExplore.String()))
 }
 
 // Draw implements [Dialog].
 func (m *Models) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	t := m.com.Styles
 	width := max(0, min(defaultModelsDialogMaxWidth, area.Dx()-t.Dialog.View.GetHorizontalBorderSize()))
-	height := max(0, min(defaultDialogHeight, area.Dy()-t.Dialog.View.GetVerticalBorderSize()))
+	height := max(0, min(defaultModelsDialogMaxHeight, area.Dy()-t.Dialog.View.GetVerticalBorderSize()))
 	innerWidth := width - t.Dialog.View.GetHorizontalFrameSize()
 	heightOffset := t.Dialog.Title.GetVerticalFrameSize() + titleContentHeight +
 		t.Dialog.InputPrompt.GetVerticalFrameSize() + inputContentHeight +
@@ -484,7 +501,7 @@ func (m *Models) setProviderItems() error {
 
 		if len(validRecentItems) != len(recentItems) {
 			// FIXME: Does this need to be here? Is it mutating the config during a read?
-			if err := m.com.Workspace.SetConfigField(config.ScopeGlobal, fmt.Sprintf("recent_models.%s", selectedType), validRecentItems); err != nil {
+			if err := m.com.Workspace.SetConfigField(fmt.Sprintf("recent_models.%s", selectedType), validRecentItems); err != nil {
 				return fmt.Errorf("failed to update recent models: %w", err)
 			}
 		}

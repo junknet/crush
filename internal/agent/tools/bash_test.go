@@ -23,7 +23,7 @@ func TestBashTool_GrepNoMatchIsNotCommandFailure(t *testing.T) {
 	workingDir := t.TempDir()
 	targetFile := filepath.Join(workingDir, "sample.txt")
 	require.NoError(t, os.WriteFile(targetFile, []byte("alpha\nbeta\n"), 0o644))
-	tool := newBashToolForTest(workingDir)
+	tool, _ := newBashToolForTest(workingDir)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runBashTool(t, tool, ctx, BashParams{
@@ -62,7 +62,7 @@ func (m *mockBashPermissionService) SubscribeNotifications(ctx context.Context) 
 
 func TestBashTool_DefaultAutoBackgroundThreshold(t *testing.T) {
 	workingDir := t.TempDir()
-	tool := newBashToolForTest(workingDir)
+	tool, _ := newBashToolForTest(workingDir)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runBashTool(t, tool, ctx, BashParams{
@@ -80,7 +80,7 @@ func TestBashTool_DefaultAutoBackgroundThreshold(t *testing.T) {
 
 func TestBashTool_CustomAutoBackgroundThreshold(t *testing.T) {
 	workingDir := t.TempDir()
-	tool := newBashToolForTest(workingDir)
+	tool, bgManager := newBashToolForTest(workingDir)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runBashTool(t, tool, ctx, BashParams{
@@ -96,14 +96,14 @@ func TestBashTool_CustomAutoBackgroundThreshold(t *testing.T) {
 	require.NotEmpty(t, meta.ShellID)
 	require.Contains(t, resp.Content, "moved to background")
 
-	bgManager := shell.GetBackgroundShellManager()
 	require.NoError(t, bgManager.Kill(meta.ShellID))
 }
 
-func newBashToolForTest(workingDir string) fantasy.AgentTool {
+func newBashToolForTest(workingDir string) (fantasy.AgentTool, *shell.BackgroundShellManager) {
 	permissions := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
-	return NewBashTool(permissions, workingDir, attribution, "test-model")
+	bgManager := shell.NewBackgroundShellManager()
+	return NewBashTool(permissions, bgManager, workingDir, attribution, "test-model"), bgManager
 }
 
 func runBashTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params BashParams) fantasy.ToolResponse {

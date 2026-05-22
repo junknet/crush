@@ -37,18 +37,15 @@ func (s SelectedModelType) String() string {
 }
 
 const (
-	SelectedModelTypeLarge   SelectedModelType = "large"
-	SelectedModelTypeSmall   SelectedModelType = "small"
-	SelectedModelTypeBuild   SelectedModelType = "build"
-	SelectedModelTypeCoder   SelectedModelType = "coder"
+	SelectedModelTypeBrain   SelectedModelType = "brain"
+	SelectedModelTypeWorker  SelectedModelType = "worker"
 	SelectedModelTypeExplore SelectedModelType = "explore"
 )
 
 const (
-	AgentBuild   string = "build"
-	AgentCoder   string = "coder"
+	AgentBrain   string = "brain"
+	AgentWorker  string = "worker"
 	AgentExplore string = "explore"
-	AgentTask           = AgentCoder
 )
 
 type SelectedModel struct {
@@ -64,6 +61,15 @@ type SelectedModel struct {
 
 	// Used by anthropic models that can reason to indicate if the model should think.
 	Think bool `json:"think,omitempty" jsonschema:"description=Enable thinking mode for Anthropic models that support reasoning"`
+
+	// ThinkingBudget overrides the default Anthropic `thinking.budget_tokens`
+	// hard cap. When unset (0) and `think:true`, crush derives the budget
+	// from `reasoning_effort` (minimal=1024 / low=4000 / medium=8000 /
+	// high=16000 / xhigh=32000); falls back to 2000 if effort is also empty.
+	// Setting a non-zero value here pins the budget regardless of effort —
+	// useful when one role needs a deeper or shallower thinking pool than
+	// the effort-derived default.
+	ThinkingBudget int64 `json:"thinking_budget,omitempty" jsonschema:"description=Explicit Anthropic thinking budget in tokens (overrides effort-derived default),minimum=1024,maximum=64000"`
 
 	// Overrides the default model configuration.
 	MaxTokens        int64    `json:"max_tokens,omitempty" jsonschema:"description=Maximum number of tokens for model responses,maximum=200000,example=4096"`
@@ -85,7 +91,7 @@ type ProviderConfig struct {
 	// The provider's API endpoint.
 	BaseURL string `json:"base_url,omitempty" jsonschema:"description=Base URL for the provider's API,format=uri,example=https://api.openai.com/v1"`
 	// The provider type, e.g. "openai", "anthropic", etc. if empty it defaults to openai.
-	Type catwalk.Type `json:"type,omitempty" jsonschema:"description=Provider type that determines the API format,enum=openai,enum=openai-compat,enum=anthropic,enum=gemini,enum=azure,enum=vertexai,default=openai"`
+	Type catwalk.Type `json:"type,omitempty" jsonschema:"description=Provider type that determines the API format,enum=openai,enum=openai-compat,enum=anthropic,enum=gemini,enum=azure,enum=vertexai,enum=antigravity,enum=anthropic-oauth,default=openai"`
 	// The provider's API key.
 	APIKey string `json:"api_key,omitempty" jsonschema:"description=API key for authentication with the provider,example=$OPENAI_API_KEY"`
 	// The original API key template before resolution (for re-resolution on auth errors).
@@ -178,7 +184,14 @@ type MCPConfig struct {
 	Disabled      bool              `json:"disabled,omitempty" jsonschema:"description=Whether this MCP server is disabled,default=false"`
 	DisabledTools []string          `json:"disabled_tools,omitempty" jsonschema:"description=List of tools from this MCP server to disable,example=get-library-doc"`
 	EnabledTools  []string          `json:"enabled_tools,omitempty" jsonschema:"description=Allow list of tools from this MCP server,example=get-library-doc"`
-	Timeout       int               `json:"timeout,omitempty" jsonschema:"description=Timeout in seconds for MCP server connections,default=15,example=30,example=60,example=120"`
+	// ConnectTimeout bounds session establishment (Connect) and health
+	// pings. Tool execution latency is governed by CallTimeout instead —
+	// historically these shared one knob and the default either starved
+	// startups or killed legitimate long tool calls.
+	ConnectTimeout int `json:"connect_timeout,omitempty" jsonschema:"description=Timeout in seconds for MCP session establishment and health pings,default=15,example=30,example=60"`
+	// CallTimeout bounds a single tool invocation. 0 disables the
+	// timeout (the agent's outer ctx is still honoured).
+	CallTimeout int `json:"call_timeout,omitempty" jsonschema:"description=Timeout in seconds for a single MCP tool invocation. 0 disables.,default=300,example=60,example=600"`
 
 	// Headers are HTTP headers for HTTP/SSE MCP servers. Values run
 	// through shell expansion at MCP startup, so $VAR and $(cmd)
@@ -489,7 +502,7 @@ type Agent struct {
 	// This is the id of the system prompt used by the agent
 	Disabled bool `json:"disabled,omitempty"`
 
-	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=build,enum=coder,enum=explore,enum=large,enum=small,default=build"`
+	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=brain,enum=worker,enum=explore,default=brain"`
 
 	// The available tools for the agent
 	//  if this is nil, all tools are available
@@ -555,8 +568,8 @@ func (h *HookConfig) TimeoutDuration() time.Duration {
 type Config struct {
 	Schema string `json:"$schema,omitempty"`
 
-	// Model profiles used by the built-in roles and legacy aliases.
-	Models map[SelectedModelType]SelectedModel `json:"models,omitempty" jsonschema:"description=Model configurations for different model types,example={\"build\":{\"model\":\"claude-opus-4-7\",\"provider\":\"waitai-anthropic\"}}"`
+	// Model profiles used by the built-in roles.
+	Models map[SelectedModelType]SelectedModel `json:"models,omitempty" jsonschema:"description=Model configurations for different model types,example={\"brain\":{\"model\":\"claude-opus-4-7\",\"provider\":\"waitai-anthropic\"}}"`
 
 	// Recently used models stored in the data directory config.
 	RecentModels map[SelectedModelType][]SelectedModel `json:"recent_models,omitempty" jsonschema:"-"`
@@ -576,7 +589,7 @@ type Config struct {
 
 	Hooks map[string][]HookConfig `json:"hooks,omitempty" jsonschema:"description=User-defined shell commands that fire on hook events (e.g. PreToolUse)"`
 
-	DefaultAgent string           `json:"default_agent,omitempty" jsonschema:"description=Default primary agent name,example=coder"`
+	DefaultAgent string           `json:"default_agent,omitempty" jsonschema:"description=Default primary agent name,example=brain"`
 	Agents       map[string]Agent `json:"agents,omitempty" jsonschema:"description=Agent configurations"`
 }
 
@@ -609,17 +622,7 @@ func (c *Config) GetModel(provider, model string) *catwalk.Model {
 func (c *Config) GetProviderForModel(modelType SelectedModelType) *ProviderConfig {
 	model, ok := c.Models[modelType]
 	if !ok {
-		switch modelType {
-		case SelectedModelTypeBuild, SelectedModelTypeLarge:
-			model, ok = c.Models[SelectedModelTypeLarge]
-		case SelectedModelTypeCoder:
-			model, ok = c.Models[SelectedModelTypeLarge]
-		case SelectedModelTypeExplore, SelectedModelTypeSmall:
-			model, ok = c.Models[SelectedModelTypeSmall]
-		}
-		if !ok {
-			return nil
-		}
+		return nil
 	}
 	if providerConfig, ok := c.Providers.Get(model.Provider); ok {
 		return &providerConfig
@@ -635,27 +638,19 @@ func (c *Config) GetModelByType(modelType SelectedModelType) *catwalk.Model {
 	return c.GetModel(selected.Provider, selected.Model)
 }
 
-func (c *Config) LargeModel() *catwalk.Model {
-	return c.BuildModel()
+// BrainModel returns the configured model for the brain role.
+func (c *Config) BrainModel() *catwalk.Model {
+	return c.getModelByTypeWithFallbacks(SelectedModelTypeBrain)
 }
 
-func (c *Config) SmallModel() *catwalk.Model {
-	return c.ExploreModel()
-}
-
-// BuildModel returns the configured model for the build role.
-func (c *Config) BuildModel() *catwalk.Model {
-	return c.getModelByTypeWithFallbacks(SelectedModelTypeBuild, SelectedModelTypeLarge)
-}
-
-// CoderModel returns the configured model for the coder role.
-func (c *Config) CoderModel() *catwalk.Model {
-	return c.getModelByTypeWithFallbacks(SelectedModelTypeCoder, SelectedModelTypeBuild, SelectedModelTypeLarge)
+// WorkerModel returns the configured model for the worker role.
+func (c *Config) WorkerModel() *catwalk.Model {
+	return c.getModelByTypeWithFallbacks(SelectedModelTypeWorker, SelectedModelTypeBrain)
 }
 
 // ExploreModel returns the configured model for the explore role.
 func (c *Config) ExploreModel() *catwalk.Model {
-	return c.getModelByTypeWithFallbacks(SelectedModelTypeExplore, SelectedModelTypeSmall, SelectedModelTypeBuild, SelectedModelTypeLarge)
+	return c.getModelByTypeWithFallbacks(SelectedModelTypeExplore, SelectedModelTypeBrain)
 }
 
 func (c *Config) getModelByTypeWithFallbacks(modelTypes ...SelectedModelType) *catwalk.Model {
@@ -677,48 +672,22 @@ func (c *Config) SelectedModelForType(modelType SelectedModelType) (SelectedMode
 		return SelectedModel{}, false
 	}
 	switch modelType {
-	case SelectedModelTypeBuild:
-		if model, ok := c.Models[SelectedModelTypeBuild]; ok {
+	case SelectedModelTypeBrain:
+		if model, ok := c.Models[SelectedModelTypeBrain]; ok {
 			return model, true
 		}
-		if model, ok := c.Models[SelectedModelTypeLarge]; ok {
+	case SelectedModelTypeWorker:
+		if model, ok := c.Models[SelectedModelTypeWorker]; ok {
 			return model, true
 		}
-	case SelectedModelTypeCoder:
-		if model, ok := c.Models[SelectedModelTypeCoder]; ok {
-			return model, true
-		}
-		if model, ok := c.Models[SelectedModelTypeBuild]; ok {
-			return model, true
-		}
-		if model, ok := c.Models[SelectedModelTypeLarge]; ok {
+		if model, ok := c.Models[SelectedModelTypeBrain]; ok {
 			return model, true
 		}
 	case SelectedModelTypeExplore:
 		if model, ok := c.Models[SelectedModelTypeExplore]; ok {
 			return model, true
 		}
-		if model, ok := c.Models[SelectedModelTypeSmall]; ok {
-			return model, true
-		}
-		if model, ok := c.Models[SelectedModelTypeBuild]; ok {
-			return model, true
-		}
-		if model, ok := c.Models[SelectedModelTypeLarge]; ok {
-			return model, true
-		}
-	case SelectedModelTypeLarge:
-		if model, ok := c.Models[SelectedModelTypeLarge]; ok {
-			return model, true
-		}
-		if model, ok := c.Models[SelectedModelTypeBuild]; ok {
-			return model, true
-		}
-	case SelectedModelTypeSmall:
-		if model, ok := c.Models[SelectedModelTypeSmall]; ok {
-			return model, true
-		}
-		if model, ok := c.Models[SelectedModelTypeExplore]; ok {
+		if model, ok := c.Models[SelectedModelTypeBrain]; ok {
 			return model, true
 		}
 	}
@@ -731,7 +700,6 @@ func allToolNames() []string {
 	return []string{
 		"agent",
 		"bash",
-		"command_dag",
 		"crush_info",
 		"crush_logs",
 		"job_output",
@@ -773,13 +741,13 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 	return filterSlice(allTools, disabledTools, false)
 }
 
-func resolveReadOnlyTools(tools []string) []string {
-	// Read-only tools the explore sub-agent is allowed to use. Excludes anything
-	// that mutates state (edit/multiedit/write/bash/fetch/download/todos), and
-	// nim_restart (restarts the LSP server). Includes every nim_* read tool so
-	// the sub-agent can honor the parent's nim_first stance.
-	readOnlyTools := []string{
-		"glob", "grep", "ls", "sourcegraph", "view",
+func resolveExploreTools(tools []string) []string {
+	// Tools the explore agent is allowed to use. Bash is included because the
+	// role is Haiku plus a strong prompt plus tool execution; the prompt
+	// constrains it to read-only inspection commands. Direct mutators
+	// (edit/multiedit/write/download/todos) and nim_restart are excluded.
+	exploreTools := []string{
+		"bash", "glob", "grep", "ls", "sourcegraph", "view",
 		"nim_call_hierarchy",
 		"nim_check_file",
 		"nim_definition",
@@ -792,7 +760,7 @@ func resolveReadOnlyTools(tools []string) []string {
 		"nim_safe_to_delete",
 		"nim_workspace_symbols",
 	}
-	return filterSlice(tools, readOnlyTools, true)
+	return filterSlice(tools, exploreTools, true)
 }
 
 func filterSlice(data []string, mask []string, include bool) []string {
@@ -814,19 +782,19 @@ func (c *Config) SetupAgents() {
 	allowedTools := resolveAllowedTools(allToolNames(), c.Options.DisabledTools)
 
 	defaultAgents := map[string]Agent{
-		AgentBuild: {
-			ID:           AgentBuild,
-			Name:         "Build",
-			Description:  "A main-brain agent that plans and reviews changes.",
-			Model:        SelectedModelTypeBuild,
+		AgentBrain: {
+			ID:           AgentBrain,
+			Name:         "Brain",
+			Description:  "A primary reasoning agent that plans, coordinates, and reviews work.",
+			Model:        SelectedModelTypeBrain,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: allowedTools,
 		},
-		AgentCoder: {
-			ID:           AgentCoder,
-			Name:         "Coder",
-			Description:  "An agent that executes coding tasks.",
-			Model:        SelectedModelTypeCoder,
+		AgentWorker: {
+			ID:           AgentWorker,
+			Name:         "Worker",
+			Description:  "A secondary execution agent for edits, refactors, fixes, docs, and verification.",
+			Model:        SelectedModelTypeWorker,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: allowedTools,
 		},
@@ -836,7 +804,7 @@ func (c *Config) SetupAgents() {
 			Description:  "A fast tool-oriented agent for search and inspection.",
 			Model:        SelectedModelTypeExplore,
 			ContextPaths: c.Options.ContextPaths,
-			AllowedTools: resolveReadOnlyTools(allowedTools),
+			AllowedTools: resolveExploreTools(allowedTools),
 			// NO MCPs or LSPs by default
 			AllowedMCP: map[string][]string{},
 		},
@@ -849,7 +817,7 @@ func (c *Config) SetupAgents() {
 
 	for name, agent := range c.Agents {
 		if agent.Disabled {
-			if name == AgentBuild || name == AgentCoder || name == AgentExplore {
+			if name == AgentBrain || name == AgentWorker || name == AgentExplore {
 				continue
 			}
 			delete(agents, name)
@@ -889,21 +857,21 @@ func (c *Config) SetupAgents() {
 	}
 
 	if current, ok := agents[c.DefaultAgent]; c.DefaultAgent == "" || !ok || current.Disabled {
-		c.DefaultAgent = AgentBuild
+		c.DefaultAgent = AgentBrain
 	}
 	c.Agents = agents
 }
 
 func defaultAgentModelType(agentName string) SelectedModelType {
 	switch agentName {
-	case AgentBuild:
-		return SelectedModelTypeBuild
-	case AgentCoder:
-		return SelectedModelTypeCoder
+	case AgentBrain:
+		return SelectedModelTypeBrain
+	case AgentWorker:
+		return SelectedModelTypeWorker
 	case AgentExplore:
 		return SelectedModelTypeExplore
 	default:
-		return SelectedModelTypeBuild
+		return SelectedModelTypeBrain
 	}
 }
 

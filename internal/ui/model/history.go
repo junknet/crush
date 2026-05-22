@@ -44,44 +44,22 @@ func (m *UI) loadPromptHistory() tea.Cmd {
 // handleHistoryUp handles up arrow for history navigation.
 func (m *UI) handleHistoryUp(msg tea.Msg) tea.Cmd {
 	prevHeight := m.textarea.Height()
-	// Navigate to older history entry from cursor position (0,0).
-	if m.textarea.Length() == 0 || m.isAtEditorStart() {
-		if m.historyPrev() {
-			// we send this so that the textarea moves the view to the correct position
-			// without this the cursor will show up in the wrong place.
-			return m.updateTextareaWithPrevHeight(nil, prevHeight)
-		}
+	if m.historyPrev() {
+		// we send this so that the textarea moves the view to the correct position
+		// without this the cursor will show up in the wrong place.
+		return m.updateTextareaWithPrevHeight(nil, prevHeight)
 	}
-
-	// First move cursor to start before entering history.
-	if m.textarea.Line() == 0 {
-		m.textarea.CursorStart()
-		return nil
-	}
-
-	// Let textarea handle normal cursor movement.
 	return m.updateTextarea(msg)
 }
 
 // handleHistoryDown handles down arrow for history navigation.
 func (m *UI) handleHistoryDown(msg tea.Msg) tea.Cmd {
 	prevHeight := m.textarea.Height()
-	// Navigate to newer history entry from end of text.
-	if m.isAtEditorEnd() {
-		if m.historyNext() {
-			// we send this so that the textarea moves the view to the correct position
-			// without this the cursor will show up in the wrong place.
-			return m.updateTextareaWithPrevHeight(nil, prevHeight)
-		}
+	if m.historyNext() {
+		// we send this so that the textarea moves the view to the correct position
+		// without this the cursor will show up in the wrong place.
+		return m.updateTextareaWithPrevHeight(nil, prevHeight)
 	}
-
-	// First move cursor to end before navigating history.
-	if m.textarea.Line() == max(m.textarea.LineCount()-1, 0) {
-		m.textarea.MoveToEnd()
-		return m.updateTextarea(nil)
-	}
-
-	// Let textarea handle normal cursor movement.
 	return m.updateTextarea(msg)
 }
 
@@ -124,7 +102,7 @@ func (m *UI) historyPrev() bool {
 	m.promptHistory.index = nextIndex
 	m.textarea.Reset()
 	m.textarea.InsertString(m.promptHistory.messages[nextIndex])
-	m.textarea.MoveToBegin()
+	m.textarea.MoveToEnd()
 	return true
 }
 
@@ -144,6 +122,7 @@ func (m *UI) historyNext() bool {
 	m.promptHistory.index = nextIndex
 	m.textarea.Reset()
 	m.textarea.InsertString(m.promptHistory.messages[nextIndex])
+	m.textarea.MoveToEnd()
 	return true
 }
 

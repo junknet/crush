@@ -15,16 +15,16 @@ func TestConfig_AgentIDs(t *testing.T) {
 	}
 	cfg.SetupAgents()
 
-	t.Run("Build agent should have correct ID", func(t *testing.T) {
-		buildAgent, ok := cfg.Agents[AgentBuild]
+	t.Run("Brain agent should have correct ID", func(t *testing.T) {
+		brainAgent, ok := cfg.Agents[AgentBrain]
 		require.True(t, ok)
-		assert.Equal(t, AgentBuild, buildAgent.ID, "Build agent ID should be '%s'", AgentBuild)
+		assert.Equal(t, AgentBrain, brainAgent.ID, "Brain agent ID should be '%s'", AgentBrain)
 	})
 
-	t.Run("Coder agent should have correct ID", func(t *testing.T) {
-		coderAgent, ok := cfg.Agents[AgentCoder]
+	t.Run("Worker agent should have correct ID", func(t *testing.T) {
+		workerAgent, ok := cfg.Agents[AgentWorker]
 		require.True(t, ok)
-		assert.Equal(t, AgentCoder, coderAgent.ID, "Coder agent ID should be '%s'", AgentCoder)
+		assert.Equal(t, AgentWorker, workerAgent.ID, "Worker agent ID should be '%s'", AgentWorker)
 	})
 
 	t.Run("Explore agent should have correct ID", func(t *testing.T) {

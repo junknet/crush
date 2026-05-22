@@ -98,7 +98,7 @@ func (s *ConfigStore) PrepareDockerMCPConfig() (MCPConfig, error) {
 // PersistDockerMCPConfig persists a previously prepared Docker MCP
 // configuration to the global config file.
 func (s *ConfigStore) PersistDockerMCPConfig(mcpConfig MCPConfig) error {
-	if err := s.SetConfigField(ScopeGlobal, "mcp."+DockerMCPName, mcpConfig); err != nil {
+	if err := s.SetConfigField("mcp."+DockerMCPName, mcpConfig); err != nil {
 		return fmt.Errorf("failed to persist docker mcp configuration: %w", err)
 	}
 	return nil
@@ -126,7 +126,7 @@ func (s *ConfigStore) DisableDockerMCP() error {
 	delete(s.config.MCP, DockerMCPName)
 
 	// Persist the updated MCP map to the config file.
-	if err := s.SetConfigField(ScopeGlobal, "mcp", s.config.MCP); err != nil {
+	if err := s.SetConfigField("mcp", s.config.MCP); err != nil {
 		return fmt.Errorf("failed to persist docker mcp removal: %w", err)
 	}
 

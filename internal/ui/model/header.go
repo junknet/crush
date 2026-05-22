@@ -144,7 +144,7 @@ func renderHeaderDetails(
 		parts = append(parts, t.LSP.ErrorDiagnostic.Render(fmt.Sprintf("%s%d", styles.LSPErrorIcon, lspErrorCount)))
 	}
 
-	agentCfg := com.Config().Agents[config.AgentBuild]
+	agentCfg := com.Config().Agents[config.AgentBrain]
 	model := com.Config().GetModelByType(agentCfg.Model)
 	if model != nil && model.ContextWindow > 0 {
 		percentage := (float64(session.CompletionTokens+session.PromptTokens) / float64(model.ContextWindow)) * 100
@@ -169,8 +169,9 @@ func renderHeaderDetails(
 	metadata = dot + metadata
 
 	const dirTrimLimit = 4
-	cwd := fsext.DirTrim(fsext.PrettyPath(com.Workspace.WorkingDir()), dirTrimLimit)
-	cwd = t.Header.WorkingDir.Render(cwd)
+	workingDir := com.Workspace.WorkingDir()
+	cwd := fsext.DirTrim(fsext.PrettyPath(workingDir), dirTrimLimit)
+	cwd = common.PathLink(t.Header.WorkingDir, cwd, workingDir)
 
 	result := cwd + metadata
 	return ansi.Truncate(result, max(0, availWidth), "…")

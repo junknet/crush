@@ -4,26 +4,42 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"os"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/crush/internal/ui/anim"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Spinner wraps the bubbles spinner for non-interactive mode
+// Settings represents the spinner configuration settings.
+type Settings struct {
+	Size        int
+	Label       string
+	LabelColor  color.Color
+	GradColorA  color.Color
+	GradColorB  color.Color
+	CycleColors bool
+}
+
+// Spinner wraps the bubbles spinner for non-interactive mode.
 type Spinner struct {
 	done chan struct{}
 	prog *tea.Program
 }
 
 type model struct {
-	cancel context.CancelFunc
-	anim   *anim.Anim
+	cancel  context.CancelFunc
+	spinner spinner.Model
+	label   string
+	style   lipgloss.Style
 }
 
-func (m model) Init() tea.Cmd  { return m.anim.Start() }
-func (m model) View() tea.View { return tea.NewView(m.anim.Render()) }
+func (m model) Init() tea.Cmd  { return m.spinner.Tick }
+func (m model) View() tea.View {
+	return tea.NewView(fmt.Sprintf("%s %s", m.spinner.View(), m.style.Render(m.label)))
+}
 
 // Update implements tea.Model.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -34,18 +50,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			return m, tea.Quit
 		}
-	case anim.StepMsg:
-		cmd := m.anim.Animate(msg)
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 	}
 	return m, nil
 }
 
-// NewSpinner creates a new spinner with the given message
-func NewSpinner(ctx context.Context, cancel context.CancelFunc, animSettings anim.Settings) *Spinner {
+// NewSpinner creates a new spinner with the given message.
+func NewSpinner(ctx context.Context, cancel context.CancelFunc, settings Settings) *Spinner {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+
+	spinnerFG := settings.LabelColor
+	if settings.GradColorA != nil {
+		spinnerFG = settings.GradColorA
+	}
+	s.Style = lipgloss.NewStyle().Foreground(spinnerFG)
+
 	m := model{
-		anim:   anim.New(animSettings),
-		cancel: cancel,
+		spinner: s,
+		label:   settings.Label,
+		style:   lipgloss.NewStyle().Foreground(settings.LabelColor),
+		cancel:  cancel,
 	}
 
 	p := tea.NewProgram(m, tea.WithOutput(os.Stderr), tea.WithContext(ctx))
@@ -56,12 +84,12 @@ func NewSpinner(ctx context.Context, cancel context.CancelFunc, animSettings ani
 	}
 }
 
-// Start begins the spinner animation
+// Start begins the spinner animation.
 func (s *Spinner) Start() {
 	go func() {
 		defer close(s.done)
 		_, err := s.prog.Run()
-		// ensures line is cleared
+		// Ensures line is cleared.
 		fmt.Fprint(os.Stderr, ansi.EraseEntireLine)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, tea.ErrInterrupted) {
 			fmt.Fprintf(os.Stderr, "Error running spinner: %v\n", err)
@@ -69,7 +97,7 @@ func (s *Spinner) Start() {
 	}()
 }
 
-// Stop ends the spinner animation
+// Stop ends the spinner animation.
 func (s *Spinner) Stop() {
 	s.prog.Quit()
 	<-s.done

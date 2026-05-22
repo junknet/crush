@@ -43,8 +43,8 @@ func NewQuit(com *common.Common) *Quit {
 		key.WithHelp("enter/space", "confirm"),
 	)
 	q.keyMap.Yes = key.NewBinding(
-		key.WithKeys("y", "Y", "ctrl+c"),
-		key.WithHelp("y/Y/ctrl+c", "yes"),
+		key.WithKeys("y", "Y"),
+		key.WithHelp("y/Y", "yes"),
 	)
 	q.keyMap.No = key.NewBinding(
 		key.WithKeys("n", "N"),

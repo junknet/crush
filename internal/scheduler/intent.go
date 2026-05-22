@@ -31,9 +31,9 @@ const (
 type WorkerProfile string
 
 const (
-	ProfileBuildAgent  WorkerProfile = "build_agent"
-	ProfileWorkerAgent WorkerProfile = "worker_agent"
-	ProfileToolsAgent  WorkerProfile = "tools_agent"
+	ProfileBrainAgent   WorkerProfile = "brain_agent"
+	ProfileWorkerAgent  WorkerProfile = "worker_agent"
+	ProfileExploreAgent WorkerProfile = "explore_agent"
 )
 
 // Ownership describes the path set a task is allowed to mutate.

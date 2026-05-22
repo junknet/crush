@@ -9,9 +9,12 @@ import (
 type AgentEventType string
 
 const (
-	AgentEventTypeError     AgentEventType = "error"
-	AgentEventTypeResponse  AgentEventType = "response"
-	AgentEventTypeSummarize AgentEventType = "summarize"
+	AgentEventTypeError            AgentEventType = "error"
+	AgentEventTypeResponse         AgentEventType = "response"
+	AgentEventTypeSummarize        AgentEventType = "summarize"
+	AgentEventTypeSubAgentStarted  AgentEventType = "sub_agent_started"
+	AgentEventTypeSubAgentFinished AgentEventType = "sub_agent_finished"
+	AgentEventTypeSubAgentFailed   AgentEventType = "sub_agent_failed"
 )
 
 // MarshalText implements the [encoding.TextMarshaler] interface.
@@ -31,11 +34,20 @@ type AgentEvent struct {
 	Message Message        `json:"message"`
 	Error   error          `json:"error,omitempty"`
 
-	// When summarizing.
+	// Session and provider fields identify the active run that emitted
+	// this event. Sub-agent events use the created child session id.
 	SessionID    string `json:"session_id,omitempty"`
 	SessionTitle string `json:"session_title,omitempty"`
+	ProviderID   string `json:"provider_id,omitempty"`
 	Progress     string `json:"progress,omitempty"`
 	Done         bool   `json:"done,omitempty"`
+
+	// Sub-agent fields are populated for sub_agent_* events so web and TUI
+	// clients can render a traceable live activity row.
+	SubAgentToolCallID string `json:"sub_agent_tool_call_id,omitempty"`
+	SubAgentPrompt     string `json:"sub_agent_prompt,omitempty"`
+	SubAgentProfile    string `json:"sub_agent_profile,omitempty"`
+	SubAgentError      string `json:"sub_agent_error,omitempty"`
 }
 
 // MarshalJSON implements the [json.Marshaler] interface.

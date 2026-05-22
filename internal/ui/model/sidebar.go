@@ -15,7 +15,7 @@ import (
 // modelInfo renders the current model information including reasoning
 // settings and context usage/cost for the sidebar.
 func (m *UI) modelInfo(width int) string {
-	model := m.selectedLargeModel()
+	model := m.selectedBrainModel()
 	reasoningInfo := ""
 	providerName := ""
 
@@ -53,7 +53,13 @@ func (m *UI) modelInfo(width int) string {
 	if model != nil {
 		modelName = model.CatwalkCfg.Name
 	}
-	return common.ModelInfo(m.com.Styles, modelName, providerName, reasoningInfo, modelContext, width, m.hyperCredits)
+	info := common.ModelInfo(m.com.Styles, modelName, providerName, reasoningInfo, modelContext, width, m.hyperCredits)
+	if m.pendingModelSwitch != nil {
+		pendingLine := m.com.Styles.ModelInfo.Reasoning.Render(
+			fmt.Sprintf("→ %s (pending)", m.pendingModelSwitch.Model.Model))
+		info = lipgloss.JoinVertical(lipgloss.Left, info, pendingLine)
+	}
+	return info
 }
 
 // getDynamicHeightLimits will give us the num of items to show in each section based on the height

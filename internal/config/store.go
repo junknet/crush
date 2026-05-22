@@ -31,11 +31,13 @@ type fileSnapshot struct {
 // pure-data Config, runtime state (working directory, resolver, known
 // providers), and persistence to both global and workspace config files.
 type ConfigStore struct {
-	config             *Config
-	workingDir         string
-	resolver           VariableResolver
-	globalDataPath     string   // ~/.local/share/crush/crush.{json|yaml|yml}
-	workspacePath      string   // .crush/crush.{json|yaml|yml}
+	config     *Config
+	workingDir string
+	resolver   VariableResolver
+	// configBase is the single config location base path
+	// (~/.config/crush/crush.json). Declarative config lives in crush.{yaml,
+	// yml,json} next to it; app-written runtime state lives in state.{yaml,yml}.
+	configBase         string
 	loadedPaths        []string // config files that were successfully loaded
 	knownProviders     []catwalk.Provider
 	trackedConfigPaths []string                // unique, normalized config file paths
@@ -72,7 +74,7 @@ func (s *ConfigStore) KnownProviders() []catwalk.Provider {
 	return s.knownProviders
 }
 
-// SetupAgents configures the coder and task agents on the config.
+// SetupAgents configures the worker and task agents on the config.
 func (s *ConfigStore) SetupAgents() {
 	s.config.SetupAgents()
 }
@@ -82,111 +84,60 @@ func (s *ConfigStore) LoadedPaths() []string {
 	return slices.Clone(s.loadedPaths)
 }
 
-// configPath returns the file path for the given scope.
-func (s *ConfigStore) configPath(scope Scope) (string, error) {
-	switch scope {
-	case ScopeWorkspace:
-		if s.workspacePath == "" {
-			return "", ErrNoWorkspaceConfig
-		}
-		if resolved := resolveFirstExistingPath(configCandidates(s.workspacePath)); resolved != "" {
-			return resolved, nil
-		}
-		return s.workspacePath, nil
-	default:
-		if resolved := resolveFirstExistingPath(configCandidates(s.globalDataPath)); resolved != "" {
-			return resolved, nil
-		}
-		return s.globalDataPath, nil
+// configPath returns the declarative config file (~/.config/crush/crush.{yaml,
+// yml,json}), preferring an existing one and defaulting to crush.yaml.
+func (s *ConfigStore) configPath() string {
+	if resolved := resolveFirstExistingPath(configCandidates(s.configBase)); resolved != "" {
+		return resolved
 	}
+	dir := filepath.Dir(s.configBase)
+	return filepath.Join(dir, appName+".yaml")
 }
 
-func (s *ConfigStore) llmConfigPath(scope Scope) (string, error) {
-	switch scope {
-	case ScopeWorkspace:
-		if s.workspacePath == "" {
-			return "", ErrNoWorkspaceConfig
-		}
-		if resolved := resolveFirstExistingPath(llmConfigCandidates(s.workspacePath)); resolved != "" {
-			return resolved, nil
-		}
-		candidates := llmConfigCandidates(s.workspacePath)
-		if len(candidates) == 0 {
-			return "", ErrNoWorkspaceConfig
-		}
-		return candidates[0], nil
-	default:
-		if resolved := resolveFirstExistingPath(llmConfigCandidates(s.globalDataPath)); resolved != "" {
-			return resolved, nil
-		}
-		candidates := llmConfigCandidates(s.globalDataPath)
-		if len(candidates) == 0 {
-			return "", fmt.Errorf("no llm config path configured")
-		}
-		return candidates[0], nil
+// statePath returns the runtime-state file (~/.config/crush/state.{yaml,yml}),
+// preferring an existing one and defaulting to state.yaml.
+func (s *ConfigStore) statePath() string {
+	if resolved := resolveFirstExistingPath(stateConfigCandidates(s.configBase)); resolved != "" {
+		return resolved
 	}
+	return stateConfigCandidates(s.configBase)[0]
 }
 
-func (s *ConfigStore) configPathForKey(scope Scope, key string) (string, error) {
-	if isLLMConfigKey(key) {
-		return s.llmConfigPath(scope)
+// configPathForKey routes a write to state.yaml for runtime-state keys and to
+// crush.yaml for declarative keys.
+func (s *ConfigStore) configPathForKey(key string) string {
+	if isStateKey(key) {
+		return s.statePath()
 	}
-	return s.configPath(scope)
+	return s.configPath()
 }
 
-func (s *ConfigStore) configPathsForKey(scope Scope, key string) ([]string, error) {
-	path, err := s.configPathForKey(scope, key)
-	if err != nil {
-		return nil, err
-	}
-	if !isLLMConfigKey(key) {
-		return []string{path}, nil
-	}
-	basePath, err := s.configPath(scope)
-	if err != nil {
-		return nil, err
-	}
-	return []string{path, basePath}, nil
-}
-
-// HasConfigField checks whether a key exists in the config file for the given
-// scope.
-func (s *ConfigStore) HasConfigField(scope Scope, key string) bool {
-	paths, err := s.configPathsForKey(scope, key)
+// HasConfigField checks whether a key exists in the config file that the key
+// routes to.
+func (s *ConfigStore) HasConfigField(key string) bool {
+	data, err := readConfigFile(s.configPathForKey(key))
 	if err != nil {
 		return false
 	}
-	for _, path := range paths {
-		data, err := readConfigFile(path)
-		if err != nil {
-			continue
-		}
-		if gjson.Get(string(data), key).Exists() {
-			return true
-		}
-	}
-	return false
+	return gjson.Get(string(data), key).Exists()
 }
 
-// SetConfigField sets a key/value pair in the config file for the given scope.
+// SetConfigField sets a key/value pair in the config file the key routes to.
 // After a successful write, it automatically reloads config to keep in-memory
 // state fresh.
-func (s *ConfigStore) SetConfigField(scope Scope, key string, value any) error {
-	return s.SetConfigFields(scope, map[string]any{key: value})
+func (s *ConfigStore) SetConfigField(key string, value any) error {
+	return s.SetConfigFields(map[string]any{key: value})
 }
 
-// SetConfigFields sets multiple key/value pairs in the config file for the given
-// scope in a single write. After a successful write, it automatically reloads
+// SetConfigFields sets multiple key/value pairs in a single write, routing each
+// key to its target file. After a successful write, it automatically reloads
 // config to keep in-memory state fresh. This is preferred over multiple
 // SetConfigField calls when writing several fields atomically to avoid
 // intermediate reloads with partial state.
-func (s *ConfigStore) SetConfigFields(scope Scope, kv map[string]any) error {
+func (s *ConfigStore) SetConfigFields(kv map[string]any) error {
 	grouped := map[string]map[string]any{}
 	for key, value := range kv {
-		path, err := s.configPathForKey(scope, key)
-		if err != nil {
-			return fmt.Errorf("%v: %w", kv, err)
-		}
+		path := s.configPathForKey(key)
 		if _, ok := grouped[path]; !ok {
 			grouped[path] = make(map[string]any)
 		}
@@ -230,41 +181,20 @@ func (s *ConfigStore) SetConfigFields(scope Scope, kv map[string]any) error {
 	return nil
 }
 
-// RemoveConfigField removes a key from the config file for the given scope.
+// RemoveConfigField removes a key from the config file the key routes to.
 // After a successful write, it automatically reloads config to keep in-memory
 // state fresh.
-func (s *ConfigStore) RemoveConfigField(scope Scope, key string) error {
-	paths, err := s.configPathsForKey(scope, key)
-	if err != nil {
-		return fmt.Errorf("%s: %w", key, err)
+func (s *ConfigStore) RemoveConfigField(key string) error {
+	path := s.configPathForKey(key)
+	data, readErr := readConfigFile(path)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return nil
+		}
+		return fmt.Errorf("failed to read config file: %w", readErr)
 	}
-
-	var (
-		path string
-		data []byte
-	)
-	for _, candidate := range paths {
-		readData, readErr := readConfigFile(candidate)
-		if readErr != nil {
-			continue
-		}
-		if !gjson.Get(string(readData), key).Exists() {
-			continue
-		}
-		path = candidate
-		data = readData
-		break
-	}
-	if path == "" {
-		path = paths[0]
-		readData, readErr := readConfigFile(path)
-		if readErr != nil {
-			if os.IsNotExist(readErr) {
-				return nil
-			}
-			return fmt.Errorf("failed to read config file: %w", readErr)
-		}
-		data = readData
+	if !gjson.Get(string(data), key).Exists() {
+		return nil
 	}
 
 	newValue, err := sjson.Delete(string(data), key)
@@ -287,66 +217,53 @@ func (s *ConfigStore) RemoveConfigField(scope Scope, key string) error {
 }
 
 // UpdatePreferredModel updates the preferred model for the given type and
-// persists it to the config file at the given scope.
-func (s *ConfigStore) UpdatePreferredModel(scope Scope, modelType SelectedModelType, model SelectedModel) error {
-	modelTypes := selectedModelTypeAliases(modelType)
-	updates := make(map[string]any, len(modelTypes))
-	for _, alias := range modelTypes {
-		s.config.Models[alias] = model
-		updates[fmt.Sprintf("models.%s", alias)] = model
+// persists it to the config file.
+func (s *ConfigStore) UpdatePreferredModel(modelType SelectedModelType, model SelectedModel) error {
+	s.config.Models[modelType] = model
+	updates := map[string]any{
+		fmt.Sprintf("models.%s", modelType): model,
 	}
-	if err := s.SetConfigFields(scope, updates); err != nil {
+	if err := s.SetConfigFields(updates); err != nil {
 		return fmt.Errorf("failed to update preferred model: %w", err)
 	}
-	if err := s.recordRecentModel(scope, modelType, model); err != nil {
+	if err := s.recordRecentModel(modelType, model); err != nil {
 		return err
 	}
 	return nil
 }
 
-func selectedModelTypeAliases(modelType SelectedModelType) []SelectedModelType {
-	switch modelType {
-	case SelectedModelTypeBuild, SelectedModelTypeLarge:
-		return []SelectedModelType{SelectedModelTypeBuild, SelectedModelTypeLarge}
-	case SelectedModelTypeExplore, SelectedModelTypeSmall:
-		return []SelectedModelType{SelectedModelTypeExplore, SelectedModelTypeSmall}
-	default:
-		return []SelectedModelType{modelType}
-	}
-}
-
 // SetCompactMode sets the compact mode setting and persists it.
-func (s *ConfigStore) SetCompactMode(scope Scope, enabled bool) error {
+func (s *ConfigStore) SetCompactMode(enabled bool) error {
 	if s.config.Options == nil {
 		s.config.Options = &Options{}
 	}
 	s.config.Options.TUI.CompactMode = enabled
-	return s.SetConfigField(scope, "options.tui.compact_mode", enabled)
+	return s.SetConfigField("options.tui.compact_mode", enabled)
 }
 
 // SetTransparentBackground sets the transparent background setting and persists it.
-func (s *ConfigStore) SetTransparentBackground(scope Scope, enabled bool) error {
+func (s *ConfigStore) SetTransparentBackground(enabled bool) error {
 	if s.config.Options == nil {
 		s.config.Options = &Options{}
 	}
 	s.config.Options.TUI.Transparent = &enabled
-	return s.SetConfigField(scope, "options.tui.transparent", enabled)
+	return s.SetConfigField("options.tui.transparent", enabled)
 }
 
 // SetProviderAPIKey sets the API key for a provider and persists it.
-func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey any) error {
+func (s *ConfigStore) SetProviderAPIKey(providerID string, apiKey any) error {
 	var providerConfig ProviderConfig
 	var exists bool
 	var setKeyOrToken func()
 
 	switch v := apiKey.(type) {
 	case string:
-		if err := s.SetConfigField(scope, fmt.Sprintf("providers.%s.api_key", providerID), v); err != nil {
+		if err := s.SetConfigField(fmt.Sprintf("providers.%s.api_key", providerID), v); err != nil {
 			return fmt.Errorf("failed to save api key to config file: %w", err)
 		}
 		setKeyOrToken = func() { providerConfig.APIKey = v }
 	case *oauth.Token:
-		if err := s.SetConfigFields(scope, map[string]any{
+		if err := s.SetConfigFields(map[string]any{
 			fmt.Sprintf("providers.%s.api_key", providerID): v.AccessToken,
 			fmt.Sprintf("providers.%s.oauth", providerID):   v,
 		}); err != nil {
@@ -403,7 +320,7 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 // the exchange fails (e.g. because another session already rotated the
 // refresh token), the disk is re-checked to recover the other session's
 // token.
-func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, providerID string) error {
+func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, providerID string) error {
 	providerConfig, exists := s.config.Providers.Get(providerID)
 	if !exists {
 		return fmt.Errorf("provider %s not found", providerID)
@@ -415,7 +332,7 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 
 	// Check if another session refreshed the token recently by reading
 	// the current token from the config file on disk.
-	newToken, err := s.loadTokenFromDisk(scope, providerID)
+	newToken, err := s.loadTokenFromDisk(providerID)
 	if err != nil {
 		slog.Warn("Failed to read token from config file, proceeding with refresh", "provider", providerID, "error", err)
 	} else if newToken != nil && !newToken.IsExpired() && newToken.AccessToken != providerConfig.OAuthToken.AccessToken {
@@ -437,7 +354,7 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 		// The exchange may have failed because another session already
 		// rotated the refresh token. Re-read the config file and use the
 		// other session's token if available.
-		if diskToken, diskErr := s.loadTokenFromDisk(scope, providerID); diskErr == nil &&
+		if diskToken, diskErr := s.loadTokenFromDisk(providerID); diskErr == nil &&
 			diskToken != nil &&
 			!diskToken.IsExpired() &&
 			diskToken.AccessToken != providerConfig.OAuthToken.AccessToken {
@@ -458,7 +375,7 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 
 	s.config.Providers.Set(providerID, providerConfig)
 
-	if err := s.SetConfigFields(scope, map[string]any{
+	if err := s.SetConfigFields(map[string]any{
 		fmt.Sprintf("providers.%s.api_key", providerID): refreshedToken.AccessToken,
 		fmt.Sprintf("providers.%s.oauth", providerID):   refreshedToken,
 	}); err != nil {
@@ -482,13 +399,12 @@ func (s *ConfigStore) applyToken(providerConfig ProviderConfig, token *oauth.Tok
 // loadTokenFromDisk reads the OAuth token for the given provider from the
 // config file on disk. Returns nil if the token is not found or matches the
 // current in-memory token.
-func (s *ConfigStore) loadTokenFromDisk(scope Scope, providerID string) (*oauth.Token, error) {
-	path, err := s.configPath(scope)
-	if err != nil {
-		return nil, err
-	}
+func (s *ConfigStore) loadTokenFromDisk(providerID string) (*oauth.Token, error) {
+	// OAuth tokens are runtime state, so they live in state.yaml. Read through
+	// readConfigFile so YAML state is normalized to JSON before gjson parsing.
+	path := s.configPathForKey(fmt.Sprintf("providers.%s.oauth", providerID))
 
-	data, err := os.ReadFile(path)
+	data, err := readConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -515,7 +431,7 @@ func (s *ConfigStore) loadTokenFromDisk(scope Scope, providerID string) (*oauth.
 }
 
 // recordRecentModel records a model in the recent models list.
-func (s *ConfigStore) recordRecentModel(scope Scope, modelType SelectedModelType, model SelectedModel) error {
+func (s *ConfigStore) recordRecentModel(modelType SelectedModelType, model SelectedModel) error {
 	if model.Provider == "" || model.Model == "" {
 		return nil
 	}
@@ -549,7 +465,7 @@ func (s *ConfigStore) recordRecentModel(scope Scope, modelType SelectedModelType
 
 	s.config.RecentModels[modelType] = updated
 
-	if err := s.SetConfigField(scope, fmt.Sprintf("recent_models.%s", modelType), updated); err != nil {
+	if err := s.SetConfigField(fmt.Sprintf("recent_models.%s", modelType), updated); err != nil {
 		return fmt.Errorf("failed to persist recent models: %w", err)
 	}
 
@@ -566,7 +482,7 @@ func NewTestStore(cfg *Config, loadedPaths ...string) *ConfigStore {
 
 // ImportCopilot attempts to import a GitHub Copilot token from disk.
 func (s *ConfigStore) ImportCopilot() (*oauth.Token, bool) {
-	if s.HasConfigField(ScopeGlobal, "providers.copilot.api_key") || s.HasConfigField(ScopeGlobal, "providers.copilot.oauth") {
+	if s.HasConfigField("providers.copilot.api_key") || s.HasConfigField("providers.copilot.oauth") {
 		return nil, false
 	}
 
@@ -582,11 +498,11 @@ func (s *ConfigStore) ImportCopilot() (*oauth.Token, bool) {
 		return nil, false
 	}
 
-	if err := s.SetProviderAPIKey(ScopeGlobal, string(catwalk.InferenceProviderCopilot), token); err != nil {
+	if err := s.SetProviderAPIKey(string(catwalk.InferenceProviderCopilot), token); err != nil {
 		return token, false
 	}
 
-	if err := s.SetConfigFields(ScopeGlobal, map[string]any{
+	if err := s.SetConfigFields(map[string]any{
 		"providers.copilot.api_key": token.AccessToken,
 		"providers.copilot.oauth":   token,
 	}); err != nil {
@@ -686,7 +602,7 @@ func (s *ConfigStore) RefreshStalenessSnapshot() error {
 // CaptureStalenessSnapshot captures snapshots for the given paths, building the
 // tracked config paths list. Paths are deduplicated and normalized.
 func (s *ConfigStore) CaptureStalenessSnapshot(paths []string) {
-	// Build unique set of normalized paths
+	// Brain unique set of normalized paths
 	seen := make(map[string]struct{})
 	for _, p := range paths {
 		if p == "" {
@@ -700,21 +616,17 @@ func (s *ConfigStore) CaptureStalenessSnapshot(paths []string) {
 		seen[abs] = struct{}{}
 	}
 
-	// Also track workspace and global config paths if set
-	if s.workspacePath != "" {
-		abs, err := filepath.Abs(s.workspacePath)
-		if err == nil {
-			seen[abs] = struct{}{}
+	// Also track the declarative config and runtime state files.
+	for _, p := range []string{s.configPath(), s.statePath()} {
+		if p == "" {
+			continue
 		}
-	}
-	if s.globalDataPath != "" {
-		abs, err := filepath.Abs(s.globalDataPath)
-		if err == nil {
+		if abs, err := filepath.Abs(p); err == nil {
 			seen[abs] = struct{}{}
 		}
 	}
 
-	// Build sorted list for deterministic ordering
+	// Brain sorted list for deterministic ordering
 	s.trackedConfigPaths = make([]string, 0, len(seen))
 	for p := range seen {
 		s.trackedConfigPaths = append(s.trackedConfigPaths, p)
@@ -759,34 +671,8 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 	}
 	cfg.setDefaults(s.workingDir, dataDir)
 
-	// Merge workspace config if present
-	workspacePath := filepath.Join(cfg.Options.DataDirectory, fmt.Sprintf("%s.json", appName))
-	if resolvedWorkspacePath, err := s.configPath(ScopeWorkspace); err == nil {
-		workspacePath = resolvedWorkspacePath
-	}
-	if wsData, err := readConfigFile(workspacePath); err == nil && len(wsData) > 0 {
-		merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, wsData))
-		if mergeErr == nil {
-			dataDir := cfg.Options.DataDirectory
-			*cfg = *merged
-			cfg.setDefaults(s.workingDir, dataDir)
-			loadedPaths = append(loadedPaths, workspacePath)
-		}
-	} else if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read workspace config file %s: %w", workspacePath, err)
-	}
-
-	if llmPath, err := s.llmConfigPath(ScopeWorkspace); err == nil {
-		if llmData, readErr := readConfigFile(llmPath); readErr == nil && len(llmData) > 0 {
-			merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, llmData))
-			if mergeErr == nil {
-				dataDir := cfg.Options.DataDirectory
-				*cfg = *merged
-				cfg.setDefaults(s.workingDir, dataDir)
-				loadedPaths = append(loadedPaths, llmPath)
-			}
-		}
-	}
+	// state.yaml is included in lookupConfigs at the highest precedence, so no
+	// separate workspace/llm merge pass is needed here.
 
 	// Validate hooks after all config merging is complete so matcher
 	// regexes are recompiled on the reloaded config (mirrors Load).
@@ -811,14 +697,12 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 	oldLoadedPaths := s.loadedPaths
 	oldResolver := s.resolver
 	oldKnownProviders := s.knownProviders
-	oldWorkspacePath := s.workspacePath
 
 	// Update store state BEFORE running model/agent setup (so they see new config)
 	s.config = cfg
 	s.loadedPaths = loadedPaths
 	s.resolver = resolver
 	s.knownProviders = providers
-	s.workspacePath = workspacePath
 
 	// Mirror startup flow: setup models and agents against NEW config
 	var setupErr error
@@ -838,7 +722,6 @@ func (s *ConfigStore) ReloadFromDisk(ctx context.Context) error {
 		s.loadedPaths = oldLoadedPaths
 		s.resolver = oldResolver
 		s.knownProviders = oldKnownProviders
-		s.workspacePath = oldWorkspacePath
 		return setupErr
 	}
 

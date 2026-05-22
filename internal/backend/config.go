@@ -21,52 +21,50 @@ type MCPResourceContents struct {
 	Blob     []byte `json:"blob,omitempty"`
 }
 
-// SetConfigField sets a key/value pair in the config file for the
-// given scope.
-func (b *Backend) SetConfigField(workspaceID string, scope config.Scope, key string, value any) error {
+// SetConfigField sets a key/value pair in the config file the key routes to.
+func (b *Backend) SetConfigField(workspaceID string, key string, value any) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
-	return ws.Cfg.SetConfigField(scope, key, value)
+	return ws.Cfg.SetConfigField(key, value)
 }
 
-// RemoveConfigField removes a key from the config file for the given
-// scope.
-func (b *Backend) RemoveConfigField(workspaceID string, scope config.Scope, key string) error {
+// RemoveConfigField removes a key from the config file the key routes to.
+func (b *Backend) RemoveConfigField(workspaceID string, key string) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
-	return ws.Cfg.RemoveConfigField(scope, key)
+	return ws.Cfg.RemoveConfigField(key)
 }
 
 // UpdatePreferredModel updates the preferred model for the given type
-// and persists it to the config file at the given scope.
-func (b *Backend) UpdatePreferredModel(workspaceID string, scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel) error {
+// and persists it to the config file.
+func (b *Backend) UpdatePreferredModel(workspaceID string, modelType config.SelectedModelType, model config.SelectedModel) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
-	return ws.Cfg.UpdatePreferredModel(scope, modelType, model)
+	return ws.Cfg.UpdatePreferredModel(modelType, model)
 }
 
 // SetCompactMode sets the compact mode setting and persists it.
-func (b *Backend) SetCompactMode(workspaceID string, scope config.Scope, enabled bool) error {
+func (b *Backend) SetCompactMode(workspaceID string, enabled bool) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
-	return ws.Cfg.SetCompactMode(scope, enabled)
+	return ws.Cfg.SetCompactMode(enabled)
 }
 
 // SetProviderAPIKey sets the API key for a provider and persists it.
-func (b *Backend) SetProviderAPIKey(workspaceID string, scope config.Scope, providerID string, apiKey any) error {
+func (b *Backend) SetProviderAPIKey(workspaceID string, providerID string, apiKey any) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
-	return ws.Cfg.SetProviderAPIKey(scope, providerID, apiKey)
+	return ws.Cfg.SetProviderAPIKey(providerID, apiKey)
 }
 
 // ImportCopilot attempts to import a GitHub Copilot token from disk.
@@ -80,12 +78,12 @@ func (b *Backend) ImportCopilot(workspaceID string) (*oauth.Token, bool, error) 
 }
 
 // RefreshOAuthToken refreshes the OAuth token for a provider.
-func (b *Backend) RefreshOAuthToken(ctx context.Context, workspaceID string, scope config.Scope, providerID string) error {
+func (b *Backend) RefreshOAuthToken(ctx context.Context, workspaceID string, providerID string) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
-	return ws.Cfg.RefreshOAuthToken(ctx, scope, providerID)
+	return ws.Cfg.RefreshOAuthToken(ctx, providerID)
 }
 
 // ProjectNeedsInitialization checks whether the project in this

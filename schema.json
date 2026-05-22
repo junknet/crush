@@ -3,6 +3,58 @@
   "$id": "https://github.com/charmbracelet/crush/internal/config/config",
   "$ref": "#/$defs/Config",
   "$defs": {
+    "Agent": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string",
+          "enum": [
+            "brain",
+            "worker",
+            "explore"
+          ],
+          "description": "The model type to use for this agent",
+          "default": "brain"
+        },
+        "allowed_tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowed_mcp": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object"
+        },
+        "context_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "model"
+      ]
+    },
     "Attribution": {
       "properties": {
         "trailer_style": {
@@ -99,6 +151,20 @@
           },
           "type": "object",
           "description": "User-defined shell commands that fire on hook events (e.g. PreToolUse)"
+        },
+        "default_agent": {
+          "type": "string",
+          "description": "Default primary agent name",
+          "examples": [
+            "brain"
+          ]
+        },
+        "agents": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Agent"
+          },
+          "type": "object",
+          "description": "Agent configurations"
         }
       },
       "additionalProperties": false,
@@ -274,14 +340,22 @@
           "type": "array",
           "description": "Allow list of tools from this MCP server"
         },
-        "timeout": {
+        "connect_timeout": {
           "type": "integer",
-          "description": "Timeout in seconds for MCP server connections",
+          "description": "Timeout in seconds for MCP session establishment and health pings",
           "default": 15,
           "examples": [
             30,
+            60
+          ]
+        },
+        "call_timeout": {
+          "type": "integer",
+          "description": "Timeout in seconds for a single MCP tool invocation. 0 disables.",
+          "default": 300,
+          "examples": [
             60,
-            120
+            600
           ]
         },
         "headers": {
@@ -394,8 +468,7 @@
           "items": {
             "type": "string",
             "examples": [
-              ".cursorrules",
-              "CRUSH.md"
+              "CLAUDE.md"
             ]
           },
           "type": "array",
@@ -472,10 +545,8 @@
         "initialize_as": {
           "type": "string",
           "description": "Name of the context file to create/update during project initialization",
-          "default": "AGENTS.md",
+          "default": "CLAUDE.md",
           "examples": [
-            "AGENTS.md",
-            "CRUSH.md",
             "CLAUDE.md",
             "docs/LLMs.md"
           ]
@@ -558,7 +629,9 @@
             "anthropic",
             "gemini",
             "azure",
-            "vertexai"
+            "vertexai",
+            "antigravity",
+            "anthropic-oauth"
           ],
           "description": "Provider type that determines the API format",
           "default": "openai"
@@ -641,6 +714,12 @@
         "think": {
           "type": "boolean",
           "description": "Enable thinking mode for Anthropic models that support reasoning"
+        },
+        "thinking_budget": {
+          "type": "integer",
+          "maximum": 64000,
+          "minimum": 1024,
+          "description": "Explicit Anthropic thinking budget in tokens (overrides effort-derived default)"
         },
         "max_tokens": {
           "type": "integer",

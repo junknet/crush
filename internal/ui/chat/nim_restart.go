@@ -32,7 +32,7 @@ type NimRestartToolRenderContext struct{}
 func (r *NimRestartToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if opts.IsPending() {
-		return pendingTool(sty, "Restart LSP", opts.Anim, opts.Compact)
+		return pendingTool(sty, "Restart LSP", opts.Compact)
 	}
 
 	var params tools.NimRestartParams

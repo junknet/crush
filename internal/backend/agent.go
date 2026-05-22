@@ -43,14 +43,14 @@ func (b *Backend) GetAgentInfo(workspaceID string) (proto.AgentInfo, error) {
 	return agentInfo, nil
 }
 
-// InitAgent initializes the coder agent for the workspace.
+// InitAgent initializes the worker agent for the workspace.
 func (b *Backend) InitAgent(ctx context.Context, workspaceID string) error {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return err
 	}
 
-	return ws.InitCoderAgent(ctx)
+	return ws.InitBrainAgent(ctx)
 }
 
 // UpdateAgent reloads the agent model configuration.
@@ -133,12 +133,12 @@ func (b *Backend) QueuedPromptsList(workspaceID, sessionID string) ([]string, er
 	return ws.AgentCoordinator.QueuedPromptsList(sessionID), nil
 }
 
-// GetDefaultSmallModel returns the default small model for a provider.
-func (b *Backend) GetDefaultSmallModel(workspaceID, providerID string) (config.SelectedModel, error) {
+// GetDefaultExploreModel returns the default explore model for a provider.
+func (b *Backend) GetDefaultExploreModel(workspaceID, providerID string) (config.SelectedModel, error) {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return config.SelectedModel{}, err
 	}
 
-	return ws.GetDefaultSmallModel(providerID), nil
+	return ws.GetDefaultExploreModel(providerID), nil
 }

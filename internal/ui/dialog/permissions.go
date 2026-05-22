@@ -116,16 +116,16 @@ func defaultPermissionsKeyMap() permissionsKeyMap {
 			key.WithHelp("enter", "confirm"),
 		),
 		Allow: key.NewBinding(
-			key.WithKeys("a", "A", "ctrl+a"),
-			key.WithHelp("a", "allow"),
+			key.WithKeys("ctrl+a"),
+			key.WithHelp("ctrl+a", "allow"),
 		),
 		AllowSession: key.NewBinding(
-			key.WithKeys("s", "S", "ctrl+s"),
-			key.WithHelp("s", "allow session"),
+			key.WithKeys("ctrl+s"),
+			key.WithHelp("ctrl+s", "allow session"),
 		),
 		Deny: key.NewBinding(
-			key.WithKeys("d", "D"),
-			key.WithHelp("d", "deny"),
+			key.WithKeys("ctrl+d"),
+			key.WithHelp("ctrl+d", "deny"),
 		),
 		Close: CloseKey,
 		ToggleDiffMode: key.NewBinding(
@@ -199,7 +199,7 @@ func NewPermissions(com *common.Common, perm permission.PermissionRequest, opts 
 	p := &Permissions{
 		com:            com,
 		permission:     perm,
-		selectedOption: 0,
+		selectedOption: 2,
 		viewport:       vp,
 		help:           h,
 		keyMap:         km,
@@ -731,9 +731,9 @@ func (p *Permissions) renderContentPanel(content string, width int) string {
 
 func (p *Permissions) renderButtons(contentWidth int) string {
 	buttons := []common.ButtonOpts{
-		{Text: "Allow", UnderlineIndex: 0, Selected: p.selectedOption == 0},
-		{Text: "Allow for Session", UnderlineIndex: 10, Selected: p.selectedOption == 1},
-		{Text: "Deny", UnderlineIndex: 0, Selected: p.selectedOption == 2},
+		{Text: "Allow", UnderlineIndex: -1, Selected: p.selectedOption == 0},
+		{Text: "Allow for Session", UnderlineIndex: -1, Selected: p.selectedOption == 1},
+		{Text: "Deny", UnderlineIndex: -1, Selected: p.selectedOption == 2},
 	}
 
 	content := common.ButtonGroup(p.com.Styles, buttons, "  ")

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/stretchr/testify/require"
@@ -17,7 +16,6 @@ func TestConfigProviderKeyRequestStringRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	src := proto.ConfigProviderKeyRequest{
-		Scope:      config.ScopeGlobal,
 		ProviderID: "openai",
 		Kind:       proto.APIKeyKindString,
 		APIKey:     apiKey,
@@ -49,7 +47,6 @@ func TestConfigProviderKeyRequestOAuthRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	src := proto.ConfigProviderKeyRequest{
-		Scope:      config.ScopeGlobal,
 		ProviderID: "hyper",
 		Kind:       proto.APIKeyKindOAuth,
 		APIKey:     apiKey,

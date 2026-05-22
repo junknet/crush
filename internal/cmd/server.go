@@ -12,15 +12,19 @@ import (
 
 	"github.com/charmbracelet/crush/internal/config"
 	crushlog "github.com/charmbracelet/crush/internal/log"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/server"
+	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
 
 var serverHost string
+var serverRegisterCwd bool
 
 func init() {
 	serverCmd.Flags().StringVarP(&serverHost, "host", "H", server.DefaultHost(), "Server host (TCP or Unix socket)")
+	serverCmd.Flags().BoolVar(&serverRegisterCwd, "register-cwd", false, "Register the current working directory as a web workspace on startup")
 	rootCmd.AddCommand(serverCmd)
 }
 
@@ -57,7 +61,30 @@ var serverCmd = &cobra.Command{
 
 		srv := server.NewServer(cfg, hostURL.Scheme, hostURL.Host)
 		srv.SetLogger(slog.Default())
+		if serverRegisterCwd {
+			cwd, err := ResolveCwd(cmd)
+			if err != nil {
+				return err
+			}
+			ws, err := srv.RegisterWorkspace(proto.Workspace{
+				Path:    cwd,
+				DataDir: dataDir,
+				Debug:   debug,
+				Version: version.Version,
+				Env:     os.Environ(),
+			})
+			if err != nil {
+				return fmt.Errorf("failed to register startup workspace: %v", err)
+			}
+			slog.Info("Registered startup workspace", "workspace_id", ws.ID, "path", ws.Path)
+		}
 		slog.Info("Starting Crush server...", "addr", serverHost)
+
+		startHotReload(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(ctx)
+		})
 
 		errch := make(chan error, 1)
 		sigch := make(chan os.Signal, 1)

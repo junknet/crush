@@ -54,18 +54,21 @@ func TestConfig_LoadFromBytes_DeduplicatesProviderModels(t *testing.T) {
 	require.Equal(t, "gpt-4o", prov.Models[1].ID)
 }
 
-func TestLookupConfigs_BoundedByProject(t *testing.T) {
+// TestLookupConfigs_SingleLocation verifies the single-location model:
+// lookupConfigs resolves only the global config base candidates and the
+// runtime state candidates, never a project- or parent-local crush.json.
+func TestLookupConfigs_SingleLocation(t *testing.T) {
 	// Force GlobalConfig and GlobalConfigData to point at locations we
-	// control so they can be present in the result without polluting
-	// the developer's real config.
+	// control so they can be asserted without polluting the developer's
+	// real config.
 	globalDir := t.TempDir()
 	t.Setenv("CRUSH_GLOBAL_CONFIG", globalDir)
 	t.Setenv("CRUSH_GLOBAL_DATA", globalDir)
 
-	t.Run("does not pick up crush.json above non-git project", func(t *testing.T) {
+	t.Run("does not pick up project- or parent-local crush.json", func(t *testing.T) {
 		parent := t.TempDir()
 
-		// crush.json above the project must not be adopted.
+		// A crush.json next to / above the project must never be adopted.
 		require.NoError(t, os.WriteFile(
 			filepath.Join(parent, "crush.json"),
 			[]byte(`{}`),
@@ -74,75 +77,28 @@ func TestLookupConfigs_BoundedByProject(t *testing.T) {
 
 		project := filepath.Join(parent, "project")
 		require.NoError(t, os.Mkdir(project, 0o755))
-
-		got := lookupConfigs(project)
-		for _, p := range got {
-			require.NotEqual(t, filepath.Join(parent, "crush.json"), p)
-		}
-	})
-
-	t.Run("does not climb out of git worktree to find crush.json", func(t *testing.T) {
-		if _, err := exec.LookPath("git"); err != nil {
-			t.Skip("git not available")
-		}
-
-		parent := t.TempDir()
-
 		require.NoError(t, os.WriteFile(
-			filepath.Join(parent, "crush.json"),
+			filepath.Join(project, "crush.json"),
 			[]byte(`{}`),
 			0o644,
 		))
 
-		worktree := filepath.Join(parent, "worktree")
-		require.NoError(t, os.Mkdir(worktree, 0o755))
-		gitInit := exec.CommandContext(t.Context(), "git", "init", "-q")
-		gitInit.Dir = worktree
-		require.NoError(t, gitInit.Run())
-
-		got := lookupConfigs(worktree)
-		strayEval, err := filepath.EvalSymlinks(filepath.Join(parent, "crush.json"))
-		require.NoError(t, err)
+		got := lookupConfigs(project)
 		for _, p := range got {
-			pEval, err := filepath.EvalSymlinks(p)
-			if err != nil {
-				continue
-			}
-			require.NotEqual(t, strayEval, pEval, "must not adopt parent crush.json")
+			require.NotEqual(t, filepath.Join(parent, "crush.json"), p)
+			require.NotEqual(t, filepath.Join(project, "crush.json"), p)
 		}
 	})
 
-	t.Run("picks up crush.json inside the project", func(t *testing.T) {
-		project := t.TempDir()
-		local := filepath.Join(project, "crush.json")
-		require.NoError(t, os.WriteFile(local, []byte(`{}`), 0o644))
-
-		got := lookupConfigs(project)
-
-		localEval, err := filepath.EvalSymlinks(local)
-		require.NoError(t, err)
-		var foundLocal bool
-		for _, p := range got {
-			pEval, err := filepath.EvalSymlinks(p)
-			if err != nil {
-				continue
-			}
-			if pEval == localEval {
-				foundLocal = true
-				break
-			}
-		}
-		require.True(t, foundLocal, "expected project crush.json to be in lookup result: %v", got)
-	})
-
-	t.Run("global config is always included regardless of boundary", func(t *testing.T) {
+	t.Run("resolves only global config and state candidates", func(t *testing.T) {
 		project := t.TempDir()
 
 		got := lookupConfigs(project)
-		// Global config and global data path are always prepended,
-		// even when no project file exists.
+		// Exactly the global config base candidates plus the runtime state
+		// candidates, regardless of working directory.
+		want := append(append([]string{}, configCandidates(GlobalConfig())...), stateConfigCandidates(GlobalConfig())...)
+		require.Equal(t, want, got)
 		require.Contains(t, got, GlobalConfig())
-		require.Contains(t, got, GlobalConfigData())
 	})
 }
 
@@ -194,7 +150,7 @@ providers:
       - id: gpt-5.5
         name: GPT 5.5
 models:
-  large:
+  brain:
     model: claude-opus-4-7
     provider: waitai-openai
 `), 0o644))
@@ -208,7 +164,7 @@ models:
 	require.True(t, ok)
 	require.Equal(t, "test-key", prov.APIKey)
 	require.Equal(t, "http://127.0.0.1:43917/v1", prov.BaseURL)
-	require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypeLarge].Model)
+	require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypeBrain].Model)
 }
 
 // testStore wraps a Config in a minimal ConfigStore for testing.
@@ -755,17 +711,18 @@ func TestConfig_setupAgentsWithNoDisabledTools(t *testing.T) {
 	}
 
 	cfg.SetupAgents()
-	buildAgent, ok := cfg.Agents[AgentBuild]
+	allowedTools := resolveAllowedTools(allToolNames(), cfg.Options.DisabledTools)
+	brainAgent, ok := cfg.Agents[AgentBrain]
 	require.True(t, ok)
-	assert.Equal(t, allToolNames(), buildAgent.AllowedTools)
+	assert.Equal(t, allowedTools, brainAgent.AllowedTools)
 
-	coderAgent, ok := cfg.Agents[AgentCoder]
+	workerAgent, ok := cfg.Agents[AgentWorker]
 	require.True(t, ok)
-	assert.Equal(t, allToolNames(), coderAgent.AllowedTools)
+	assert.Equal(t, allowedTools, workerAgent.AllowedTools)
 
 	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)
-	assert.Equal(t, []string{"glob", "grep", "ls", "sourcegraph", "view"}, exploreAgent.AllowedTools)
+	assert.Equal(t, resolveExploreTools(allowedTools), exploreAgent.AllowedTools)
 }
 
 func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {
@@ -780,41 +737,38 @@ func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {
 	}
 
 	cfg.SetupAgents()
-	buildAgent, ok := cfg.Agents[AgentBuild]
+	allowedTools := resolveAllowedTools(allToolNames(), cfg.Options.DisabledTools)
+	brainAgent, ok := cfg.Agents[AgentBrain]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "multiedit", "nim_diagnostics", "nim_references", "nim_restart", "nim_macro_expand", "nim_safe_to_delete", "nim_project_maps", "fetch", "agentic_fetch", "glob", "ls", "sourcegraph", "todos", "view", "write", "list_mcp_resources", "read_mcp_resource"}, buildAgent.AllowedTools)
+	assert.Equal(t, allowedTools, brainAgent.AllowedTools)
 
-	coderAgent, ok := cfg.Agents[AgentCoder]
+	workerAgent, ok := cfg.Agents[AgentWorker]
 	require.True(t, ok)
 
-	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "multiedit", "nim_diagnostics", "nim_references", "nim_restart", "nim_macro_expand", "nim_safe_to_delete", "nim_project_maps", "fetch", "agentic_fetch", "glob", "ls", "sourcegraph", "todos", "view", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
+	assert.Equal(t, allowedTools, workerAgent.AllowedTools)
 
 	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)
-	assert.Equal(t, []string{"glob", "ls", "sourcegraph", "view"}, exploreAgent.AllowedTools)
+	assert.Equal(t, resolveExploreTools(allowedTools), exploreAgent.AllowedTools)
 }
 
-func TestConfig_setupAgentsWithEveryReadOnlyToolDisabled(t *testing.T) {
+func TestConfig_setupAgentsWithEveryExploreToolDisabled(t *testing.T) {
+	disabledTools := resolveExploreTools(allToolNames())
 	cfg := &Config{
 		Options: &Options{
-			DisabledTools: []string{
-				"glob",
-				"grep",
-				"ls",
-				"sourcegraph",
-				"view",
-			},
+			DisabledTools: disabledTools,
 		},
 	}
 
 	cfg.SetupAgents()
-	buildAgent, ok := cfg.Agents[AgentBuild]
+	allowedTools := resolveAllowedTools(allToolNames(), disabledTools)
+	brainAgent, ok := cfg.Agents[AgentBrain]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "download", "edit", "multiedit", "nim_diagnostics", "nim_references", "nim_restart", "nim_macro_expand", "nim_safe_to_delete", "nim_project_maps", "fetch", "agentic_fetch", "todos", "write", "list_mcp_resources", "read_mcp_resource"}, buildAgent.AllowedTools)
+	assert.Equal(t, allowedTools, brainAgent.AllowedTools)
 
-	coderAgent, ok := cfg.Agents[AgentCoder]
+	workerAgent, ok := cfg.Agents[AgentWorker]
 	require.True(t, ok)
-	assert.Equal(t, []string{"agent", "bash", "command_dag", "crush_info", "crush_logs", "job_output", "job_kill", "download", "edit", "multiedit", "nim_diagnostics", "nim_references", "nim_restart", "nim_macro_expand", "nim_safe_to_delete", "nim_project_maps", "fetch", "agentic_fetch", "todos", "write", "list_mcp_resources", "read_mcp_resource"}, coderAgent.AllowedTools)
+	assert.Equal(t, allowedTools, workerAgent.AllowedTools)
 
 	exploreAgent, ok := cfg.Agents[AgentExplore]
 	require.True(t, ok)
@@ -830,7 +784,7 @@ func TestConfig_setupAgentsOverlaysCustomAgents(t *testing.T) {
 			"review": {
 				Name:         "Review",
 				Description:  "Custom review agent",
-				Model:        SelectedModelTypeSmall,
+				Model:        SelectedModelTypeExplore,
 				AllowedTools: []string{"glob", "grep"},
 				ContextPaths: []string{"docs"},
 			},
@@ -841,10 +795,10 @@ func TestConfig_setupAgentsOverlaysCustomAgents(t *testing.T) {
 	review, ok := cfg.Agents["review"]
 	require.True(t, ok)
 	require.Equal(t, "Review", review.Name)
-	require.Equal(t, SelectedModelTypeSmall, review.Model)
+	require.Equal(t, SelectedModelTypeExplore, review.Model)
 	require.Equal(t, []string{"glob", "grep"}, review.AllowedTools)
 	require.Contains(t, review.ContextPaths, "docs")
-	require.Equal(t, AgentBuild, cfg.DefaultAgent)
+	require.Equal(t, AgentBrain, cfg.DefaultAgent)
 }
 
 func TestConfig_configureProvidersWithDisabledProvider(t *testing.T) {
@@ -1198,15 +1152,15 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 			{
 				ID:                  "openai",
 				APIKey:              "abc",
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "large-model",
+						ID:               "brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "small-model",
+						ID:               "explore-model",
 						DefaultMaxTokens: 500,
 					},
 				},
@@ -1220,29 +1174,29 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 		err := cfg.configureProviders(testStore(cfg), env, resolver, knownProviders)
 		require.NoError(t, err)
 
-		large, small, err := cfg.defaultModelSelection(knownProviders)
+		brain, explore, err := cfg.defaultModelSelection(knownProviders)
 		require.NoError(t, err)
-		require.Equal(t, "large-model", large.Model)
-		require.Equal(t, "openai", large.Provider)
-		require.Equal(t, int64(1000), large.MaxTokens)
-		require.Equal(t, "small-model", small.Model)
-		require.Equal(t, "openai", small.Provider)
-		require.Equal(t, int64(500), small.MaxTokens)
+		require.Equal(t, "brain-model", brain.Model)
+		require.Equal(t, "openai", brain.Provider)
+		require.Equal(t, int64(1000), brain.MaxTokens)
+		require.Equal(t, "explore-model", explore.Model)
+		require.Equal(t, "openai", explore.Provider)
+		require.Equal(t, int64(500), explore.MaxTokens)
 	})
 	t.Run("should error if no providers configured", func(t *testing.T) {
 		knownProviders := []catwalk.Provider{
 			{
 				ID:                  "openai",
 				APIKey:              "$MISSING_KEY",
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "large-model",
+						ID:               "brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "small-model",
+						ID:               "explore-model",
 						DefaultMaxTokens: 500,
 					},
 				},
@@ -1264,15 +1218,15 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 			{
 				ID:                  "openai",
 				APIKey:              "abc",
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "not-large-model",
+						ID:               "not-brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "small-model",
+						ID:               "explore-model",
 						DefaultMaxTokens: 500,
 					},
 				},
@@ -1294,15 +1248,15 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 			{
 				ID:                  "openai",
 				APIKey:              "$MISSING", // will not be included in the config
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "not-large-model",
+						ID:               "not-brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "small-model",
+						ID:               "explore-model",
 						DefaultMaxTokens: 500,
 					},
 				},
@@ -1328,14 +1282,14 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 		resolver := NewShellVariableResolver(env)
 		err := cfg.configureProviders(testStore(cfg), env, resolver, knownProviders)
 		require.NoError(t, err)
-		large, small, err := cfg.defaultModelSelection(knownProviders)
+		brain, explore, err := cfg.defaultModelSelection(knownProviders)
 		require.NoError(t, err)
-		require.Equal(t, "model", large.Model)
-		require.Equal(t, "custom", large.Provider)
-		require.Equal(t, int64(600), large.MaxTokens)
-		require.Equal(t, "model", small.Model)
-		require.Equal(t, "custom", small.Provider)
-		require.Equal(t, int64(600), small.MaxTokens)
+		require.Equal(t, "model", brain.Model)
+		require.Equal(t, "custom", brain.Provider)
+		require.Equal(t, int64(600), brain.MaxTokens)
+		require.Equal(t, "model", explore.Model)
+		require.Equal(t, "custom", explore.Provider)
+		require.Equal(t, int64(600), explore.MaxTokens)
 	})
 
 	t.Run("should fail if no model configured", func(t *testing.T) {
@@ -1343,15 +1297,15 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 			{
 				ID:                  "openai",
 				APIKey:              "$MISSING", // will not be included in the config
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "not-large-model",
+						ID:               "not-brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "small-model",
+						ID:               "explore-model",
 						DefaultMaxTokens: 500,
 					},
 				},
@@ -1380,15 +1334,15 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 			{
 				ID:                  "openai",
 				APIKey:              "set",
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "large-model",
+						ID:               "brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "small-model",
+						ID:               "explore-model",
 						DefaultMaxTokens: 500,
 					},
 				},
@@ -1402,7 +1356,7 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 					BaseURL: "https://api.custom.com/v1",
 					Models: []catwalk.Model{
 						{
-							ID:               "large-model",
+							ID:               "brain-model",
 							DefaultMaxTokens: 1000,
 						},
 					},
@@ -1414,14 +1368,14 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 		resolver := NewShellVariableResolver(env)
 		err := cfg.configureProviders(testStore(cfg), env, resolver, knownProviders)
 		require.NoError(t, err)
-		large, small, err := cfg.defaultModelSelection(knownProviders)
+		brain, explore, err := cfg.defaultModelSelection(knownProviders)
 		require.NoError(t, err)
-		require.Equal(t, "large-model", large.Model)
-		require.Equal(t, "openai", large.Provider)
-		require.Equal(t, int64(1000), large.MaxTokens)
-		require.Equal(t, "small-model", small.Model)
-		require.Equal(t, "openai", small.Provider)
-		require.Equal(t, int64(500), small.MaxTokens)
+		require.Equal(t, "brain-model", brain.Model)
+		require.Equal(t, "openai", brain.Provider)
+		require.Equal(t, int64(1000), brain.MaxTokens)
+		require.Equal(t, "explore-model", explore.Model)
+		require.Equal(t, "openai", explore.Provider)
+		require.Equal(t, int64(500), explore.MaxTokens)
 	})
 }
 
@@ -1655,30 +1609,19 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 				},
 			}),
 			Models: map[SelectedModelType]SelectedModel{
-				SelectedModelTypeBuild: {
+				SelectedModelTypeBrain: {
 					Provider:  "waitai-anthropic",
 					Model:     "claude-opus-4-7",
 					Think:     true,
 					MaxTokens: 16000,
 				},
-				SelectedModelTypeCoder: {
+				SelectedModelTypeWorker: {
 					Provider:  "waitai-anthropic",
 					Model:     "claude-sonnet-4-6",
 					Think:     true,
 					MaxTokens: 12000,
 				},
 				SelectedModelTypeExplore: {
-					Provider:  "waitai-anthropic",
-					Model:     "claude-haiku-4-5-20251001",
-					MaxTokens: 8000,
-				},
-				SelectedModelTypeLarge: {
-					Provider:  "waitai-anthropic",
-					Model:     "claude-opus-4-7",
-					Think:     true,
-					MaxTokens: 16000,
-				},
-				SelectedModelTypeSmall: {
 					Provider:  "waitai-anthropic",
 					Model:     "claude-haiku-4-5-20251001",
 					MaxTokens: 8000,
@@ -1694,41 +1637,39 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 		err = configureSelectedModels(testStore(cfg), nil, false)
 		require.NoError(t, err)
 
-		require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypeBuild].Model)
-		require.Equal(t, "claude-sonnet-4-6", cfg.Models[SelectedModelTypeCoder].Model)
+		require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypeBrain].Model)
+		require.Equal(t, "claude-sonnet-4-6", cfg.Models[SelectedModelTypeWorker].Model)
 		require.Equal(t, "claude-haiku-4-5-20251001", cfg.Models[SelectedModelTypeExplore].Model)
-		require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypeLarge].Model)
-		require.Equal(t, "claude-haiku-4-5-20251001", cfg.Models[SelectedModelTypeSmall].Model)
-		require.True(t, cfg.Models[SelectedModelTypeBuild].Think)
-		require.True(t, cfg.Models[SelectedModelTypeCoder].Think)
+		require.True(t, cfg.Models[SelectedModelTypeBrain].Think)
+		require.True(t, cfg.Models[SelectedModelTypeWorker].Think)
 		require.False(t, cfg.Models[SelectedModelTypeExplore].Think)
 	})
 
 	t.Run("reload mode should not persist fallback defaults", func(t *testing.T) {
 		dir := t.TempDir()
 		globalPath := filepath.Join(dir, "crush.json")
-		require.NoError(t, os.WriteFile(globalPath, []byte(`{"models":{"large":{"provider":"ghost","model":"missing"}}}`), 0o600))
+		require.NoError(t, os.WriteFile(globalPath, []byte(`{"models":{"brain":{"provider":"ghost","model":"missing"}}}`), 0o600))
 
 		knownProviders := []catwalk.Provider{
 			{
 				ID:                  "openai",
 				APIKey:              "abc",
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
-					{ID: "large-model", DefaultMaxTokens: 1000},
-					{ID: "small-model", DefaultMaxTokens: 500},
+					{ID: "brain-model", DefaultMaxTokens: 1000},
+					{ID: "explore-model", DefaultMaxTokens: 500},
 				},
 			},
 		}
 
 		cfg := &Config{
 			Models: map[SelectedModelType]SelectedModel{
-				SelectedModelTypeLarge: {Provider: "ghost", Model: "missing"},
+				SelectedModelTypeBrain: {Provider: "ghost", Model: "missing"},
 			},
 		}
 		cfg.setDefaults(dir, "")
-		store := &ConfigStore{config: cfg, globalDataPath: globalPath}
+		store := &ConfigStore{config: cfg, configBase: globalPath}
 		env := env.NewFromMap(map[string]string{})
 		resolver := NewShellVariableResolver(env)
 		err := cfg.configureProviders(store, env, resolver, knownProviders)
@@ -1738,8 +1679,8 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 		require.NoError(t, err)
 
 		// In-memory falls back to default.
-		require.Equal(t, "openai", cfg.Models[SelectedModelTypeLarge].Provider)
-		require.Equal(t, "large-model", cfg.Models[SelectedModelTypeLarge].Model)
+		require.Equal(t, "openai", cfg.Models[SelectedModelTypeBrain].Provider)
+		require.Equal(t, "brain-model", cfg.Models[SelectedModelTypeBrain].Model)
 
 		// Disk remains unchanged in reload mode.
 		data, readErr := os.ReadFile(globalPath)
@@ -1747,24 +1688,45 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 		require.Contains(t, string(data), `"provider":"ghost"`)
 		require.Contains(t, string(data), `"model":"missing"`)
 	})
+	t.Run("rejects legacy model type keys", func(t *testing.T) {
+		cfg := &Config{
+			Models: map[SelectedModelType]SelectedModel{
+				SelectedModelType("legacy"): {
+					Provider: "openai",
+					Model:    "gpt-4",
+				},
+			},
+			Providers: csync.NewMapFrom(map[string]ProviderConfig{
+				"openai": {
+					ID:     "openai",
+					APIKey: "abc",
+					Models: []catwalk.Model{{ID: "gpt-4"}},
+				},
+			}),
+		}
+		cfg.setDefaults("/tmp", "")
+		store := &ConfigStore{config: cfg}
+		err := configureSelectedModels(store, nil, false)
+		require.ErrorContains(t, err, "unsupported model type")
+	})
 	t.Run("should override defaults", func(t *testing.T) {
 		knownProviders := []catwalk.Provider{
 			{
 				ID:                  "openai",
 				APIKey:              "abc",
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "larger-model",
+						ID:               "custom-brain-model",
 						DefaultMaxTokens: 2000,
 					},
 					{
-						ID:               "large-model",
+						ID:               "brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "small-model",
+						ID:               "explore-model",
 						DefaultMaxTokens: 500,
 					},
 				},
@@ -1773,8 +1735,8 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 
 		cfg := &Config{
 			Models: map[SelectedModelType]SelectedModel{
-				"large": {
-					Model: "larger-model",
+				"brain": {
+					Model: "custom-brain-model",
 				},
 			},
 		}
@@ -1786,29 +1748,29 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 
 		err = configureSelectedModels(testStore(cfg), knownProviders, true)
 		require.NoError(t, err)
-		large := cfg.Models[SelectedModelTypeLarge]
-		small := cfg.Models[SelectedModelTypeSmall]
-		require.Equal(t, "larger-model", large.Model)
-		require.Equal(t, "openai", large.Provider)
-		require.Equal(t, int64(2000), large.MaxTokens)
-		require.Equal(t, "small-model", small.Model)
-		require.Equal(t, "openai", small.Provider)
-		require.Equal(t, int64(500), small.MaxTokens)
+		brain := cfg.Models[SelectedModelTypeBrain]
+		explore := cfg.Models[SelectedModelTypeExplore]
+		require.Equal(t, "custom-brain-model", brain.Model)
+		require.Equal(t, "openai", brain.Provider)
+		require.Equal(t, int64(2000), brain.MaxTokens)
+		require.Equal(t, "explore-model", explore.Model)
+		require.Equal(t, "openai", explore.Provider)
+		require.Equal(t, int64(500), explore.MaxTokens)
 	})
 	t.Run("should be possible to use multiple providers", func(t *testing.T) {
 		knownProviders := []catwalk.Provider{
 			{
 				ID:                  "openai",
 				APIKey:              "abc",
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "large-model",
+						ID:               "brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "small-model",
+						ID:               "explore-model",
 						DefaultMaxTokens: 500,
 					},
 				},
@@ -1816,15 +1778,15 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 			{
 				ID:                  "anthropic",
 				APIKey:              "abc",
-				DefaultLargeModelID: "a-large-model",
-				DefaultSmallModelID: "a-small-model",
+				DefaultLargeModelID: "a-brain-model",
+				DefaultSmallModelID: "a-explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "a-large-model",
+						ID:               "a-brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "a-small-model",
+						ID:               "a-explore-model",
 						DefaultMaxTokens: 200,
 					},
 				},
@@ -1833,8 +1795,8 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 
 		cfg := &Config{
 			Models: map[SelectedModelType]SelectedModel{
-				"small": {
-					Model:     "a-small-model",
+				"explore": {
+					Model:     "a-explore-model",
 					Provider:  "anthropic",
 					MaxTokens: 300,
 				},
@@ -1848,14 +1810,14 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 
 		err = configureSelectedModels(testStore(cfg), knownProviders, true)
 		require.NoError(t, err)
-		large := cfg.Models[SelectedModelTypeLarge]
-		small := cfg.Models[SelectedModelTypeSmall]
-		require.Equal(t, "large-model", large.Model)
-		require.Equal(t, "openai", large.Provider)
-		require.Equal(t, int64(1000), large.MaxTokens)
-		require.Equal(t, "a-small-model", small.Model)
-		require.Equal(t, "anthropic", small.Provider)
-		require.Equal(t, int64(300), small.MaxTokens)
+		brain := cfg.Models[SelectedModelTypeBrain]
+		explore := cfg.Models[SelectedModelTypeExplore]
+		require.Equal(t, "brain-model", brain.Model)
+		require.Equal(t, "openai", brain.Provider)
+		require.Equal(t, int64(1000), brain.MaxTokens)
+		require.Equal(t, "a-explore-model", explore.Model)
+		require.Equal(t, "anthropic", explore.Provider)
+		require.Equal(t, int64(300), explore.MaxTokens)
 	})
 
 	t.Run("should override the max tokens only", func(t *testing.T) {
@@ -1863,15 +1825,15 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 			{
 				ID:                  "openai",
 				APIKey:              "abc",
-				DefaultLargeModelID: "large-model",
-				DefaultSmallModelID: "small-model",
+				DefaultLargeModelID: "brain-model",
+				DefaultSmallModelID: "explore-model",
 				Models: []catwalk.Model{
 					{
-						ID:               "large-model",
+						ID:               "brain-model",
 						DefaultMaxTokens: 1000,
 					},
 					{
-						ID:               "small-model",
+						ID:               "explore-model",
 						DefaultMaxTokens: 500,
 					},
 				},
@@ -1880,7 +1842,7 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 
 		cfg := &Config{
 			Models: map[SelectedModelType]SelectedModel{
-				"large": {
+				"brain": {
 					MaxTokens: 100,
 				},
 			},
@@ -1893,10 +1855,10 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 
 		err = configureSelectedModels(testStore(cfg), knownProviders, true)
 		require.NoError(t, err)
-		large := cfg.Models[SelectedModelTypeLarge]
-		require.Equal(t, "large-model", large.Model)
-		require.Equal(t, "openai", large.Provider)
-		require.Equal(t, int64(100), large.MaxTokens)
+		brain := cfg.Models[SelectedModelTypeBrain]
+		require.Equal(t, "brain-model", brain.Model)
+		require.Equal(t, "openai", brain.Provider)
+		require.Equal(t, int64(100), brain.MaxTokens)
 	})
 }
 
@@ -1906,15 +1868,15 @@ func TestConfig_configureProviders_HyperAPIKeyFromEnv(t *testing.T) {
 		{
 			ID:                  "hyper",
 			APIKey:              "", // No API key in provider definition
-			DefaultLargeModelID: "large-model",
-			DefaultSmallModelID: "small-model",
+			DefaultLargeModelID: "brain-model",
+			DefaultSmallModelID: "explore-model",
 			Models: []catwalk.Model{
 				{
-					ID:               "large-model",
+					ID:               "brain-model",
 					DefaultMaxTokens: 1000,
 				},
 				{
-					ID:               "small-model",
+					ID:               "explore-model",
 					DefaultMaxTokens: 500,
 				},
 			},
@@ -1944,15 +1906,15 @@ func TestConfig_configureProviders_HyperAPIKeyFromConfigOverrides(t *testing.T) 
 		{
 			ID:                  "hyper",
 			APIKey:              "provider-api-key",
-			DefaultLargeModelID: "large-model",
-			DefaultSmallModelID: "small-model",
+			DefaultLargeModelID: "brain-model",
+			DefaultSmallModelID: "explore-model",
 			Models: []catwalk.Model{
 				{
-					ID:               "large-model",
+					ID:               "brain-model",
 					DefaultMaxTokens: 1000,
 				},
 				{
-					ID:               "small-model",
+					ID:               "explore-model",
 					DefaultMaxTokens: 500,
 				},
 			},

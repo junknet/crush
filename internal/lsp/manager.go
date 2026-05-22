@@ -247,8 +247,10 @@ func (s *Manager) startServer(ctx context.Context, name, filepath string, server
 	if err := client.WaitForServerReady(initCtx); err != nil {
 		slog.Warn("LSP server not fully ready, continuing anyway", "name", name, "error", err)
 		client.SetServerState(StateError)
+		slog.Debug("LSP state transition", "name", name, "from", "starting", "to", "error")
 	} else {
 		client.SetServerState(StateReady)
+		slog.Debug("LSP state transition", "name", name, "from", "starting", "to", "ready")
 	}
 
 	slog.Debug("LSP client started", "name", name)

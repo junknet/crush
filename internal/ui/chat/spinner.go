@@ -7,6 +7,11 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/styles"
 )
 
+// StepMsg is a message type used to trigger the next step in the spinner animation.
+type StepMsg struct {
+	ID string
+}
+
 // brailleSpinnerFrames is the single-cell rotating spinner used for
 // every "thinking / working / running" state in the chat surface.
 // It replaces the upstream 15-char cycling random-glyph animation that
@@ -23,6 +28,11 @@ var brailleSpinnerFrames = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 // the chat surface stays free of random glyphs.
 func renderBrailleSpinner(sty *styles.Styles, label string) string {
 	idx := int(time.Now().UnixMilli()/80) % len(brailleSpinnerFrames)
+	if label == "" {
+		return lipgloss.NewStyle().
+			Foreground(sty.WorkingLabelColor).
+			Render(string(brailleSpinnerFrames[idx]))
+	}
 	return lipgloss.NewStyle().
 		Foreground(sty.WorkingLabelColor).
 		Render(string(brailleSpinnerFrames[idx]) + " " + label + "…")

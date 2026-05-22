@@ -32,25 +32,25 @@ var modelPairs = []modelPair{
 }
 
 func getModels(t *testing.T, r *vcr.Recorder, pair modelPair) (fantasy.LanguageModel, fantasy.LanguageModel) {
-	large, err := pair.largeModel(t, r)
+	primary, err := pair.primaryModel(t, r)
 	require.NoError(t, err)
-	small, err := pair.smallModel(t, r)
+	title, err := pair.titleModel(t, r)
 	require.NoError(t, err)
-	return large, small
+	return primary, title
 }
 
 func setupAgent(t *testing.T, pair modelPair) (SessionAgent, fakeEnv) {
-	r := vcr.NewRecorder(t)
-	large, small := getModels(t, r, pair)
+	r := newTestRecorder(t)
+	primary, title := getModels(t, r, pair)
 	env := testEnv(t)
 
 	createSimpleGoProject(t, env.workingDir)
-	agent, err := coderAgent(r, env, large, small)
+	agent, err := workerAgent(r, env, primary, title)
 	require.NoError(t, err)
 	return agent, env
 }
 
-func TestCoderAgent(t *testing.T) {
+func TestWorkerAgent(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows for now")
 	}

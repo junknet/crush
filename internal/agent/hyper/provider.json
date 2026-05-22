@@ -158,7 +158,7 @@
     },
     {
       "id": "qwen3-coder-480b-a35b-instruct-int4-mixed-ar",
-      "name": "Qwen3 Coder 480B A35B Instruct INT4 Mixed AR",
+      "name": "Qwen3 Worker 480B A35B Instruct INT4 Mixed AR",
       "cost_per_1m_in": 0.22,
       "cost_per_1m_out": 0.95,
       "cost_per_1m_in_cached": 0.11,

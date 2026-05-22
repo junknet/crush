@@ -2,9 +2,14 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"mvdan.cc/sh/moreinterp/coreutils"
 	"mvdan.cc/sh/v3/expand"
@@ -77,25 +82,94 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 		return fmt.Errorf("could not parse command: %w", err)
 	}
 
-	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs)
+	stdin := opts.Stdin
+	if stdin == nil {
+		devNull, oerr := os.Open(os.DevNull)
+		if oerr == nil {
+			stdin = devNull
+			defer devNull.Close()
+		} else {
+			stdin = strings.NewReader("")
+		}
+	}
+
+	runner, err := newRunner(opts.Cwd, opts.Env, stdin, stdout, stderr, opts.BlockFuncs)
 	if err != nil {
 		return fmt.Errorf("could not run command: %w", err)
 	}
 
-	return runner.Run(ctx, line)
+	start := time.Now()
+	slog.Debug("Shell command started", "command", opts.Command, "cwd", opts.Cwd)
+	err = runner.Run(ctx, line)
+	var exitCode int
+	var exitStatus interp.ExitStatus
+	if errors.As(err, &exitStatus) {
+		exitCode = int(exitStatus)
+	} else if err != nil {
+		exitCode = -1
+	}
+	slog.Debug("Shell command finished",
+		"command", opts.Command,
+		"cwd", opts.Cwd,
+		"exit_code", exitCode,
+		"duration_ms", time.Since(start).Milliseconds())
+	return err
 }
 
 // newRunner constructs an [interp.Runner] configured with the standard
 // Crush handler stack. Shared by the stateless [Run] entrypoint and the
 // stateful [Shell] so the two surfaces cannot drift.
 func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc) (*interp.Runner, error) {
+	if stdin == nil {
+		stdin = strings.NewReader("")
+	}
 	return interp.New(
 		interp.StdIO(stdin, stdout, stderr),
 		interp.Interactive(false),
 		interp.Env(expand.ListEnviron(env...)),
 		interp.Dir(cwd),
+		interp.CallHandler(rewriteUnsupportedBuiltins),
 		interp.ExecHandlers(standardHandlers(blockFuncs)...),
 	)
+}
+
+// unsupportedBuiltins lists names that mvdan/sh classifies as builtins via
+// [interp.IsBuiltin] but does not actually implement, causing the interpreter
+// to bail with "unsupported builtin". They are all standard system utilities
+// with no state inside the Crush shell, so rewriting them to an absolute path
+// via PATH lookup makes the interpreter route them through the exec handler
+// chain (PATH binaries) instead of the builtin dispatcher.
+//
+// Job-control builtins (bg/fg/jobs/wait/disown) are deliberately left out:
+// their state lives inside the Runner, so a PATH binary cannot stand in.
+var unsupportedBuiltins = map[string]bool{
+	"kill":    true,
+	"umask":   true,
+	"fc":      true,
+	"pushd":   true,
+	"popd":    true,
+	"dirs":    true,
+	"history": true,
+	"suspend": true,
+	"newgrp":  true,
+}
+
+// rewriteUnsupportedBuiltins is the [interp.CallHandlerFunc] that forces
+// known unsupported builtins onto the exec path by replacing the bare name
+// with its absolute PATH location. If lookup fails we leave args unchanged
+// so the original (clearer) "executable file not found" error surfaces.
+func rewriteUnsupportedBuiltins(_ context.Context, args []string) ([]string, error) {
+	if len(args) == 0 || !unsupportedBuiltins[args[0]] {
+		return args, nil
+	}
+	abs, err := exec.LookPath(args[0])
+	if err != nil {
+		return args, nil
+	}
+	out := make([]string, len(args))
+	copy(out, args)
+	out[0] = abs
+	return out, nil
 }
 
 // standardHandlers returns the exec-handler middleware chain used by both
@@ -116,6 +190,11 @@ func standardHandlers(blockFuncs []BlockFunc) []func(next interp.ExecHandlerFunc
 	if useGoCoreUtils {
 		handlers = append(handlers, coreutils.ExecHandler)
 	}
+	// Terminal handler: spawns the real process. On unix it isolates each
+	// command in its own process group so cancellation kills the whole
+	// subtree (no orphaned grandchildren holding locks); on windows it is
+	// empty and the chain falls through to mvdan's default exec.
+	handlers = append(handlers, terminalExecHandlers()...)
 	return handlers
 }
 

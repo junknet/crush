@@ -90,7 +90,7 @@ interception so a single delegated turn doesn't trigger the user's hook N times.
 
 The outer sub-agent tool call itself is hooked, so blanket policy like "never
 spawn sub-agents" or "rewrite prompts sent to the task agent" still works from
-the coder's side. The sub-agent's inner loop is the part that's exempt.
+the worker agent side. The sub-agent's inner loop is the part that's exempt.
 
 ### Why users might want the escape hatch
 

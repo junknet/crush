@@ -148,38 +148,41 @@ func quickStyle(o quickStyleOpts) Styles {
 		},
 		H1: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix:          " ",
-				Suffix:          " ",
-				Color:           hex(o.warningSubtle),
-				BackgroundColor: hex(o.primary),
-				Bold:            new(true),
+				BlockSuffix: "\n",
+				Color:       hex(o.info),
+				Bold:        new(true),
+				Underline:   new(true),
 			},
 		},
 		H2: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix: "## ",
+				BlockSuffix: "\n",
+				Color:       hex(o.info),
+				Bold:        new(true),
 			},
 		},
 		H3: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix: "### ",
+				Color: hex(o.info),
+				Bold:  new(true),
 			},
 		},
 		H4: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix: "#### ",
+				Color: hex(o.infoMoreSubtle),
+				Bold:  new(true),
 			},
 		},
 		H5: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix: "##### ",
+				Color: hex(o.fgBase),
+				Bold:  new(true),
 			},
 		},
 		H6: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix: "###### ",
-				Color:  hex(o.successMostSubtle),
-				Bold:   new(false),
+				Color: hex(o.fgMoreSubtle),
+				Bold:  new(true),
 			},
 		},
 		Strikethrough: ansi.StylePrimitive{
@@ -207,12 +210,13 @@ func quickStyle(o quickStyleOpts) Styles {
 			Unticked:       "[ ] ",
 		},
 		Link: ansi.StylePrimitive{
-			Color:     hex(charmtone.Zinc),
+			Color:     hex(o.info),
 			Underline: new(true),
+			Bold:      new(true),
 		},
 		LinkText: ansi.StylePrimitive{
-			Color: hex(o.successMostSubtle),
-			Bold:  new(true),
+			Color:     hex(o.info),
+			Underline: new(true),
 		},
 		Image: ansi.StylePrimitive{
 			Color:     hex(charmtone.Cheeky),
@@ -226,7 +230,7 @@ func quickStyle(o quickStyleOpts) Styles {
 			StylePrimitive: ansi.StylePrimitive{
 				Prefix:          " ",
 				Suffix:          " ",
-				Color:           hex(o.destructive),
+				Color:           hex(o.fgBase),
 				BackgroundColor: hex(o.bgLessVisible),
 			},
 		},
@@ -362,44 +366,44 @@ func quickStyle(o quickStyleOpts) Styles {
 		},
 		H1: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix:          " ",
-				Suffix:          " ",
+				BlockSuffix:     "\n",
 				Bold:            new(true),
+				Underline:       new(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
 		},
 		H2: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix:          "## ",
+				BlockSuffix:     "\n",
+				Bold:            new(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
 		},
 		H3: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix:          "### ",
+				Bold:            new(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
 		},
 		H4: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix:          "#### ",
+				Bold:            new(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
 		},
 		H5: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix:          "##### ",
+				Bold:            new(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
 		},
 		H6: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Prefix:          "###### ",
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
@@ -600,8 +604,9 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Tool.NameNormal = base.Foreground(o.info)
 	s.Tool.NameNested = base.Foreground(o.info)
 
-	s.Tool.ParamMain = subtle
+	s.Tool.ParamMain = base.Foreground(o.fgSubtle)
 	s.Tool.ParamKey = subtle
+	s.Tool.ParamLink = base.Foreground(o.info).Underline(true)
 
 	// Content rendering - prepared styles that accept width parameter
 	s.Tool.ContentLine = muted.Background(o.bgLeastVisible)
@@ -637,7 +642,7 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Tool.JobDescription = subtle
 
 	// Agent task styles
-	s.Tool.AgentTaskTag = base.Bold(true).Padding(0, 1).MarginLeft(2).Background(o.infoMoreSubtle).Foreground(o.onPrimary)
+	s.Tool.AgentWorkTag = base.Bold(true).Padding(0, 1).MarginLeft(2).Background(o.infoMoreSubtle).Foreground(o.onPrimary)
 	s.Tool.AgentPrompt = muted
 
 	// Agentic fetch styles
@@ -660,7 +665,7 @@ func quickStyle(o quickStyleOpts) Styles {
 	// Loading indicators for images, skills
 	s.Tool.ResourceLoadedText = base.Foreground(o.success)
 	s.Tool.ResourceLoadedIndicator = base.Foreground(o.successMostSubtle)
-	s.Tool.ResourceName = base
+	s.Tool.ResourceName = base.Foreground(o.info).Underline(true)
 	s.Tool.MediaType = base
 	s.Tool.ResourceSize = base.Foreground(o.fgMoreSubtle)
 
@@ -682,7 +687,7 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Tool.ResultEmpty = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
 	s.Tool.ResultTruncation = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
 	s.Tool.ResultItemName = lipgloss.NewStyle().Foreground(o.fgBase)
-	s.Tool.ResultItemDesc = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
+	s.Tool.ResultItemDesc = lipgloss.NewStyle().Foreground(o.fgSubtle)
 
 	// Buttons
 	s.Button.Focused = lipgloss.NewStyle().Foreground(o.onPrimary).Background(o.secondary)
@@ -740,7 +745,8 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.LSP.InfoDiagnostic = base.Foreground(o.info)
 
 	// Files
-	s.Files.Path = lipgloss.NewStyle().Foreground(o.fgMoreSubtle)
+	s.Files.Path = lipgloss.NewStyle().Foreground(o.fgSubtle)
+	s.Files.Link = lipgloss.NewStyle().Foreground(o.info).Underline(true)
 	s.Files.Additions = lipgloss.NewStyle().Foreground(o.successMostSubtle)
 	s.Files.Deletions = lipgloss.NewStyle().Foreground(o.error)
 	s.Files.SectionTitle = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
@@ -748,8 +754,8 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Files.TruncationHint = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
 
 	// Sidebar
-	s.Sidebar.SessionTitle = lipgloss.NewStyle().Foreground(o.fgMoreSubtle)
-	s.Sidebar.WorkingDir = lipgloss.NewStyle().Foreground(o.fgMoreSubtle)
+	s.Sidebar.SessionTitle = lipgloss.NewStyle().Foreground(o.fgSubtle)
+	s.Sidebar.WorkingDir = lipgloss.NewStyle().Foreground(o.info).Underline(true)
 
 	// ModelInfo
 	s.ModelInfo.Icon = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
@@ -846,6 +852,12 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Dialog.Help.FullDesc = base.Foreground(o.fgMostSubtle)
 	s.Dialog.Help.FullSeparator = base.Foreground(o.separator)
 	s.Dialog.NormalItem = base.Padding(0, 1).Foreground(o.fgBase)
+	// Selected item: plain bg/fg only — do *not* layer Bold/Underline on top.
+	// Items in command palette / model picker embed their own ANSI segments for
+	// right-aligned keyboard shortcut hints (e.g. `ctrl+l`); wrapping those
+	// pre-styled substrings with extra escape attributes leaks raw `\e[38;2;...m`
+	// sequences as visible text. Visibility tweaks must go through styling each
+	// inner span individually rather than the outer SelectedItem container.
 	s.Dialog.SelectedItem = base.Padding(0, 1).Background(o.primary).Foreground(o.onPrimary)
 	s.Dialog.InputPrompt = base.Margin(1, 1)
 

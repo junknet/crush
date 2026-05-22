@@ -154,8 +154,20 @@ definitions:
         items:
           type: string
         type: array
+      call_timeout:
+        description: |-
+          CallTimeout bounds a single tool invocation. 0 disables the
+          timeout (the agent's outer ctx is still honoured).
+        type: integer
       command:
         type: string
+      connect_timeout:
+        description: |-
+          ConnectTimeout bounds session establishment (Connect) and health
+          pings. Tool execution latency is governed by CallTimeout instead —
+          historically these shared one knob and the default either starved
+          startups or killed legitimate long tool calls.
+        type: integer
       disabled:
         type: boolean
       disabled_tools:
@@ -181,8 +193,6 @@ definitions:
           omitted from the outgoing request rather than sent as
           "Header:".
         type: object
-      timeout:
-        type: integer
       type:
         $ref: '#/definitions/config.MCPType'
       url:
@@ -242,6 +252,16 @@ definitions:
         description: Used by anthropic models that can reason to indicate if the model
           should think.
         type: boolean
+      thinking_budget:
+        description: |-
+          ThinkingBudget overrides the default Anthropic `thinking.budget_tokens`
+          hard cap. When unset (0) and `think:true`, crush derives the budget
+          from `reasoning_effort` (minimal=1024 / low=4000 / medium=8000 /
+          high=16000 / xhigh=32000); falls back to 2000 if effort is also empty.
+          Setting a non-zero value here pins the budget regardless of effort —
+          useful when one role needs a deeper or shallower thinking pool than
+          the effort-derived default.
+        type: integer
       top_k:
         type: integer
       top_p:
@@ -249,17 +269,13 @@ definitions:
     type: object
   config.SelectedModelType:
     enum:
-    - large
-    - small
-    - build
-    - coder
+    - brain
+    - worker
     - explore
     type: string
     x-enum-varnames:
-    - SelectedModelTypeLarge
-    - SelectedModelTypeSmall
-    - SelectedModelTypeBuild
-    - SelectedModelTypeCoder
+    - SelectedModelTypeBrain
+    - SelectedModelTypeWorker
     - SelectedModelTypeExplore
   config.TUIOptions:
     properties:
@@ -326,7 +342,7 @@ definitions:
       models:
         additionalProperties:
           $ref: '#/definitions/config.SelectedModel'
-        description: Model profiles used by the built-in roles and legacy aliases.
+        description: Model profiles used by the built-in roles.
         type: object
       options:
         $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Options'
@@ -396,14 +412,6 @@ definitions:
       tui:
         $ref: '#/definitions/config.TUIOptions'
     type: object
-  github_com_charmbracelet_crush_internal_config.Scope:
-    enum:
-    - 0
-    - 1
-    type: integer
-    x-enum-varnames:
-    - ScopeGlobal
-    - ScopeWorkspace
   github_com_charmbracelet_crush_internal_proto.Message:
     properties:
       created_at:
@@ -516,8 +524,6 @@ definitions:
     properties:
       enabled:
         type: boolean
-      scope:
-        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigModelRequest:
     properties:
@@ -525,8 +531,6 @@ definitions:
         $ref: '#/definitions/config.SelectedModel'
       model_type:
         $ref: '#/definitions/config.SelectedModelType'
-      scope:
-        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigProviderKeyRequest:
     properties:
@@ -538,29 +542,21 @@ definitions:
         $ref: '#/definitions/proto.APIKeyKind'
       provider_id:
         type: string
-      scope:
-        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigRefreshOAuthRequest:
     properties:
       provider_id:
         type: string
-      scope:
-        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigRemoveRequest:
     properties:
       key:
         type: string
-      scope:
-        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
     type: object
   proto.ConfigSetRequest:
     properties:
       key:
         type: string
-      scope:
-        $ref: '#/definitions/github_com_charmbracelet_crush_internal_config.Scope'
       value: {}
     type: object
   proto.Error:
@@ -801,6 +797,62 @@ definitions:
       version:
         type: string
     type: object
+  server.debugLSPState:
+    properties:
+      connected_at:
+        type: string
+      diagnostic_count:
+        type: integer
+      error:
+        type: string
+      name:
+        type: string
+      state:
+        type: string
+    type: object
+  server.debugMCPState:
+    properties:
+      connected_at:
+        type: string
+      error:
+        type: string
+      name:
+        type: string
+      state:
+        type: string
+    type: object
+  server.debugStateResponse:
+    properties:
+      lsp:
+        items:
+          $ref: '#/definitions/server.debugLSPState'
+        type: array
+      mcp:
+        items:
+          $ref: '#/definitions/server.debugMCPState'
+        type: array
+      time:
+        type: string
+      workspaces:
+        items:
+          $ref: '#/definitions/server.debugWorkspaceState'
+        type: array
+    type: object
+  server.debugWorkspaceState:
+    properties:
+      is_busy:
+        type: boolean
+      is_ready:
+        type: boolean
+      model:
+        type: string
+      path:
+        type: string
+      provider:
+        type: string
+      workspace_id:
+        type: string
+    type: object
   time.Duration:
     enum:
     - -9223372036854775808
@@ -866,6 +918,18 @@ paths:
           schema:
             $ref: '#/definitions/proto.Error'
       summary: Send server control command
+      tags:
+      - system
+  /debug/state:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/server.debugStateResponse'
+      summary: Debug state snapshot
       tags:
       - system
   /health:
@@ -1032,7 +1096,7 @@ paths:
       summary: Send message to agent
       tags:
       - agent
-  /workspaces/{id}/agent/default-small-model:
+  /workspaces/{id}/agent/default-explore-model:
     get:
       parameters:
       - description: Workspace ID
@@ -1059,7 +1123,7 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/proto.Error'
-      summary: Get default small model
+      summary: Get default explore model
       tags:
       - agent
   /workspaces/{id}/agent/init:

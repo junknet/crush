@@ -36,7 +36,6 @@ import (
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/update"
 	"github.com/charmbracelet/crush/internal/version"
@@ -62,6 +61,10 @@ type App struct {
 	AgentCoordinator agent.Coordinator
 
 	LSPManager *lsp.Manager
+
+	// BackgroundShells owns this workspace's background jobs. One per App so
+	// List/KillAll/KillBySession never reach across workspaces.
+	BackgroundShells *shell.BackgroundShellManager
 
 	config *config.ConfigStore
 
@@ -96,6 +99,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		FileTracker: filetracker.NewService(q),
 		LSPManager:  lsp.NewManager(store),
 
+		BackgroundShells: shell.NewBackgroundShellManager(),
+
 		globalCtx: ctx,
 
 		config: store,
@@ -127,8 +132,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 		slog.Warn("No agent configuration found")
 		return app, nil
 	}
-	if err := app.InitCoderAgent(ctx); err != nil {
-		return nil, fmt.Errorf("failed to initialize coder agent: %w", err)
+	if err := app.InitBrainAgent(ctx); err != nil {
+		return nil, fmt.Errorf("failed to initialize brain agent: %w", err)
 	}
 
 	// Set up callback for LSP state updates.
@@ -143,6 +148,23 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	go app.LSPManager.TrackConfigured()
 
 	return app, nil
+}
+
+// ReapActiveWork cancels every in-flight agent run and kills every background
+// job in this workspace, but leaves the App itself (DB, config, LSP) intact so
+// a client can reconnect and resume sessions from persisted state. It is the
+// reaping action taken when the last client watching a workspace disconnects:
+// cancelled turns and killed job subtrees free build locks and CPU rather than
+// orphaning, while the conversation history survives in the database.
+//
+// ctx bounds how long it waits for background jobs to exit.
+func (app *App) ReapActiveWork(ctx context.Context) {
+	if app.AgentCoordinator != nil {
+		app.AgentCoordinator.CancelAll()
+	}
+	if app.BackgroundShells != nil {
+		app.BackgroundShells.KillAll(ctx)
+	}
 }
 
 // Config returns the pure-data configuration.
@@ -204,14 +226,14 @@ func (app *App) resolveSession(ctx context.Context, continueSessionID string, us
 
 // RunNonInteractive runs the application in non-interactive mode with the
 // given prompt, printing to stdout.
-func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt, largeModel, smallModel string, hideSpinner bool, continueSessionID string, useLast bool) error {
+func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt, brainModel, exploreModel string, hideSpinner bool, continueSessionID string, useLast bool) error {
 	slog.Info("Running in non-interactive mode")
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	if largeModel != "" || smallModel != "" {
-		if err := app.overrideModelsForNonInteractive(ctx, largeModel, smallModel); err != nil {
+	if brainModel != "" || exploreModel != "" {
+		if err := app.overrideModelsForNonInteractive(ctx, brainModel, exploreModel); err != nil {
 			return fmt.Errorf("failed to override models: %w", err)
 		}
 	}
@@ -232,7 +254,7 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 	progress = app.config.Config().Options.Progress == nil || *app.config.Config().Options.Progress
 
 	if !hideSpinner && stderrTTY {
-		t := styles.ThemeForProvider(app.config.Config().Models[config.SelectedModelTypeLarge].Provider)
+		t := styles.ThemeForProvider(app.config.Config().Models[config.SelectedModelTypeBrain].Provider)
 
 		// Detect background color to set the appropriate color for the
 		// spinner's 'Generating...' text. Without this, that text would be
@@ -243,7 +265,7 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 		}
 		defaultFG := lipgloss.LightDark(hasDarkBG)(charmtone.Pepper, t.WorkingLabelColor)
 
-		spinner = format.NewSpinner(ctx, cancel, anim.Settings{
+		spinner = format.NewSpinner(ctx, cancel, format.Settings{
 			Size:        10,
 			Label:       "Generating",
 			LabelColor:  defaultFG,
@@ -384,66 +406,63 @@ func (app *App) UpdateAgentModel(ctx context.Context) error {
 // overrides the model configurations, then rebuilds the agent.
 // Format: "model-name" (searches all providers) or "provider/model-name".
 // Model matching is case-insensitive.
-// If largeModel is provided but smallModel is not, the small model defaults to
-// the provider's default small model.
-func (app *App) overrideModelsForNonInteractive(ctx context.Context, largeModel, smallModel string) error {
+// If brainModel is provided but exploreModel is not, the explore model defaults to
+// the provider's default explore model.
+func (app *App) overrideModelsForNonInteractive(ctx context.Context, brainModel, exploreModel string) error {
 	providers := app.config.Config().Providers.Copy()
 
-	largeMatches, smallMatches, err := findModels(providers, largeModel, smallModel)
+	brainMatches, exploreMatches, err := findModels(providers, brainModel, exploreModel)
 	if err != nil {
 		return err
 	}
 
-	var largeProviderID string
+	var brainProviderID string
 
-	// Override large model.
-	if largeModel != "" {
-		found, err := validateMatches(largeMatches, largeModel, "large")
+	// Override brain model.
+	if brainModel != "" {
+		found, err := validateMatches(brainMatches, brainModel, "brain")
 		if err != nil {
 			return err
 		}
-		largeProviderID = found.provider
-		slog.Info("Overriding large model for non-interactive run", "provider", found.provider, "model", found.modelID)
+		brainProviderID = found.provider
+		slog.Info("Overriding brain model for non-interactive run", "provider", found.provider, "model", found.modelID)
 		model := config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
 		}
-		app.config.Config().Models[config.SelectedModelTypeBuild] = model
-		app.config.Config().Models[config.SelectedModelTypeLarge] = model
+		app.config.Config().Models[config.SelectedModelTypeBrain] = model
 	}
 
-	// Override small model.
+	// Override explore model.
 	switch {
-	case smallModel != "":
-		found, err := validateMatches(smallMatches, smallModel, "small")
+	case exploreModel != "":
+		found, err := validateMatches(exploreMatches, exploreModel, "explore")
 		if err != nil {
 			return err
 		}
-		slog.Info("Overriding small model for non-interactive run", "provider", found.provider, "model", found.modelID)
+		slog.Info("Overriding explore model for non-interactive run", "provider", found.provider, "model", found.modelID)
 		model := config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
 		}
 		app.config.Config().Models[config.SelectedModelTypeExplore] = model
-		app.config.Config().Models[config.SelectedModelTypeSmall] = model
 
-	case largeModel != "":
-		// No small model specified, but large model was - use provider's default.
-		smallCfg := app.GetDefaultSmallModel(largeProviderID)
-		app.config.Config().Models[config.SelectedModelTypeExplore] = smallCfg
-		app.config.Config().Models[config.SelectedModelTypeSmall] = smallCfg
+	case brainModel != "":
+		// No explore model specified, but brain model was - use provider's default.
+		exploreCfg := app.GetDefaultExploreModel(brainProviderID)
+		app.config.Config().Models[config.SelectedModelTypeExplore] = exploreCfg
 	}
 
 	return app.AgentCoordinator.UpdateModels(ctx)
 }
 
-// GetDefaultSmallModel returns the default small model for the given
-// provider. Falls back to the large model if no default is found.
-func (app *App) GetDefaultSmallModel(providerID string) config.SelectedModel {
+// GetDefaultExploreModel returns the default explore model for the given
+// provider. Falls back to the brain model if no default is found.
+func (app *App) GetDefaultExploreModel(providerID string) config.SelectedModel {
 	cfg := app.config.Config()
-	largeModelCfg := cfg.Models[config.SelectedModelTypeLarge]
+	brainModelCfg := cfg.Models[config.SelectedModelTypeBrain]
 
-	// Find the provider in the known providers list to get its default small model.
+	// Find the provider in the known providers list to get its default explore model.
 	knownProviders, _ := config.Providers(cfg)
 	var knownProvider *catwalk.Provider
 	for _, p := range knownProviders {
@@ -453,23 +472,23 @@ func (app *App) GetDefaultSmallModel(providerID string) config.SelectedModel {
 		}
 	}
 
-	// For unknown/local providers, use the large model as small.
+	// For unknown/local providers, use the brain model as explore.
 	if knownProvider == nil {
-		slog.Warn("Using large model as small model for unknown provider", "provider", providerID, "model", largeModelCfg.Model)
-		return largeModelCfg
+		slog.Warn("Using brain model as explore model for unknown provider", "provider", providerID, "model", brainModelCfg.Model)
+		return brainModelCfg
 	}
 
-	defaultSmallModelID := knownProvider.DefaultSmallModelID
-	model := cfg.GetModel(providerID, defaultSmallModelID)
+	defaultExploreModelID := knownProvider.DefaultSmallModelID
+	model := cfg.GetModel(providerID, defaultExploreModelID)
 	if model == nil {
-		slog.Warn("Default small model not found, using large model", "provider", providerID, "model", largeModelCfg.Model)
-		return largeModelCfg
+		slog.Warn("Default explore model not found, using brain model", "provider", providerID, "model", brainModelCfg.Model)
+		return brainModelCfg
 	}
 
-	slog.Info("Using provider default small model", "provider", providerID, "model", defaultSmallModelID)
+	slog.Info("Using provider default explore model", "provider", providerID, "model", defaultExploreModelID)
 	return config.SelectedModel{
 		Provider:        providerID,
-		Model:           defaultSmallModelID,
+		Model:           defaultExploreModelID,
 		MaxTokens:       model.DefaultMaxTokens,
 		ReasoningEffort: model.DefaultReasoningEffort,
 	}
@@ -522,10 +541,10 @@ func setupSubscriber[T any](
 	})
 }
 
-func (app *App) InitCoderAgent(ctx context.Context) error {
-	buildAgentCfg := app.config.Config().Agents[config.AgentBuild]
-	if buildAgentCfg.ID == "" {
-		return fmt.Errorf("build agent configuration is missing")
+func (app *App) InitBrainAgent(ctx context.Context) error {
+	brainAgentCfg := app.config.Config().Agents[config.AgentBrain]
+	if brainAgentCfg.ID == "" {
+		return fmt.Errorf("brain agent configuration is missing")
 	}
 	var err error
 	app.AgentCoordinator, err = agent.NewCoordinator(
@@ -538,9 +557,10 @@ func (app *App) InitCoderAgent(ctx context.Context) error {
 		app.FileTracker,
 		app.LSPManager,
 		app.agentNotifications,
+		app.BackgroundShells,
 	)
 	if err != nil {
-		slog.Error("Failed to create coder agent", "err", err)
+		slog.Error("Failed to create brain agent", "err", err)
 		return err
 	}
 	return nil
@@ -614,7 +634,7 @@ func (app *App) Shutdown() {
 
 	// Kill all background shells.
 	wg.Go(func() {
-		shell.GetBackgroundShellManager().KillAll(shutdownCtx)
+		app.BackgroundShells.KillAll(shutdownCtx)
 	})
 
 	// Shutdown all LSP clients.

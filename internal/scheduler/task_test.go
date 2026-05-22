@@ -34,9 +34,9 @@ func TestSchedulerDispatchEmitsEvents(t *testing.T) {
 
 	runtime := agentruntime.NewSession("/tmp/project", nil)
 	sched := NewAgentScheduler(runtime)
-	root := sched.EnsureRoot("session-1", "root goal", []string{"root.go"}, ProfileBuildAgent)
+	root := sched.EnsureRoot("session-1", "root goal", []string{"root.go"}, ProfileBrainAgent)
 	left := sched.SpawnChild(root, "child-1", "left", ProfileWorkerAgent, []string{"left.go"}, "done")
-	right := sched.SpawnChild(root, "child-2", "right", ProfileToolsAgent, []string{"right.go"}, "done")
+	right := sched.SpawnChild(root, "child-2", "right", ProfileExploreAgent, []string{"right.go"}, "done")
 
 	require.NotNil(t, left)
 	require.NotNil(t, right)
@@ -62,7 +62,7 @@ func TestEnsureRootReplacesLatestRootPerSession(t *testing.T) {
 	t.Parallel()
 
 	sched := NewAgentScheduler(agentruntime.NewSession("/tmp/project", nil))
-	first := sched.EnsureRoot("session-1", "root goal", []string{"root.go"}, ProfileBuildAgent)
+	first := sched.EnsureRoot("session-1", "root goal", []string{"root.go"}, ProfileBrainAgent)
 	second := sched.EnsureRoot("session-1", "root goal 2", []string{"next.go"}, ProfileWorkerAgent)
 
 	require.NotNil(t, first)

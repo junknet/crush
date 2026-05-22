@@ -20,7 +20,7 @@ log "sending prompt: $PROMPT"
 "$TUI" send "$SESS" "$PROMPT"
 "$TUI" key  "$SESS" Enter
 
-log "waiting for build_agent / worker_agent / tools_agent flow"
+log "waiting for brain_agent / worker_agent / explore_agent flow"
 "$TUI" expect "$SESS" 'Task started|Plan' 30
 
 log "waiting for completion(verify 步骤的 ✓ 或最终 ◇ 完成不带秒数)"
@@ -63,9 +63,9 @@ trace_count_ge '.kind == "task_started"' 4
 trace_count_ge '.kind == "task_finished"' 4
 
 # 3 个 profile 必须都跑了
-trace_has '.profile == "build_agent" and .kind == "task_finished"'
+trace_has '.profile == "brain_agent" and .kind == "task_finished"'
 trace_has '.profile == "worker_agent" and .kind == "task_finished"'
-trace_has '.profile == "tools_agent" and .kind == "task_finished"'
+trace_has '.profile == "explore_agent" and .kind == "task_finished"'
 
 # ── 断言:trace 字段填齐(task_finished depth=1) ─────────────────
 # duration_ms > 0

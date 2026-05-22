@@ -268,7 +268,16 @@ func (s *Shell) execCommon(ctx context.Context, command string, stdout, stderr i
 		return fmt.Errorf("could not parse command: %w", err)
 	}
 
-	runner, err = s.newInterp(nil, stdout, stderr)
+	var stdin io.Reader
+	devNull, oerr := os.Open(os.DevNull)
+	if oerr == nil {
+		stdin = devNull
+		defer devNull.Close()
+	} else {
+		stdin = strings.NewReader("")
+	}
+
+	runner, err = s.newInterp(stdin, stdout, stderr)
 	if err != nil {
 		return fmt.Errorf("could not run command: %w", err)
 	}

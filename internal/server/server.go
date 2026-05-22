@@ -7,12 +7,16 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/log"
+	"github.com/charmbracelet/crush/internal/proto"
 	_ "github.com/charmbracelet/crush/internal/swagger"
 	httpswagger "github.com/swaggo/http-swagger/v2"
 )
@@ -74,6 +78,14 @@ func (s *Server) SetLogger(logger *slog.Logger) {
 	s.logger = logger
 }
 
+// RegisterWorkspace creates a running workspace inside this server. It is
+// used by standalone HTTP deployments so mobile and remote clients have a
+// concrete workspace immediately after the server starts.
+func (s *Server) RegisterWorkspace(args proto.Workspace) (proto.Workspace, error) {
+	_, ws, err := s.backend.CreateWorkspace(args)
+	return ws, err
+}
+
 // DefaultServer returns a new [Server] with the default address.
 func DefaultServer(cfg *config.ConfigStore) *Server {
 	hostURL, err := ParseHostURL(DefaultHost())
@@ -109,6 +121,7 @@ func NewServer(cfg *config.ConfigStore, network, address string) *Server {
 	mux.HandleFunc("GET /v1/health", c.handleGetHealth)
 	mux.HandleFunc("GET /v1/version", c.handleGetVersion)
 	mux.HandleFunc("GET /v1/config", c.handleGetConfig)
+	mux.HandleFunc("GET /v1/debug/state", c.handleGetDebugState)
 	mux.HandleFunc("POST /v1/control", c.handlePostControl)
 	mux.HandleFunc("GET /v1/workspaces", c.handleGetWorkspaces)
 	mux.HandleFunc("POST /v1/workspaces", c.handlePostWorkspaces)
@@ -144,7 +157,7 @@ func NewServer(cfg *config.ConfigStore, network, address string) *Server {
 	mux.HandleFunc("GET /v1/workspaces/{id}/agent/sessions/{sid}/prompts/list", c.handleGetWorkspaceAgentSessionPromptList)
 	mux.HandleFunc("POST /v1/workspaces/{id}/agent/sessions/{sid}/prompts/clear", c.handlePostWorkspaceAgentSessionPromptClear)
 	mux.HandleFunc("POST /v1/workspaces/{id}/agent/sessions/{sid}/summarize", c.handlePostWorkspaceAgentSessionSummarize)
-	mux.HandleFunc("GET /v1/workspaces/{id}/agent/default-small-model", c.handleGetWorkspaceAgentDefaultSmallModel)
+	mux.HandleFunc("GET /v1/workspaces/{id}/agent/default-explore-model", c.handleGetWorkspaceAgentDefaultExploreModel)
 	mux.HandleFunc("POST /v1/workspaces/{id}/config/set", c.handlePostWorkspaceConfigSet)
 	mux.HandleFunc("POST /v1/workspaces/{id}/config/remove", c.handlePostWorkspaceConfigRemove)
 	mux.HandleFunc("POST /v1/workspaces/{id}/config/model", c.handlePostWorkspaceConfigModel)
@@ -164,9 +177,25 @@ func NewServer(cfg *config.ConfigStore, network, address string) *Server {
 	mux.HandleFunc("POST /v1/workspaces/{id}/mcp/docker/enable", c.handlePostWorkspaceMCPEnableDocker)
 	mux.HandleFunc("POST /v1/workspaces/{id}/mcp/docker/disable", c.handlePostWorkspaceMCPDisableDocker)
 	mux.Handle("/v1/docs/", httpswagger.WrapHandler)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			jsonEncode(w, map[string]string{
+				"name":   "crush-server",
+				"status": "ok",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	var handler http.Handler = s.recoverHandler(s.loggingHandler(mux))
+	if dir := os.Getenv(log.HTTPDumpDirEnv); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err == nil {
+			handler = ipcDumpHandler(handler, filepath.Join(dir, "ipc-server.jsonl"))
+		}
+	}
 	s.h = &http.Server{
 		Protocols: &p,
-		Handler:   s.recoverHandler(s.loggingHandler(mux)),
+		Handler:   handler,
 	}
 	if network == "tcp" {
 		s.h.Addr = address

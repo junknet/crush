@@ -7,6 +7,13 @@ vars:
     sh: git describe --long 2>/dev/null || echo ""
   RACE:
     sh: test -f race.log && echo "1" || echo ""
+  LOCAL_BIN_DIR:
+    sh: printf '%s\n' "${CRUSH_LOCAL_BIN_DIR:-$HOME/.local/bin}"
+  CACHE_DIR:
+    sh: printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}"
+  CRUSH_LAUNCHER: "{{.LOCAL_BIN_DIR}}/crush"
+  CRUSH_DEV_LAUNCHER: "{{.LOCAL_BIN_DIR}}/crush-dev"
+  CRUSH_BIN: "{{.CACHE_DIR}}/crush-prod/crush"
 
 env:
   CGO_ENABLED: 0
@@ -41,25 +48,35 @@ tasks:
       GOEXPERIMENT: null
 
   build:
-    desc: Run build
+    desc: Build the crush binary and refresh both launchers (crush + crush-dev)
     vars:
-      LDFLAGS: '{{if .VERSION}}-ldflags="-X github.com/charmbracelet/crush/internal/version.Version={{.VERSION}}"{{end}}'
+      PROD_LDFLAGS: '-ldflags="-s -w{{if .VERSION}} -X github.com/charmbracelet/crush/internal/version.Version={{.VERSION}}{{end}}"'
     cmds:
-      - "go build -v {{if .RACE}}-race{{end}} {{.LDFLAGS}} ."
+      - mkdir -p "{{.LOCAL_BIN_DIR}}"
+      - mkdir -p "{{.CACHE_DIR}}/crush-prod"
+      - rm -f "{{.CRUSH_BIN}}.tmp"
+      - "go build -v -trimpath {{if .RACE}}-race{{end}} {{.PROD_LDFLAGS}} -o \"{{.CRUSH_BIN}}.tmp\" ."
+      - mv "{{.CRUSH_BIN}}.tmp" "{{.CRUSH_BIN}}"
+      - install -m 0755 scripts/launch_crush.sh "{{.CRUSH_LAUNCHER}}"
+      - install -m 0755 scripts/launch_crush_dev.sh "{{.CRUSH_DEV_LAUNCHER}}"
     sources:
       - ./**/*.go
       - go.mod
+      - scripts/launch_crush.sh
+      - scripts/launch_crush_dev.sh
       - internal/agent/**/*.md
       - internal/agent/**/*.md.tpl
       - internal/agent/hyper/provider.json
     generates:
-      - crush{{exeExt}}
+      - "{{.CRUSH_BIN}}"
+      - "{{.CRUSH_LAUNCHER}}"
+      - "{{.CRUSH_DEV_LAUNCHER}}"
 
   run:
     desc: Run build
     cmds:
       - task: build
-      - "./crush{{exeExt}} {{.CLI_ARGS}} {{if .RACE}}2>race.log{{end}}"
+      - '"{{.CRUSH_LAUNCHER}}" {{.CLI_ARGS}} {{if .RACE}}2>race.log{{end}}'
 
   run:catwalk:
     desc: Run build with local Catwalk
@@ -67,7 +84,7 @@ tasks:
       CATWALK_URL: http://localhost:8080
     cmds:
       - task: build
-      - ./crush{{exeExt}} {{.CLI_ARGS}}
+      - '"{{.CRUSH_LAUNCHER}}" {{.CLI_ARGS}}'
 
   run:onboarding:
     desc: Run build with custom config to test onboarding
@@ -77,7 +94,7 @@ tasks:
     cmds:
       - task: build
       - rm -rf tmp/onboarding
-      - ./crush{{exeExt}} {{.CLI_ARGS}}
+      - '"{{.CRUSH_LAUNCHER}}" {{.CLI_ARGS}}'
 
   test:
     desc: Run tests

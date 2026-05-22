@@ -39,5 +39,7 @@ type Notification struct {
 	// match events to a single row.
 	SubAgentToolCallID string
 	SubAgentPrompt     string
-	SubAgentError      string
+	// SubAgentProfile identifies the worker tier handling the task.
+	SubAgentProfile string
+	SubAgentError   string
 }

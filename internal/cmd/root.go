@@ -50,14 +50,14 @@ import (
 var clientHost string
 
 func init() {
-	rootCmd.PersistentFlags().StringP("cwd", "c", "", "Current working directory")
+	rootCmd.PersistentFlags().StringP("cwd", "C", "", "Current working directory")
 	rootCmd.PersistentFlags().StringP("data-dir", "D", "", "Custom crush data directory")
 	rootCmd.PersistentFlags().BoolP("debug", "d", false, "Debug")
 	rootCmd.PersistentFlags().String("trace-file", "", "Write runtime trace entries to this JSONL file")
 	rootCmd.PersistentFlags().StringVarP(&clientHost, "host", "H", server.DefaultHost(), "Connect to a specific crush server host (for advanced users)")
 	rootCmd.Flags().BoolP("help", "h", false, "Help")
 	rootCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
-	rootCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
+	rootCmd.Flags().BoolP("continue", "c", false, "Continue the most recent session")
 	rootCmd.MarkFlagsMutuallyExclusive("session", "continue")
 
 	rootCmd.AddCommand(
@@ -332,8 +332,8 @@ func setupClientServerWorkspace(cmd *cobra.Command) (workspace.Workspace, func()
 	clientWs := workspace.NewClientWorkspace(c, *protoWs)
 
 	if protoWs.Config.IsConfigured() {
-		if err := clientWs.InitCoderAgent(cmd.Context()); err != nil {
-			slog.Error("Failed to initialize coder agent", "error", err)
+		if err := clientWs.InitBrainAgent(cmd.Context()); err != nil {
+			slog.Error("Failed to initialize brain agent", "error", err)
 		}
 	}
 

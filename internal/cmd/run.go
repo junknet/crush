@@ -18,7 +18,6 @@ import (
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/workspace"
 	"github.com/charmbracelet/x/ansi"
@@ -61,12 +60,12 @@ crush run --continue "Follow up on your last response"
   `,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var (
-			quiet, _      = cmd.Flags().GetBool("quiet")
-			verbose, _    = cmd.Flags().GetBool("verbose")
-			largeModel, _ = cmd.Flags().GetString("model")
-			smallModel, _ = cmd.Flags().GetString("small-model")
-			sessionID, _  = cmd.Flags().GetString("session")
-			useLast, _    = cmd.Flags().GetBool("continue")
+			quiet, _        = cmd.Flags().GetBool("quiet")
+			verbose, _      = cmd.Flags().GetBool("verbose")
+			brainModel, _   = cmd.Flags().GetString("model")
+			exploreModel, _ = cmd.Flags().GetString("explore-model")
+			sessionID, _    = cmd.Flags().GetString("session")
+			useLast, _      = cmd.Flags().GetBool("continue")
 		)
 
 		// Cancel on SIGINT or SIGTERM.
@@ -119,7 +118,7 @@ crush run --continue "Follow up on your last response"
 				slog.SetDefault(slog.New(log.New(os.Stderr)))
 			}
 
-			return runNonInteractive(ctx, c, ws, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast)
+			return runNonInteractive(ctx, c, ws, prompt, brainModel, exploreModel, quiet || verbose, sessionID, useLast)
 		}
 
 		ws, cleanup, err := setupLocalWorkspace(cmd)
@@ -139,7 +138,7 @@ crush run --continue "Follow up on your last response"
 		}
 
 		appWs := ws.(*workspace.AppWorkspace)
-		return appWs.App().RunNonInteractive(ctx, os.Stdout, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast)
+		return appWs.App().RunNonInteractive(ctx, os.Stdout, prompt, brainModel, exploreModel, quiet || verbose, sessionID, useLast)
 	},
 }
 
@@ -147,9 +146,9 @@ func init() {
 	runCmd.Flags().BoolP("quiet", "q", false, "Hide spinner")
 	runCmd.Flags().BoolP("verbose", "v", false, "Show logs")
 	runCmd.Flags().StringP("model", "m", "", "Model to use. Accepts 'model' or 'provider/model' to disambiguate models with the same name across providers")
-	runCmd.Flags().String("small-model", "", "Small model to use. If not provided, uses the default small model for the provider")
+	runCmd.Flags().String("explore-model", "", "Explore model to use. If not provided, uses the default explore model for the provider")
 	runCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
-	runCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
+	runCmd.Flags().BoolP("continue", "c", false, "Continue the most recent session")
 	runCmd.MarkFlagsMutuallyExclusive("session", "continue")
 }
 
@@ -159,7 +158,7 @@ func runNonInteractive(
 	ctx context.Context,
 	c *client.Client,
 	ws *proto.Workspace,
-	prompt, largeModel, smallModel string,
+	prompt, brainModel, exploreModel string,
 	hideSpinner bool,
 	continueSessionID string,
 	useLast bool,
@@ -169,8 +168,8 @@ func runNonInteractive(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	if largeModel != "" || smallModel != "" {
-		if err := overrideModels(ctx, c, ws, largeModel, smallModel); err != nil {
+	if brainModel != "" || exploreModel != "" {
+		if err := overrideModels(ctx, c, ws, brainModel, exploreModel); err != nil {
 			return fmt.Errorf("failed to override models: %w", err)
 		}
 	}
@@ -189,7 +188,7 @@ func runNonInteractive(
 	progress = ws.Config.Options.Progress == nil || *ws.Config.Options.Progress
 
 	if !hideSpinner && stderrTTY {
-		t := styles.ThemeForProvider(ws.Config.Models[config.SelectedModelTypeLarge].Provider)
+		t := styles.ThemeForProvider(ws.Config.Models[config.SelectedModelTypeBrain].Provider)
 
 		hasDarkBG := true
 		if stdinTTY && stdoutTTY {
@@ -197,7 +196,7 @@ func runNonInteractive(
 		}
 		defaultFG := lipgloss.LightDark(hasDarkBG)(charmtone.Pepper, t.WorkingLabelColor)
 
-		spinner = format.NewSpinner(ctx, cancel, anim.Settings{
+		spinner = format.NewSpinner(ctx, cancel, format.Settings{
 			Size:        10,
 			Label:       "Generating",
 			LabelColor:  defaultFG,
@@ -342,7 +341,7 @@ func overrideModels(
 	ctx context.Context,
 	c *client.Client,
 	ws *proto.Workspace,
-	largeModel, smallModel string,
+	brainModel, exploreModel string,
 ) error {
 	cfg, err := c.GetConfig(ctx, ws.ID)
 	if err != nil {
@@ -351,46 +350,46 @@ func overrideModels(
 
 	providers := cfg.Providers.Copy()
 
-	largeMatches, smallMatches := findModelMatches(providers, largeModel, smallModel)
+	brainMatches, exploreMatches := findModelMatches(providers, brainModel, exploreModel)
 
-	var largeProviderID string
+	var brainProviderID string
 
-	if largeModel != "" {
-		found, err := validateModelMatches(largeMatches, largeModel, "large")
+	if brainModel != "" {
+		found, err := validateModelMatches(brainMatches, brainModel, "brain")
 		if err != nil {
 			return err
 		}
-		largeProviderID = found.provider
-		slog.Info("Overriding large model", "provider", found.provider, "model", found.modelID)
-		if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeLarge, config.SelectedModel{
+		brainProviderID = found.provider
+		slog.Info("Overriding brain model", "provider", found.provider, "model", found.modelID)
+		if err := c.UpdatePreferredModel(ctx, ws.ID, config.SelectedModelTypeBrain, config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
 		}); err != nil {
-			return fmt.Errorf("failed to set large model: %w", err)
+			return fmt.Errorf("failed to set brain model: %w", err)
 		}
 	}
 
 	switch {
-	case smallModel != "":
-		found, err := validateModelMatches(smallMatches, smallModel, "small")
+	case exploreModel != "":
+		found, err := validateModelMatches(exploreMatches, exploreModel, "explore")
 		if err != nil {
 			return err
 		}
-		slog.Info("Overriding small model", "provider", found.provider, "model", found.modelID)
-		if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, config.SelectedModel{
+		slog.Info("Overriding explore model", "provider", found.provider, "model", found.modelID)
+		if err := c.UpdatePreferredModel(ctx, ws.ID, config.SelectedModelTypeExplore, config.SelectedModel{
 			Provider: found.provider,
 			Model:    found.modelID,
 		}); err != nil {
-			return fmt.Errorf("failed to set small model: %w", err)
+			return fmt.Errorf("failed to set explore model: %w", err)
 		}
 
-	case largeModel != "":
-		sm, err := c.GetDefaultSmallModel(ctx, ws.ID, largeProviderID)
+	case brainModel != "":
+		explore, err := c.GetDefaultExploreModel(ctx, ws.ID, brainProviderID)
 		if err != nil {
-			slog.Warn("Failed to get default small model", "error", err)
-		} else if sm != nil {
-			if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, *sm); err != nil {
-				return fmt.Errorf("failed to set small model: %w", err)
+			slog.Warn("Failed to get default explore model", "error", err)
+		} else if explore != nil {
+			if err := c.UpdatePreferredModel(ctx, ws.ID, config.SelectedModelTypeExplore, *explore); err != nil {
+				return fmt.Errorf("failed to set explore model: %w", err)
 			}
 		}
 	}
@@ -403,27 +402,27 @@ type modelMatch struct {
 	modelID  string
 }
 
-// findModelMatches searches providers for matching large/small model
+// findModelMatches searches providers for matching brain/explore model
 // strings.
-func findModelMatches(providers map[string]config.ProviderConfig, largeModel, smallModel string) ([]modelMatch, []modelMatch) {
-	largeFilter, largeID := parseModelString(largeModel)
-	smallFilter, smallID := parseModelString(smallModel)
+func findModelMatches(providers map[string]config.ProviderConfig, brainModel, exploreModel string) ([]modelMatch, []modelMatch) {
+	brainFilter, brainID := parseModelString(brainModel)
+	exploreFilter, exploreID := parseModelString(exploreModel)
 
-	var largeMatches, smallMatches []modelMatch
+	var brainMatches, exploreMatches []modelMatch
 	for name, provider := range providers {
 		if provider.Disable {
 			continue
 		}
 		for _, m := range provider.Models {
-			if matchesModel(largeID, largeFilter, m.ID, name) {
-				largeMatches = append(largeMatches, modelMatch{provider: name, modelID: m.ID})
+			if matchesModel(brainID, brainFilter, m.ID, name) {
+				brainMatches = append(brainMatches, modelMatch{provider: name, modelID: m.ID})
 			}
-			if matchesModel(smallID, smallFilter, m.ID, name) {
-				smallMatches = append(smallMatches, modelMatch{provider: name, modelID: m.ID})
+			if matchesModel(exploreID, exploreFilter, m.ID, name) {
+				exploreMatches = append(exploreMatches, modelMatch{provider: name, modelID: m.ID})
 			}
 		}
 	}
-	return largeMatches, smallMatches
+	return brainMatches, exploreMatches
 }
 
 // parseModelString splits "provider/model" into (provider, model) or

@@ -185,12 +185,16 @@ func DefaultKeyMap() KeyMap {
 		key.WithHelp("←/→", "switch section"),
 	)
 
+	// Chat-focus navigation: only proper navigation keys, no vim letters
+	// or space. Letters trigger focus-recovery (see ui.go handleKeyPressMsg)
+	// which snaps focus back to the editor — so any letter binding here
+	// would shadow that.
 	km.Chat.Down = key.NewBinding(
-		key.WithKeys("down", "ctrl+j", "j"),
+		key.WithKeys("down"),
 		key.WithHelp("↓", "down"),
 	)
 	km.Chat.Up = key.NewBinding(
-		key.WithKeys("up", "ctrl+k", "k"),
+		key.WithKeys("up"),
 		key.WithHelp("↑", "up"),
 	)
 	km.Chat.UpDown = key.NewBinding(
@@ -198,53 +202,41 @@ func DefaultKeyMap() KeyMap {
 		key.WithHelp("↑↓", "scroll"),
 	)
 	km.Chat.UpOneItem = key.NewBinding(
-		key.WithKeys("shift+up", "K"),
+		key.WithKeys("shift+up"),
 		key.WithHelp("shift+↑", "up one item"),
 	)
 	km.Chat.DownOneItem = key.NewBinding(
-		key.WithKeys("shift+down", "J"),
+		key.WithKeys("shift+down"),
 		key.WithHelp("shift+↓", "down one item"),
 	)
 	km.Chat.UpDownOneItem = key.NewBinding(
 		key.WithKeys("shift+up", "shift+down"),
 		key.WithHelp("shift+↑↓", "scroll one item"),
 	)
-	km.Chat.HalfPageDown = key.NewBinding(
-		key.WithKeys("d"),
-		key.WithHelp("d", "half page down"),
-	)
+	km.Chat.HalfPageDown = key.NewBinding() // disabled: was "d"
 	km.Chat.PageDown = key.NewBinding(
-		key.WithKeys("pgdown", " ", "f"),
-		key.WithHelp("f/pgdn", "page down"),
+		key.WithKeys("pgdown"),
+		key.WithHelp("pgdn", "page down"),
 	)
 	km.Chat.PageUp = key.NewBinding(
-		key.WithKeys("pgup", "b"),
-		key.WithHelp("b/pgup", "page up"),
+		key.WithKeys("pgup"),
+		key.WithHelp("pgup", "page up"),
 	)
-	km.Chat.HalfPageUp = key.NewBinding(
-		key.WithKeys("u"),
-		key.WithHelp("u", "half page up"),
-	)
+	km.Chat.HalfPageUp = key.NewBinding() // disabled: was "u"
 	km.Chat.Home = key.NewBinding(
-		key.WithKeys("g", "home"),
-		key.WithHelp("g", "home"),
+		key.WithKeys("home"),
+		key.WithHelp("home", "home"),
 	)
 	km.Chat.End = key.NewBinding(
-		key.WithKeys("G", "end"),
-		key.WithHelp("G", "end"),
+		key.WithKeys("end"),
+		key.WithHelp("end", "end"),
 	)
-	km.Chat.Copy = key.NewBinding(
-		key.WithKeys("c", "y", "C", "Y"),
-		key.WithHelp("c/y", "copy"),
-	)
+	km.Chat.Copy = key.NewBinding() // disabled: was c/y/C/Y — use terminal selection
 	km.Chat.ClearHighlight = key.NewBinding(
 		key.WithKeys("esc", "alt+esc"),
 		key.WithHelp("esc", "clear selection"),
 	)
-	km.Chat.Expand = key.NewBinding(
-		key.WithKeys("space"),
-		key.WithHelp("space", "expand/collapse"),
-	)
+	km.Chat.Expand = key.NewBinding() // disabled: was "space"
 	km.Initialize.Yes = key.NewBinding(
 		key.WithKeys("y", "Y"),
 		key.WithHelp("y", "yes"),

@@ -6,7 +6,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/list"
@@ -294,7 +293,7 @@ func (m *Chat) UpdateNestedToolIDs(containerID string) {
 // Animate animates items in the chat list. Only propagates animation messages
 // to visible items to save CPU. When items are not visible, their animation ID
 // is tracked so it can be restarted when they become visible again.
-func (m *Chat) Animate(msg anim.StepMsg) tea.Cmd {
+func (m *Chat) Animate(msg chat.StepMsg) tea.Cmd {
 	idx, ok := m.idInxMap[msg.ID]
 	if !ok {
 		return nil

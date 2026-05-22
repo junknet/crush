@@ -10,7 +10,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/crush/internal/client"
-	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
@@ -135,8 +134,8 @@ func loginHyper(c *client.Client, wsID string, force bool) error {
 	}
 
 	if err := cmp.Or(
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.api_key", token.AccessToken),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.oauth", token),
+		c.SetConfigField(ctx, wsID, "providers.hyper.api_key", token.AccessToken),
+		c.SetConfigField(ctx, wsID, "providers.hyper.oauth", token),
 	); err != nil {
 		return err
 	}
@@ -206,8 +205,8 @@ func loginCopilot(c *client.Client, wsID string, force bool) error {
 	}
 
 	if err := cmp.Or(
-		c.SetConfigField(loginCtx, wsID, config.ScopeGlobal, "providers.copilot.api_key", token.AccessToken),
-		c.SetConfigField(loginCtx, wsID, config.ScopeGlobal, "providers.copilot.oauth", token),
+		c.SetConfigField(loginCtx, wsID, "providers.copilot.api_key", token.AccessToken),
+		c.SetConfigField(loginCtx, wsID, "providers.copilot.oauth", token),
 	); err != nil {
 		return err
 	}

@@ -104,7 +104,7 @@ func TestModelItem_MutatorsBumpVersion(t *testing.T) {
 	sty := styles.CharmtonePantera()
 	prov := catwalk.Provider{ID: "openai", Name: "OpenAI"}
 	model := catwalk.Model{ID: "gpt-4", Name: "GPT-4"}
-	item := NewModelItem(&sty, prov, model, ModelTypeLarge)
+	item := NewModelItem(&sty, prov, model, ModelTypeBrain)
 
 	requireBump(t, "SetFocused[true]", item, func() {
 		item.SetFocused(true)

@@ -78,15 +78,19 @@ func writeConfigFile(path string, data []byte) error {
 	}
 }
 
-func isLLMConfigKey(key string) bool {
+// isStateKey reports whether a config key is runtime *state* the app writes on
+// its own — current model selection, recent models, and oauth/api tokens it
+// refreshes. These persist to state.yaml so they never collide with the
+// hand-authored declarative config in crush.yaml (providers, agents, mcp,
+// options). Everything else is declarative and lives in crush.yaml.
+func isStateKey(key string) bool {
 	switch {
-	case strings.HasPrefix(key, "providers."):
-		return true
 	case strings.HasPrefix(key, "models."):
 		return true
-	case strings.HasPrefix(key, "agents."):
+	case strings.HasPrefix(key, "recent_models."):
 		return true
-	case key == "default_agent":
+	case strings.HasPrefix(key, "providers.") &&
+		(strings.HasSuffix(key, ".oauth") || strings.HasSuffix(key, ".api_key")):
 		return true
 	default:
 		return false
@@ -103,12 +107,13 @@ func configCandidates(basePath string) []string {
 	}
 }
 
-func llmConfigCandidates(basePath string) []string {
+// stateConfigCandidates returns the runtime-state file candidates that sit
+// next to the declarative config: always state.{yaml,yml} in the same dir.
+func stateConfigCandidates(basePath string) []string {
 	dir := filepath.Dir(basePath)
-	stem := strings.TrimSuffix(filepath.Base(basePath), filepath.Ext(basePath))
 	return []string{
-		filepath.Join(dir, stem+".llm.yaml"),
-		filepath.Join(dir, stem+".llm.yml"),
+		filepath.Join(dir, "state.yaml"),
+		filepath.Join(dir, "state.yml"),
 	}
 }
 

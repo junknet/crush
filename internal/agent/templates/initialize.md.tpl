@@ -1,4 +1,4 @@
-Analyze this codebase and create/update **{{.Config.Options.InitializeAs}}** to help future agents work effectively in this repository.
+Analyze this codebase as the brain agent and create/update **{{.Config.Options.InitializeAs}}** to help future agents work effectively in this repository.
 
 **First**: Check if directory is empty or contains only config files. If so, stop and say "Directory appears empty or only contains config. Add source code first, then run this command to generate {{.Config.Options.InitializeAs}}."
 
@@ -6,12 +6,12 @@ Analyze this codebase and create/update **{{.Config.Options.InitializeAs}}** to 
 
 **Discovery process**:
 
-1. Check directory contents with `ls`
-2. Look for existing rule files (`.cursor/rules/*.md`, `.cursorrules`, `.github/copilot-instructions.md`, `CLAUDE.md`) - only read if they exist
-3. Identify project type from config files and directory structure
-4. Find build/test/lint commands from config files, scripts, Makefiles, or CI configs
-5. Read representative source files to understand code patterns, architecture, control/data flow
-6. If {{.Config.Options.InitializeAs}} exists, read and improve it
+1. Read the repository root, then the local rule files and facade entrypoints that define the project shape.
+2. Use the `agent` tool only when breadth justifies it; choose `role=explore` for read-only survey work and `role=worker` for mutations. Do not hardcode `agent` as the first step.
+3. Identify project type from config files and directory structure.
+4. Find build/test/lint commands from config files, scripts, Makefiles, or CI configs.
+5. Read representative source files to understand code patterns, architecture, control/data flow.
+6. If {{.Config.Options.InitializeAs}} exists, read and improve it.
 
 **Content to include**:
 

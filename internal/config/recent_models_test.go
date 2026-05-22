@@ -10,32 +10,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// readConfigJSON reads and unmarshals the JSON config file at path.
+// readConfigJSON reads the config file at path and unmarshals it (YAML or
+// JSON, normalized via readConfigFile) into a map.
 func readConfigJSON(t *testing.T, path string) map[string]any {
 	t.Helper()
-	baseDir := filepath.Dir(path)
-	fileName := filepath.Base(path)
-	b, err := fs.ReadFile(os.DirFS(baseDir), fileName)
+	b, err := readConfigFile(path)
 	require.NoError(t, err)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(b, &out))
 	return out
 }
 
-// readRecentModels reads the recent_models section from the config file.
-func readRecentModels(t *testing.T, path string) map[string]any {
+// readRecentModels reads the recent_models section from the state file.
+func readRecentModels(t *testing.T, store *ConfigStore) map[string]any {
 	t.Helper()
-	out := readConfigJSON(t, path)
+	out := readConfigJSON(t, store.statePath())
 	rm, ok := out["recent_models"].(map[string]any)
 	require.True(t, ok)
 	return rm
 }
 
-// testStoreWithPath creates a ConfigStore backed by a Config for recent model tests.
+// testStoreWithPath creates a ConfigStore backed by a Config for recent model
+// tests. Recent models are runtime state, so they persist to state.yaml next
+// to the declarative crush.json base.
 func testStoreWithPath(cfg *Config, dir string) *ConfigStore {
 	return &ConfigStore{
-		config:         cfg,
-		globalDataPath: filepath.Join(dir, "config.json"),
+		config:     cfg,
+		configBase: filepath.Join(dir, "crush.json"),
 	}
 }
 
@@ -47,20 +48,20 @@ func TestRecordRecentModel_AddsAndPersists(t *testing.T) {
 	cfg.setDefaults(dir, "")
 	store := testStoreWithPath(cfg, dir)
 
-	err := store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, SelectedModel{Provider: "openai", Model: "gpt-4o"})
+	err := store.recordRecentModel(SelectedModelTypeBrain, SelectedModel{Provider: "openai", Model: "gpt-4o"})
 	require.NoError(t, err)
 
 	// in-memory state
-	require.Len(t, cfg.RecentModels[SelectedModelTypeLarge], 1)
-	require.Equal(t, "openai", cfg.RecentModels[SelectedModelTypeLarge][0].Provider)
-	require.Equal(t, "gpt-4o", cfg.RecentModels[SelectedModelTypeLarge][0].Model)
+	require.Len(t, cfg.RecentModels[SelectedModelTypeBrain], 1)
+	require.Equal(t, "openai", cfg.RecentModels[SelectedModelTypeBrain][0].Provider)
+	require.Equal(t, "gpt-4o", cfg.RecentModels[SelectedModelTypeBrain][0].Model)
 
 	// persisted state
-	rm := readRecentModels(t, store.globalDataPath)
-	large, ok := rm[string(SelectedModelTypeLarge)].([]any)
+	rm := readRecentModels(t, store)
+	brain, ok := rm[string(SelectedModelTypeBrain)].([]any)
 	require.True(t, ok)
-	require.Len(t, large, 1)
-	item, ok := large[0].(map[string]any)
+	require.Len(t, brain, 1)
+	item, ok := brain[0].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "openai", item["provider"])
 	require.Equal(t, "gpt-4o", item["model"])
@@ -75,12 +76,12 @@ func TestRecordRecentModel_DedupeAndMoveToFront(t *testing.T) {
 	store := testStoreWithPath(cfg, dir)
 
 	// Add two entries
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, SelectedModel{Provider: "openai", Model: "gpt-4o"}))
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, SelectedModel{Provider: "anthropic", Model: "claude"}))
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, SelectedModel{Provider: "openai", Model: "gpt-4o"}))
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, SelectedModel{Provider: "anthropic", Model: "claude"}))
 	// Re-add first; should move to front and not duplicate
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, SelectedModel{Provider: "openai", Model: "gpt-4o"}))
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, SelectedModel{Provider: "openai", Model: "gpt-4o"}))
 
-	got := cfg.RecentModels[SelectedModelTypeLarge]
+	got := cfg.RecentModels[SelectedModelTypeBrain]
 	require.Len(t, got, 2)
 	require.Equal(t, SelectedModel{Provider: "openai", Model: "gpt-4o"}, got[0])
 	require.Equal(t, SelectedModel{Provider: "anthropic", Model: "claude"}, got[1])
@@ -104,11 +105,11 @@ func TestRecordRecentModel_TrimsToMax(t *testing.T) {
 		{Provider: "p6", Model: "m6"},
 	}
 	for _, e := range entries {
-		require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, e))
+		require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, e))
 	}
 
 	// in-memory state
-	got := cfg.RecentModels[SelectedModelTypeLarge]
+	got := cfg.RecentModels[SelectedModelTypeBrain]
 	require.Len(t, got, 5)
 	// Newest first, capped at 5: p6..p2
 	require.Equal(t, SelectedModel{Provider: "p6", Model: "m6"}, got[0])
@@ -118,13 +119,13 @@ func TestRecordRecentModel_TrimsToMax(t *testing.T) {
 	require.Equal(t, SelectedModel{Provider: "p2", Model: "m2"}, got[4])
 
 	// persisted state: verify trimmed to 5 and newest-first order
-	rm := readRecentModels(t, store.globalDataPath)
-	large, ok := rm[string(SelectedModelTypeLarge)].([]any)
+	rm := readRecentModels(t, store)
+	brain, ok := rm[string(SelectedModelTypeBrain)].([]any)
 	require.True(t, ok)
-	require.Len(t, large, 5)
+	require.Len(t, brain, 5)
 	// Build provider:model IDs and verify order
 	var ids []string
-	for _, v := range large {
+	for _, v := range brain {
 		m := v.(map[string]any)
 		ids = append(ids, m["provider"].(string)+":"+m["model"].(string))
 	}
@@ -140,18 +141,18 @@ func TestRecordRecentModel_SkipsEmptyValues(t *testing.T) {
 	store := testStoreWithPath(cfg, dir)
 
 	// Missing provider
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, SelectedModel{Provider: "", Model: "m"}))
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, SelectedModel{Provider: "", Model: "m"}))
 	// Missing model
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, SelectedModel{Provider: "p", Model: ""}))
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, SelectedModel{Provider: "p", Model: ""}))
 
-	_, ok := cfg.RecentModels[SelectedModelTypeLarge]
+	_, ok := cfg.RecentModels[SelectedModelTypeBrain]
 	// Map may be initialized, but should have no entries
 	if ok {
-		require.Len(t, cfg.RecentModels[SelectedModelTypeLarge], 0)
+		require.Len(t, cfg.RecentModels[SelectedModelTypeBrain], 0)
 	}
 	// No file should be written (stat via fs.FS)
-	baseDir := filepath.Dir(store.globalDataPath)
-	fileName := filepath.Base(store.globalDataPath)
+	baseDir := filepath.Dir(store.statePath())
+	fileName := filepath.Base(store.statePath())
 	_, err := fs.Stat(os.DirFS(baseDir), fileName)
 	require.True(t, os.IsNotExist(err))
 }
@@ -165,10 +166,10 @@ func TestRecordRecentModel_NoPersistOnNoop(t *testing.T) {
 	store := testStoreWithPath(cfg, dir)
 
 	entry := SelectedModel{Provider: "openai", Model: "gpt-4o"}
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, entry))
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, entry))
 
-	baseDir := filepath.Dir(store.globalDataPath)
-	fileName := filepath.Base(store.globalDataPath)
+	baseDir := filepath.Dir(store.statePath())
+	fileName := filepath.Base(store.statePath())
 	before, err := fs.ReadFile(os.DirFS(baseDir), fileName)
 	require.NoError(t, err)
 
@@ -178,7 +179,7 @@ func TestRecordRecentModel_NoPersistOnNoop(t *testing.T) {
 	beforeMod := stBefore.ModTime()
 
 	// Re-record same entry should be a no-op (no write)
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, entry))
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, entry))
 
 	after, err := fs.ReadFile(os.DirFS(baseDir), fileName)
 	require.NoError(t, err)
@@ -199,17 +200,17 @@ func TestUpdatePreferredModel_UpdatesRecents(t *testing.T) {
 	store := testStoreWithPath(cfg, dir)
 
 	sel := SelectedModel{Provider: "openai", Model: "gpt-4o"}
-	require.NoError(t, store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeSmall, sel))
+	require.NoError(t, store.UpdatePreferredModel(SelectedModelTypeExplore, sel))
 
 	// in-memory
-	require.Equal(t, sel, cfg.Models[SelectedModelTypeSmall])
-	require.Len(t, cfg.RecentModels[SelectedModelTypeSmall], 1)
+	require.Equal(t, sel, cfg.Models[SelectedModelTypeExplore])
+	require.Len(t, cfg.RecentModels[SelectedModelTypeExplore], 1)
 
 	// persisted (read via fs.FS)
-	rm := readRecentModels(t, store.globalDataPath)
-	small, ok := rm[string(SelectedModelTypeSmall)].([]any)
+	rm := readRecentModels(t, store)
+	explore, ok := rm[string(SelectedModelTypeExplore)].([]any)
 	require.True(t, ok)
-	require.Len(t, small, 1)
+	require.Len(t, explore, 1)
 }
 
 func TestRecordRecentModel_TypeIsolation(t *testing.T) {
@@ -220,42 +221,42 @@ func TestRecordRecentModel_TypeIsolation(t *testing.T) {
 	cfg.setDefaults(dir, "")
 	store := testStoreWithPath(cfg, dir)
 
-	// Add models to both large and small types
-	largeModel := SelectedModel{Provider: "openai", Model: "gpt-4o"}
-	smallModel := SelectedModel{Provider: "anthropic", Model: "claude"}
+	// Add models to both brain and explore types.
+	brainModel := SelectedModel{Provider: "openai", Model: "gpt-4o"}
+	exploreModel := SelectedModel{Provider: "anthropic", Model: "claude"}
 
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, largeModel))
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeSmall, smallModel))
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, brainModel))
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeExplore, exploreModel))
 
 	// in-memory: verify types maintain separate histories
-	require.Len(t, cfg.RecentModels[SelectedModelTypeLarge], 1)
-	require.Len(t, cfg.RecentModels[SelectedModelTypeSmall], 1)
-	require.Equal(t, largeModel, cfg.RecentModels[SelectedModelTypeLarge][0])
-	require.Equal(t, smallModel, cfg.RecentModels[SelectedModelTypeSmall][0])
+	require.Len(t, cfg.RecentModels[SelectedModelTypeBrain], 1)
+	require.Len(t, cfg.RecentModels[SelectedModelTypeExplore], 1)
+	require.Equal(t, brainModel, cfg.RecentModels[SelectedModelTypeBrain][0])
+	require.Equal(t, exploreModel, cfg.RecentModels[SelectedModelTypeExplore][0])
 
-	// Add another to large, verify small unchanged
-	anotherLarge := SelectedModel{Provider: "google", Model: "gemini"}
-	require.NoError(t, store.recordRecentModel(ScopeGlobal, SelectedModelTypeLarge, anotherLarge))
+	// Add another brain model and verify explore is unchanged.
+	anotherBrain := SelectedModel{Provider: "google", Model: "gemini"}
+	require.NoError(t, store.recordRecentModel(SelectedModelTypeBrain, anotherBrain))
 
-	require.Len(t, cfg.RecentModels[SelectedModelTypeLarge], 2)
-	require.Len(t, cfg.RecentModels[SelectedModelTypeSmall], 1)
-	require.Equal(t, smallModel, cfg.RecentModels[SelectedModelTypeSmall][0])
+	require.Len(t, cfg.RecentModels[SelectedModelTypeBrain], 2)
+	require.Len(t, cfg.RecentModels[SelectedModelTypeExplore], 1)
+	require.Equal(t, exploreModel, cfg.RecentModels[SelectedModelTypeExplore][0])
 
 	// persisted state: verify both types exist with correct lengths and contents
-	rm := readRecentModels(t, store.globalDataPath)
+	rm := readRecentModels(t, store)
 
-	large, ok := rm[string(SelectedModelTypeLarge)].([]any)
+	brain, ok := rm[string(SelectedModelTypeBrain)].([]any)
 	require.True(t, ok)
-	require.Len(t, large, 2)
-	// Verify newest first for large type
-	require.Equal(t, "google", large[0].(map[string]any)["provider"])
-	require.Equal(t, "gemini", large[0].(map[string]any)["model"])
-	require.Equal(t, "openai", large[1].(map[string]any)["provider"])
-	require.Equal(t, "gpt-4o", large[1].(map[string]any)["model"])
+	require.Len(t, brain, 2)
+	// Verify newest first for brain type
+	require.Equal(t, "google", brain[0].(map[string]any)["provider"])
+	require.Equal(t, "gemini", brain[0].(map[string]any)["model"])
+	require.Equal(t, "openai", brain[1].(map[string]any)["provider"])
+	require.Equal(t, "gpt-4o", brain[1].(map[string]any)["model"])
 
-	small, ok := rm[string(SelectedModelTypeSmall)].([]any)
+	explore, ok := rm[string(SelectedModelTypeExplore)].([]any)
 	require.True(t, ok)
-	require.Len(t, small, 1)
-	require.Equal(t, "anthropic", small[0].(map[string]any)["provider"])
-	require.Equal(t, "claude", small[0].(map[string]any)["model"])
+	require.Len(t, explore, 1)
+	require.Equal(t, "anthropic", explore[0].(map[string]any)["provider"])
+	require.Equal(t, "claude", explore[0].(map[string]any)["model"])
 }

@@ -163,12 +163,12 @@ func (w *AppWorkspace) UpdateAgentModel(ctx context.Context) error {
 	return w.app.UpdateAgentModel(ctx)
 }
 
-func (w *AppWorkspace) InitCoderAgent(ctx context.Context) error {
-	return w.app.InitCoderAgent(ctx)
+func (w *AppWorkspace) InitBrainAgent(ctx context.Context) error {
+	return w.app.InitBrainAgent(ctx)
 }
 
-func (w *AppWorkspace) GetDefaultSmallModel(providerID string) config.SelectedModel {
-	return w.app.GetDefaultSmallModel(providerID)
+func (w *AppWorkspace) GetDefaultExploreModel(providerID string) config.SelectedModel {
+	return w.app.GetDefaultExploreModel(providerID)
 }
 
 // -- Permissions --
@@ -254,32 +254,32 @@ func (w *AppWorkspace) Resolver() config.VariableResolver {
 
 // -- Config mutations --
 
-func (w *AppWorkspace) UpdatePreferredModel(scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel) error {
-	return w.store.UpdatePreferredModel(scope, modelType, model)
+func (w *AppWorkspace) UpdatePreferredModel(modelType config.SelectedModelType, model config.SelectedModel) error {
+	return w.store.UpdatePreferredModel(modelType, model)
 }
 
-func (w *AppWorkspace) SetCompactMode(scope config.Scope, enabled bool) error {
-	return w.store.SetCompactMode(scope, enabled)
+func (w *AppWorkspace) SetCompactMode(enabled bool) error {
+	return w.store.SetCompactMode(enabled)
 }
 
-func (w *AppWorkspace) SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error {
-	return w.store.SetProviderAPIKey(scope, providerID, apiKey)
+func (w *AppWorkspace) SetProviderAPIKey(providerID string, apiKey any) error {
+	return w.store.SetProviderAPIKey(providerID, apiKey)
 }
 
-func (w *AppWorkspace) SetConfigField(scope config.Scope, key string, value any) error {
-	return w.store.SetConfigField(scope, key, value)
+func (w *AppWorkspace) SetConfigField(key string, value any) error {
+	return w.store.SetConfigField(key, value)
 }
 
-func (w *AppWorkspace) RemoveConfigField(scope config.Scope, key string) error {
-	return w.store.RemoveConfigField(scope, key)
+func (w *AppWorkspace) RemoveConfigField(key string) error {
+	return w.store.RemoveConfigField(key)
 }
 
 func (w *AppWorkspace) ImportCopilot() (*oauth.Token, bool) {
 	return w.store.ImportCopilot()
 }
 
-func (w *AppWorkspace) RefreshOAuthToken(ctx context.Context, scope config.Scope, providerID string) error {
-	return w.store.RefreshOAuthToken(ctx, scope, providerID)
+func (w *AppWorkspace) RefreshOAuthToken(ctx context.Context, providerID string) error {
+	return w.store.RefreshOAuthToken(ctx, providerID)
 }
 
 // -- Project lifecycle --

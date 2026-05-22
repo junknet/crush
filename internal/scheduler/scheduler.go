@@ -119,7 +119,7 @@ func (s *AgentScheduler) SpawnChild(parent *TaskNode, nodeID string, goal string
 		nodeID = fmt.Sprintf("%s-%d", parent.ID, len(parent.Children)+1)
 	}
 	mode := TaskWrite
-	if profile == ProfileToolsAgent {
+	if profile == ProfileExploreAgent {
 		mode = TaskReadOnly
 	}
 	child := &TaskNode{

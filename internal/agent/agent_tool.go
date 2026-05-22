@@ -4,10 +4,13 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
+	"strings"
 
 	"charm.land/fantasy"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/scheduler"
 )
 
@@ -16,6 +19,7 @@ var agentToolDescription string
 
 type AgentParams struct {
 	Prompt string `json:"prompt" description:"The task for the agent to perform"`
+	Role   string `json:"role,omitempty" description:"Agent role to run: explore or worker. Defaults to explore. Use explore for read-only repository inspection and worker for implementation, refactors, fixes, docs, or verification."`
 }
 
 const (
@@ -31,9 +35,14 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 				return fantasy.NewTextErrorResponse("prompt is required"), nil
 			}
 
-			agent := c.agentForProfile(scheduler.ProfileWorkerAgent)
+			profile, role, err := resolveAgentToolRole(params.Role)
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+
+			agent := c.agentForProfile(profile)
 			if agent == nil {
-				return fantasy.ToolResponse{}, errors.New("coder agent not configured")
+				return fantasy.ToolResponse{}, fmt.Errorf("%s agent not configured", role)
 			}
 
 			sessionID := tools.GetSessionFromContext(ctx)
@@ -52,8 +61,29 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 				AgentMessageID: agentMessageID,
 				ToolCallID:     call.ID,
 				Prompt:         params.Prompt,
-				SessionTitle:   "New Agent Session",
+				Profile:        profile,
+				SessionTitle:   agentSessionTitle(role),
 			})
 		},
 	), nil
+}
+
+func resolveAgentToolRole(role string) (scheduler.WorkerProfile, string, error) {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "", config.AgentExplore:
+		return scheduler.ProfileExploreAgent, config.AgentExplore, nil
+	case config.AgentWorker:
+		return scheduler.ProfileWorkerAgent, config.AgentWorker, nil
+	default:
+		return "", "", fmt.Errorf("unknown agent role %q", role)
+	}
+}
+
+func agentSessionTitle(role string) string {
+	switch role {
+	case config.AgentWorker:
+		return "Worker Agent Session"
+	default:
+		return "Explore Agent Session"
+	}
 }

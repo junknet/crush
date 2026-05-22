@@ -74,6 +74,25 @@ const docTemplate = `{
                 }
             }
         },
+        "/debug/state": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "system"
+                ],
+                "summary": "Debug state snapshot",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/server.debugStateResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/health": {
             "get": {
                 "tags": [
@@ -327,7 +346,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/workspaces/{id}/agent/default-small-model": {
+        "/workspaces/{id}/agent/default-explore-model": {
             "get": {
                 "produces": [
                     "application/json"
@@ -335,7 +354,7 @@ const docTemplate = `{
                 "tags": [
                     "agent"
                 ],
-                "summary": "Get default small model",
+                "summary": "Get default explore model",
                 "parameters": [
                     {
                         "type": "string",
@@ -2719,8 +2738,16 @@ const docTemplate = `{
                         "type": "string"
                     }
                 },
+                "call_timeout": {
+                    "description": "CallTimeout bounds a single tool invocation. 0 disables the\ntimeout (the agent's outer ctx is still honoured).",
+                    "type": "integer"
+                },
                 "command": {
                     "type": "string"
+                },
+                "connect_timeout": {
+                    "description": "ConnectTimeout bounds session establishment (Connect) and health\npings. Tool execution latency is governed by CallTimeout instead —\nhistorically these shared one knob and the default either starved\nstartups or killed legitimate long tool calls.",
+                    "type": "integer"
                 },
                 "disabled": {
                     "type": "boolean"
@@ -2749,9 +2776,6 @@ const docTemplate = `{
                     "additionalProperties": {
                         "type": "string"
                     }
-                },
-                "timeout": {
-                    "type": "integer"
                 },
                 "type": {
                     "$ref": "#/definitions/config.MCPType"
@@ -2828,6 +2852,10 @@ const docTemplate = `{
                     "description": "Used by anthropic models that can reason to indicate if the model should think.",
                     "type": "boolean"
                 },
+                "thinking_budget": {
+                    "description": "ThinkingBudget overrides the default Anthropic ` + "`" + `thinking.budget_tokens` + "`" + `\nhard cap. When unset (0) and ` + "`" + `think:true` + "`" + `, crush derives the budget\nfrom ` + "`" + `reasoning_effort` + "`" + ` (minimal=1024 / low=4000 / medium=8000 /\nhigh=16000 / xhigh=32000); falls back to 2000 if effort is also empty.\nSetting a non-zero value here pins the budget regardless of effort —\nuseful when one role needs a deeper or shallower thinking pool than\nthe effort-derived default.",
+                    "type": "integer"
+                },
                 "top_k": {
                     "type": "integer"
                 },
@@ -2839,17 +2867,13 @@ const docTemplate = `{
         "config.SelectedModelType": {
             "type": "string",
             "enum": [
-                "large",
-                "small",
-                "build",
-                "coder",
+                "brain",
+                "worker",
                 "explore"
             ],
             "x-enum-varnames": [
-                "SelectedModelTypeLarge",
-                "SelectedModelTypeSmall",
-                "SelectedModelTypeBuild",
-                "SelectedModelTypeCoder",
+                "SelectedModelTypeBrain",
+                "SelectedModelTypeWorker",
                 "SelectedModelTypeExplore"
             ]
         },
@@ -2947,7 +2971,7 @@ const docTemplate = `{
                     "$ref": "#/definitions/config.MCPs"
                 },
                 "models": {
-                    "description": "Model profiles used by the built-in roles and legacy aliases.",
+                    "description": "Model profiles used by the built-in roles.",
                     "type": "object",
                     "additionalProperties": {
                         "$ref": "#/definitions/config.SelectedModel"
@@ -3050,17 +3074,6 @@ const docTemplate = `{
                     "$ref": "#/definitions/config.TUIOptions"
                 }
             }
-        },
-        "github_com_charmbracelet_crush_internal_config.Scope": {
-            "type": "integer",
-            "enum": [
-                0,
-                1
-            ],
-            "x-enum-varnames": [
-                "ScopeGlobal",
-                "ScopeWorkspace"
-            ]
         },
         "github_com_charmbracelet_crush_internal_proto.Message": {
             "type": "object",
@@ -3225,9 +3238,6 @@ const docTemplate = `{
             "properties": {
                 "enabled": {
                     "type": "boolean"
-                },
-                "scope": {
-                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3239,9 +3249,6 @@ const docTemplate = `{
                 },
                 "model_type": {
                     "$ref": "#/definitions/config.SelectedModelType"
-                },
-                "scope": {
-                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3259,9 +3266,6 @@ const docTemplate = `{
                 },
                 "provider_id": {
                     "type": "string"
-                },
-                "scope": {
-                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3270,9 +3274,6 @@ const docTemplate = `{
             "properties": {
                 "provider_id": {
                     "type": "string"
-                },
-                "scope": {
-                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3281,9 +3282,6 @@ const docTemplate = `{
             "properties": {
                 "key": {
                     "type": "string"
-                },
-                "scope": {
-                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 }
             }
         },
@@ -3292,9 +3290,6 @@ const docTemplate = `{
             "properties": {
                 "key": {
                     "type": "string"
-                },
-                "scope": {
-                    "$ref": "#/definitions/github_com_charmbracelet_crush_internal_config.Scope"
                 },
                 "value": {}
             }
@@ -3652,6 +3647,92 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "version": {
+                    "type": "string"
+                }
+            }
+        },
+        "server.debugLSPState": {
+            "type": "object",
+            "properties": {
+                "connected_at": {
+                    "type": "string"
+                },
+                "diagnostic_count": {
+                    "type": "integer"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "state": {
+                    "type": "string"
+                }
+            }
+        },
+        "server.debugMCPState": {
+            "type": "object",
+            "properties": {
+                "connected_at": {
+                    "type": "string"
+                },
+                "error": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "state": {
+                    "type": "string"
+                }
+            }
+        },
+        "server.debugStateResponse": {
+            "type": "object",
+            "properties": {
+                "lsp": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/server.debugLSPState"
+                    }
+                },
+                "mcp": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/server.debugMCPState"
+                    }
+                },
+                "time": {
+                    "type": "string"
+                },
+                "workspaces": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/server.debugWorkspaceState"
+                    }
+                }
+            }
+        },
+        "server.debugWorkspaceState": {
+            "type": "object",
+            "properties": {
+                "is_busy": {
+                    "type": "boolean"
+                },
+                "is_ready": {
+                    "type": "boolean"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "path": {
+                    "type": "string"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "workspace_id": {
                     "type": "string"
                 }
             }

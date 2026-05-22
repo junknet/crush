@@ -29,7 +29,7 @@ func (c *controllerV1) handlePostWorkspaceConfigSet(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if err := c.backend.SetConfigField(id, req.Scope, req.Key, req.Value); err != nil {
+	if err := c.backend.SetConfigField(id, req.Key, req.Value); err != nil {
 		c.handleError(w, r, err)
 		return
 	}
@@ -58,7 +58,7 @@ func (c *controllerV1) handlePostWorkspaceConfigRemove(w http.ResponseWriter, r 
 		return
 	}
 
-	if err := c.backend.RemoveConfigField(id, req.Scope, req.Key); err != nil {
+	if err := c.backend.RemoveConfigField(id, req.Key); err != nil {
 		c.handleError(w, r, err)
 		return
 	}
@@ -87,7 +87,7 @@ func (c *controllerV1) handlePostWorkspaceConfigModel(w http.ResponseWriter, r *
 		return
 	}
 
-	if err := c.backend.UpdatePreferredModel(id, req.Scope, req.ModelType, req.Model); err != nil {
+	if err := c.backend.UpdatePreferredModel(id, req.ModelType, req.Model); err != nil {
 		c.handleError(w, r, err)
 		return
 	}
@@ -116,7 +116,7 @@ func (c *controllerV1) handlePostWorkspaceConfigCompact(w http.ResponseWriter, r
 		return
 	}
 
-	if err := c.backend.SetCompactMode(id, req.Scope, req.Enabled); err != nil {
+	if err := c.backend.SetCompactMode(id, req.Enabled); err != nil {
 		c.handleError(w, r, err)
 		return
 	}
@@ -152,7 +152,7 @@ func (c *controllerV1) handlePostWorkspaceConfigProviderKey(w http.ResponseWrite
 		return
 	}
 
-	if err := c.backend.SetProviderAPIKey(id, req.Scope, req.ProviderID, apiKey); err != nil {
+	if err := c.backend.SetProviderAPIKey(id, req.ProviderID, apiKey); err != nil {
 		c.handleError(w, r, err)
 		return
 	}
@@ -201,7 +201,7 @@ func (c *controllerV1) handlePostWorkspaceConfigRefreshOAuth(w http.ResponseWrit
 		return
 	}
 
-	if err := c.backend.RefreshOAuthToken(r.Context(), id, req.Scope, req.ProviderID); err != nil {
+	if err := c.backend.RefreshOAuthToken(r.Context(), id, req.ProviderID); err != nil {
 		c.handleError(w, r, err)
 		return
 	}

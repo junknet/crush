@@ -205,7 +205,7 @@ func blockFuncs() []shell.BlockFunc {
 	}
 }
 
-func NewBashTool(permissions permission.Service, workingDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
+func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShellManager, workingDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
@@ -257,10 +257,9 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			// If explicitly requested as background, start immediately with detached context
 			if params.RunInBackground {
 				startTime := time.Now()
-				bgManager := shell.GetBackgroundShellManager()
 				bgManager.Cleanup()
 				// Use background context so it continues after tool returns
-				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, sessionID)
 				if err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error starting background shell: %w", err)
 				}
@@ -306,7 +305,9 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 					return fantasy.WithResponseMetadata(fantasy.NewTextResponse(stdout), metadata), nil
 				}
 
-				// Still running after fast-failure check - return as background job
+				// Still running after fast-failure check - return as background job.
+				// Mark it so its completion later wakes the agent automatically.
+				bgShell.MarkBackgrounded()
 				metadata := BashResponseMetadata{
 					StartTime:        startTime.UnixMilli(),
 					EndTime:          time.Now().UnixMilli(),
@@ -317,7 +318,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 					ShellID:          bgShell.ID,
 					Outcome:          "background_started",
 				}
-				response := fmt.Sprintf("Background shell started with ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
+				response := fmt.Sprintf("Background shell started with ID: %s\n\nIt will keep running; you'll be automatically notified to continue when it finishes. You can also use job_output to check on it or job_kill to terminate.", bgShell.ID)
 				appendBashCommandTrace(ctx, call.ID, params, metadata, response)
 				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 			}
@@ -326,9 +327,8 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			startTime := time.Now()
 
 			// Start with detached context so it can survive if moved to background
-			bgManager := shell.GetBackgroundShellManager()
 			bgManager.Cleanup()
-			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description, sessionID)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error starting shell: %w", err)
 			}
@@ -403,7 +403,9 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(stdout), metadata), nil
 			}
 
-			// Still running - keep as background job
+			// Still running - keep as background job. Mark it so its completion
+			// later wakes the agent automatically.
+			bgShell.MarkBackgrounded()
 			metadata := BashResponseMetadata{
 				StartTime:        startTime.UnixMilli(),
 				EndTime:          time.Now().UnixMilli(),
@@ -414,7 +416,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				ShellID:          bgShell.ID,
 				Outcome:          "background_started",
 			}
-			response := fmt.Sprintf("Command is taking longer than expected and has been moved to background.\n\nBackground shell ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
+			response := fmt.Sprintf("Command is taking longer than expected and has been moved to background.\n\nBackground shell ID: %s\n\nIt will keep running; you'll be automatically notified to continue when it finishes. You can also use job_output to check on it or job_kill to terminate.", bgShell.ID)
 			appendBashCommandTrace(ctx, call.ID, params, metadata, response)
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 		},

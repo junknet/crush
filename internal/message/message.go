@@ -381,8 +381,17 @@ func (s *service) flushOne(ctx context.Context, id string, syncCaller bool) erro
 			s.Publish(pubsub.UpdatedEvent, snap)
 		}
 
-		if wasDirty && syncCaller {
-			continue
+		if wasDirty {
+			if syncCaller {
+				continue
+			}
+			s.mu.Lock()
+			if p, ok := s.pending[id]; ok && p.timer == nil && !p.flushing {
+				p.timer = time.AfterFunc(s.debounce, func() {
+					_ = s.flushOne(context.Background(), id, false)
+				})
+			}
+			s.mu.Unlock()
 		}
 		return nil
 	}

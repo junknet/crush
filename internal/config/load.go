@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/fantasy/providers/anthropicoauth"
+	"charm.land/fantasy/providers/antigravity"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
@@ -43,45 +45,18 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	cfg.setDefaults(workingDir, dataDir)
 
 	store := &ConfigStore{
-		config:         cfg,
-		workingDir:     workingDir,
-		globalDataPath: GlobalConfigData(),
-		workspacePath:  filepath.Join(cfg.Options.DataDirectory, fmt.Sprintf("%s.json", appName)),
-		loadedPaths:    loadedPaths,
+		config:      cfg,
+		workingDir:  workingDir,
+		configBase:  GlobalConfig(),
+		loadedPaths: loadedPaths,
 	}
 
 	if debug {
 		cfg.Options.Debug = true
 	}
 
-	// Load workspace config last so it has highest priority.
-	if workspacePath, err := store.configPath(ScopeWorkspace); err == nil {
-		if wsData, readErr := readConfigFile(workspacePath); readErr == nil && len(wsData) > 0 {
-			merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, wsData))
-			if mergeErr == nil {
-				// Preserve defaults that setDefaults already applied.
-				dataDir := cfg.Options.DataDirectory
-				*cfg = *merged
-				cfg.setDefaults(workingDir, dataDir)
-				store.config = cfg
-				store.loadedPaths = append(store.loadedPaths, workspacePath)
-			}
-		} else if readErr != nil && !os.IsNotExist(readErr) {
-			return nil, fmt.Errorf("failed to read workspace config file %s: %w", workspacePath, readErr)
-		}
-	}
-	if llmPath, err := store.llmConfigPath(ScopeWorkspace); err == nil {
-		if llmData, readErr := readConfigFile(llmPath); readErr == nil && len(llmData) > 0 {
-			merged, mergeErr := loadFromBytes(append([][]byte{mustMarshalConfig(cfg)}, llmData))
-			if mergeErr == nil {
-				dataDir := cfg.Options.DataDirectory
-				*cfg = *merged
-				cfg.setDefaults(workingDir, dataDir)
-				store.config = cfg
-				store.loadedPaths = append(store.loadedPaths, llmPath)
-			}
-		}
-	}
+	// state.yaml is already included in lookupConfigs at the highest precedence,
+	// so the merged cfg above already reflects runtime-state overrides.
 
 	// Validate hooks after all config merging is complete so workspace
 	// hooks also get their matcher regexes compiled.
@@ -275,7 +250,7 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 		case p.ID == catwalk.InferenceProviderAnthropic && config.OAuthToken != nil:
 			// Claude Code subscription is not supported anymore. Remove to show onboarding.
 			if !store.reloadInProgress {
-				store.RemoveConfigField(ScopeGlobal, "providers.anthropic")
+				store.RemoveConfigField("providers.anthropic")
 			}
 			c.Providers.Del(string(p.ID))
 			continue
@@ -366,7 +341,10 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 		providerConfig.Name = cmp.Or(providerConfig.Name, id) // Use ID as name if not set
 		// default to OpenAI if not set
 		providerConfig.Type = cmp.Or(providerConfig.Type, catwalk.TypeOpenAICompat)
-		if !slices.Contains(catwalk.KnownProviderTypes(), providerConfig.Type) && providerConfig.Type != hyper.Name {
+		isAntigravity := providerConfig.Type == antigravity.Name
+		isAnthropicOAuth := providerConfig.Type == anthropicoauth.Name
+		noAuthRequired := isAntigravity || isAnthropicOAuth
+		if !slices.Contains(catwalk.KnownProviderTypes(), providerConfig.Type) && providerConfig.Type != hyper.Name && !noAuthRequired {
 			slog.Warn("Skipping custom provider due to unsupported provider type", "provider", id)
 			c.Providers.Del(id)
 			continue
@@ -377,28 +355,34 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 			c.Providers.Del(id)
 			continue
 		}
-		if providerConfig.APIKey == "" {
-			slog.Warn("Provider is missing API key, this might be OK for local providers", "provider", id)
-		}
-		if providerConfig.BaseURL == "" {
-			slog.Warn("Skipping custom provider due to missing API endpoint", "provider", id)
-			c.Providers.Del(id)
-			continue
+		// Antigravity uses local OAuth credentials (keyring + ~/.gemini/oauth_creds.json),
+		// so it neither needs an API key nor a base URL.
+		if !noAuthRequired {
+			if providerConfig.APIKey == "" {
+				slog.Warn("Provider is missing API key, this might be OK for local providers", "provider", id)
+			}
+			if providerConfig.BaseURL == "" {
+				slog.Warn("Skipping custom provider due to missing API endpoint", "provider", id)
+				c.Providers.Del(id)
+				continue
+			}
 		}
 		if len(providerConfig.Models) == 0 {
 			slog.Warn("Skipping custom provider because the provider has no models", "provider", id)
 			c.Providers.Del(id)
 			continue
 		}
-		apiKey, err := resolver.ResolveValue(providerConfig.APIKey)
-		if apiKey == "" || err != nil {
-			slog.Warn("Provider is missing API key, this might be OK for local providers", "provider", id)
-		}
-		baseURL, err := resolver.ResolveValue(providerConfig.BaseURL)
-		if baseURL == "" || err != nil {
-			slog.Warn("Skipping custom provider due to missing API endpoint", "provider", id, "error", err)
-			c.Providers.Del(id)
-			continue
+		if !noAuthRequired {
+			apiKey, err := resolver.ResolveValue(providerConfig.APIKey)
+			if apiKey == "" || err != nil {
+				slog.Warn("Provider is missing API key, this might be OK for local providers", "provider", id)
+			}
+			baseURL, err := resolver.ResolveValue(providerConfig.BaseURL)
+			if baseURL == "" || err != nil {
+				slog.Warn("Skipping custom provider due to missing API endpoint", "provider", id, "error", err)
+				c.Providers.Del(id)
+				continue
+			}
 		}
 
 		// Custom-provider headers share the MCP error contract; see
@@ -450,20 +434,6 @@ func (c *Config) setDefaults(workingDir, dataDir string) {
 	}
 	if c.RecentModels == nil {
 		c.RecentModels = make(map[SelectedModelType][]SelectedModel)
-	}
-	if build, ok := c.Models[SelectedModelTypeBuild]; ok {
-		if _, ok := c.Models[SelectedModelTypeLarge]; !ok {
-			c.Models[SelectedModelTypeLarge] = build
-		}
-	} else if large, ok := c.Models[SelectedModelTypeLarge]; ok {
-		c.Models[SelectedModelTypeBuild] = large
-	}
-	if explore, ok := c.Models[SelectedModelTypeExplore]; ok {
-		if _, ok := c.Models[SelectedModelTypeSmall]; !ok {
-			c.Models[SelectedModelTypeSmall] = explore
-		}
-	} else if small, ok := c.Models[SelectedModelTypeSmall]; ok {
-		c.Models[SelectedModelTypeExplore] = small
 	}
 	if c.MCP == nil {
 		c.MCP = make(map[string]MCPConfig)
@@ -558,10 +528,10 @@ func (c *Config) applyLSPDefaults() {
 	}
 }
 
-func (c *Config) defaultModelSelection(knownProviders []catwalk.Provider) (largeModel SelectedModel, smallModel SelectedModel, err error) {
+func (c *Config) defaultModelSelection(knownProviders []catwalk.Provider) (brainModel SelectedModel, exploreModel SelectedModel, err error) {
 	if len(knownProviders) == 0 && c.Providers.Len() == 0 {
 		err = fmt.Errorf("no providers configured, please configure at least one provider")
-		return largeModel, smallModel, err
+		return brainModel, exploreModel, err
 	}
 
 	// Use the first provider enabled based on the known providers order
@@ -571,30 +541,30 @@ func (c *Config) defaultModelSelection(knownProviders []catwalk.Provider) (large
 		if !ok || providerConfig.Disable {
 			continue
 		}
-		defaultLargeModel := c.GetModel(string(p.ID), p.DefaultLargeModelID)
-		if defaultLargeModel == nil {
-			err = fmt.Errorf("default large model %s not found for provider %s", p.DefaultLargeModelID, p.ID)
-			return largeModel, smallModel, err
+		defaultBrainModel := c.GetModel(string(p.ID), p.DefaultLargeModelID)
+		if defaultBrainModel == nil {
+			err = fmt.Errorf("default brain model %s not found for provider %s", p.DefaultLargeModelID, p.ID)
+			return brainModel, exploreModel, err
 		}
-		largeModel = SelectedModel{
+		brainModel = SelectedModel{
 			Provider:        string(p.ID),
-			Model:           defaultLargeModel.ID,
-			MaxTokens:       defaultLargeModel.DefaultMaxTokens,
-			ReasoningEffort: defaultLargeModel.DefaultReasoningEffort,
+			Model:           defaultBrainModel.ID,
+			MaxTokens:       defaultBrainModel.DefaultMaxTokens,
+			ReasoningEffort: defaultBrainModel.DefaultReasoningEffort,
 		}
 
-		defaultSmallModel := c.GetModel(string(p.ID), p.DefaultSmallModelID)
-		if defaultSmallModel == nil {
-			err = fmt.Errorf("default small model %s not found for provider %s", p.DefaultSmallModelID, p.ID)
-			return largeModel, smallModel, err
+		defaultExploreModel := c.GetModel(string(p.ID), p.DefaultSmallModelID)
+		if defaultExploreModel == nil {
+			err = fmt.Errorf("default explore model %s not found for provider %s", p.DefaultSmallModelID, p.ID)
+			return brainModel, exploreModel, err
 		}
-		smallModel = SelectedModel{
+		exploreModel = SelectedModel{
 			Provider:        string(p.ID),
-			Model:           defaultSmallModel.ID,
-			MaxTokens:       defaultSmallModel.DefaultMaxTokens,
-			ReasoningEffort: defaultSmallModel.DefaultReasoningEffort,
+			Model:           defaultExploreModel.ID,
+			MaxTokens:       defaultExploreModel.DefaultMaxTokens,
+			ReasoningEffort: defaultExploreModel.DefaultReasoningEffort,
 		}
-		return largeModel, smallModel, err
+		return brainModel, exploreModel, err
 	}
 
 	enabledProviders := c.EnabledProviders()
@@ -604,94 +574,103 @@ func (c *Config) defaultModelSelection(knownProviders []catwalk.Provider) (large
 
 	if len(enabledProviders) == 0 {
 		err = fmt.Errorf("no providers configured, please configure at least one provider")
-		return largeModel, smallModel, err
+		return brainModel, exploreModel, err
 	}
 
 	providerConfig := enabledProviders[0]
 	if len(providerConfig.Models) == 0 {
 		err = fmt.Errorf("provider %s has no models configured", providerConfig.ID)
-		return largeModel, smallModel, err
+		return brainModel, exploreModel, err
 	}
-	defaultLargeModel := c.GetModel(providerConfig.ID, providerConfig.Models[0].ID)
-	largeModel = SelectedModel{
+	defaultBrainModel := c.GetModel(providerConfig.ID, providerConfig.Models[0].ID)
+	brainModel = SelectedModel{
 		Provider:  providerConfig.ID,
-		Model:     defaultLargeModel.ID,
-		MaxTokens: defaultLargeModel.DefaultMaxTokens,
+		Model:     defaultBrainModel.ID,
+		MaxTokens: defaultBrainModel.DefaultMaxTokens,
 	}
-	defaultSmallModel := c.GetModel(providerConfig.ID, providerConfig.Models[0].ID)
-	smallModel = SelectedModel{
+	defaultExploreModel := c.GetModel(providerConfig.ID, providerConfig.Models[0].ID)
+	exploreModel = SelectedModel{
 		Provider:  providerConfig.ID,
-		Model:     defaultSmallModel.ID,
-		MaxTokens: defaultSmallModel.DefaultMaxTokens,
+		Model:     defaultExploreModel.ID,
+		MaxTokens: defaultExploreModel.DefaultMaxTokens,
 	}
-	return largeModel, smallModel, err
+	return brainModel, exploreModel, err
 }
 
 func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provider, persist bool) error {
 	c := store.config
-	defaultLarge, defaultSmall, err := c.defaultModelSelection(knownProviders)
+	if err := c.validateSelectedModelTypes(); err != nil {
+		return err
+	}
+	defaultBrain, defaultExplore, err := c.defaultModelSelection(knownProviders)
 	if err != nil {
 		return fmt.Errorf("failed to select default models: %w", err)
 	}
-	largeModelSelected, largeModelConfigured := c.Models[SelectedModelTypeLarge]
-	smallModelSelected, smallModelConfigured := c.Models[SelectedModelTypeSmall]
-	buildModelSelected, buildModelConfigured := c.Models[SelectedModelTypeBuild]
-	coderModelSelected, coderModelConfigured := c.Models[SelectedModelTypeCoder]
+	brainModelSelected, brainModelConfigured := c.Models[SelectedModelTypeBrain]
+	workerModelSelected, workerModelConfigured := c.Models[SelectedModelTypeWorker]
 	exploreModelSelected, exploreModelConfigured := c.Models[SelectedModelTypeExplore]
 
-	large, largeValid := normalizeSelectedModel(c, largeModelSelected, defaultLarge)
-	small, smallValid := normalizeSelectedModel(c, smallModelSelected, defaultSmall)
+	brain, brainValid := normalizeSelectedModel(c, brainModelSelected, defaultBrain)
+	explore, exploreValid := normalizeSelectedModel(c, exploreModelSelected, defaultExplore)
 
-	// When small isn't explicitly configured and the provider isn't a
-	// known built-in, use the large model as the small model. This
-	// prevents two different models from being requested concurrently
-	// for local/openai-compat providers.
-	if !smallModelConfigured {
+	// When explore isn't explicitly configured and the provider isn't a
+	// known built-in, use the brain model as the explore model. This prevents
+	// two different models from being requested concurrently for
+	// local/openai-compat providers.
+	if !exploreModelConfigured {
 		isKnownProvider := false
 		for _, kp := range knownProviders {
-			if string(kp.ID) == small.Provider {
+			if string(kp.ID) == explore.Provider {
 				isKnownProvider = true
 				break
 			}
 		}
 		if !isKnownProvider {
-			slog.Warn("Using large model as small model for unknown provider", "provider", large.Provider, "model", large.Model)
-			small = large
+			slog.Warn("Using brain model as explore model for unknown provider", "provider", brain.Provider, "model", brain.Model)
+			explore = brain
 		}
 	}
 
-	build, _ := normalizeSelectedModel(c, buildModelSelected, large)
-	coder, _ := normalizeSelectedModel(c, coderModelSelected, build)
-	explore, _ := normalizeSelectedModel(c, exploreModelSelected, small)
+	worker, _ := normalizeSelectedModel(c, workerModelSelected, brain)
 
 	if persist {
-		if largeModelConfigured && !largeValid {
-			if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeLarge, large); err != nil {
-				return fmt.Errorf("failed to update preferred large model: %w", err)
+		if brainModelConfigured && !brainValid {
+			if err := store.UpdatePreferredModel(SelectedModelTypeBrain, brain); err != nil {
+				return fmt.Errorf("failed to update preferred brain model: %w", err)
 			}
 		}
-		if smallModelConfigured && !smallValid {
-			if err := store.UpdatePreferredModel(ScopeGlobal, SelectedModelTypeSmall, small); err != nil {
-				return fmt.Errorf("failed to update preferred small model: %w", err)
+		if exploreModelConfigured && !exploreValid {
+			if err := store.UpdatePreferredModel(SelectedModelTypeExplore, explore); err != nil {
+				return fmt.Errorf("failed to update preferred explore model: %w", err)
 			}
 		}
 	}
 
-	if !buildModelConfigured && largeModelConfigured {
-		build = large
+	if !brainModelConfigured {
+		brain = defaultBrain
 	}
-	if !coderModelConfigured {
-		coder = build
+	if !workerModelConfigured {
+		worker = brain
 	}
-	if !exploreModelConfigured && smallModelConfigured {
-		explore = small
+	if !exploreModelConfigured {
+		explore = defaultExplore
 	}
 
-	c.Models[SelectedModelTypeBuild] = build
-	c.Models[SelectedModelTypeCoder] = coder
+	c.Models[SelectedModelTypeBrain] = brain
+	c.Models[SelectedModelTypeWorker] = worker
 	c.Models[SelectedModelTypeExplore] = explore
-	c.Models[SelectedModelTypeLarge] = large
-	c.Models[SelectedModelTypeSmall] = small
+	return nil
+}
+
+func (c *Config) validateSelectedModelTypes() error {
+	for modelType := range c.Models {
+		switch modelType {
+		case SelectedModelTypeBrain, SelectedModelTypeWorker, SelectedModelTypeExplore:
+			continue
+		default:
+			return fmt.Errorf("unsupported model type %q; use brain, worker, or explore", modelType)
+		}
+	}
 	return nil
 }
 
@@ -727,42 +706,15 @@ func normalizeSelectedModel(c *Config, selected SelectedModel, fallback Selected
 	return resolved, true
 }
 
-// lookupConfigs searches config files starting at cwd and walking up
-// through the current project. The upward walk stops at the git
-// working tree root when one can be detected, otherwise at cwd itself,
-// so an unrelated crush.json placed above the project is never picked
-// up. Global user-level config locations are always included
-// regardless of the boundary.
+// lookupConfigs returns the single config location's files in load order:
+// the declarative config (crush.{json,yaml,yml}) first, then the runtime-state
+// file (state.{yaml,yml}) last so it takes the highest precedence. There is no
+// project walk-up or separate global-data scope anymore — ~/.config/crush/ is
+// the one and only config source. cwd is unused (kept for caller compatibility).
 func lookupConfigs(cwd string) []string {
-	configPaths := append([]string{}, configCandidates(GlobalConfig())...)
-	configPaths = append(configPaths, llmConfigCandidates(GlobalConfig())...)
-	configPaths = append(configPaths, configCandidates(GlobalConfigData())...)
-	configPaths = append(configPaths, llmConfigCandidates(GlobalConfigData())...)
-
-	baseNames := []string{
-		appName + ".json",
-		appName + ".yaml",
-		appName + ".yml",
-		"." + appName + ".json",
-		"." + appName + ".yaml",
-		"." + appName + ".yml",
-	}
-	llmNames := []string{
-		appName + ".llm.yaml",
-		appName + ".llm.yml",
-		"." + appName + ".llm.yaml",
-		"." + appName + ".llm.yml",
-	}
-
-	if foundConfigs, err := fsext.LookupBounded(cwd, projectBoundary(cwd), baseNames...); err == nil {
-		slices.Reverse(foundConfigs)
-		configPaths = append(configPaths, foundConfigs...)
-	}
-	if foundConfigs, err := fsext.LookupBounded(cwd, projectBoundary(cwd), llmNames...); err == nil {
-		slices.Reverse(foundConfigs)
-		configPaths = append(configPaths, foundConfigs...)
-	}
-
+	base := GlobalConfig()
+	configPaths := append([]string{}, configCandidates(base)...)
+	configPaths = append(configPaths, stateConfigCandidates(base)...)
 	return configPaths
 }
 

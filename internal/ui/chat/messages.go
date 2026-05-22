@@ -11,7 +11,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/list"
@@ -22,8 +21,12 @@ import (
 // padding. We also cap the width so text is readable to the maxTextWidth(120).
 const MessageLeftPaddingTotal = 2
 
-// maxTextWidth is the maximum width text messages can be
-const maxTextWidth = 120
+// maxTextWidth previously capped text at 120 cols for readability. We opted for
+// full responsive fill, so it is set effectively unbounded: every call site
+// does min(availableWidth, maxTextWidth), so a large value makes content always
+// track the available pane width instead of leaving an empty column on wide
+// terminals.
+const maxTextWidth = 1 << 30
 
 // Identifiable is an interface for items that can provide a unique identifier.
 type Identifiable interface {
@@ -33,7 +36,7 @@ type Identifiable interface {
 // Animatable is an interface for items that support animation.
 type Animatable interface {
 	StartAnimation() tea.Cmd
-	Animate(msg anim.StepMsg) tea.Cmd
+	Animate(msg StepMsg) tea.Cmd
 }
 
 // Expandable is an interface for items that can be expanded or collapsed.

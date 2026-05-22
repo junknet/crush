@@ -619,19 +619,19 @@ func (c *Client) GetAgentSessionQueuedPromptsList(ctx context.Context, id string
 	return prompts, nil
 }
 
-// GetDefaultSmallModel retrieves the default small model for a provider.
-func (c *Client) GetDefaultSmallModel(ctx context.Context, id string, providerID string) (*config.SelectedModel, error) {
-	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/agent/default-small-model", id), url.Values{"provider_id": []string{providerID}}, nil)
+// GetDefaultExploreModel retrieves the default explore model for a provider.
+func (c *Client) GetDefaultExploreModel(ctx context.Context, id string, providerID string) (*config.SelectedModel, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/agent/default-explore-model", id), url.Values{"provider_id": []string{providerID}}, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get default small model: %w", err)
+		return nil, fmt.Errorf("failed to get default explore model: %w", err)
 	}
 	defer rsp.Body.Close()
 	if rsp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get default small model: status code %d", rsp.StatusCode)
+		return nil, fmt.Errorf("failed to get default explore model: status code %d", rsp.StatusCode)
 	}
 	var model config.SelectedModel
 	if err := json.NewDecoder(rsp.Body).Decode(&model); err != nil {
-		return nil, fmt.Errorf("failed to decode default small model: %w", err)
+		return nil, fmt.Errorf("failed to decode default explore model: %w", err)
 	}
 	return &model, nil
 }

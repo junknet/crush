@@ -9,7 +9,6 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/client"
-	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 )
@@ -94,8 +93,8 @@ func logoutHyper(c *client.Client, wsID string) error {
 	ctx := getLogoutContext()
 
 	if err := cmp.Or(
-		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.api_key"),
-		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.oauth"),
+		c.RemoveConfigField(ctx, wsID, "providers.hyper.api_key"),
+		c.RemoveConfigField(ctx, wsID, "providers.hyper.oauth"),
 	); err != nil {
 		return err
 	}
@@ -108,8 +107,8 @@ func logoutCopilot(c *client.Client, wsID string) error {
 	ctx := getLogoutContext()
 
 	if err := cmp.Or(
-		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.copilot.api_key"),
-		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, "providers.copilot.oauth"),
+		c.RemoveConfigField(ctx, wsID, "providers.copilot.api_key"),
+		c.RemoveConfigField(ctx, wsID, "providers.copilot.oauth"),
 	); err != nil {
 		return err
 	}

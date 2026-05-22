@@ -32,16 +32,16 @@ type modelMatch struct {
 	modelID  string
 }
 
-func findModels(providers map[string]config.ProviderConfig, largeModel, smallModel string) ([]modelMatch, []modelMatch, error) {
-	largeProviderFilter, largeModelID := parseModelStr(providers, largeModel)
-	smallProviderFilter, smallModelID := parseModelStr(providers, smallModel)
+func findModels(providers map[string]config.ProviderConfig, brainModel, exploreModel string) ([]modelMatch, []modelMatch, error) {
+	brainProviderFilter, brainModelID := parseModelStr(providers, brainModel)
+	exploreProviderFilter, exploreModelID := parseModelStr(providers, exploreModel)
 
 	// Validate provider filters exist.
 	for _, pf := range []struct {
 		filter, label string
 	}{
-		{largeProviderFilter, "large"},
-		{smallProviderFilter, "small"},
+		{brainProviderFilter, "brain"},
+		{exploreProviderFilter, "explore"},
 	} {
 		if pf.filter != "" {
 			if _, ok := providers[pf.filter]; !ok {
@@ -51,22 +51,22 @@ func findModels(providers map[string]config.ProviderConfig, largeModel, smallMod
 	}
 
 	// Find matching models in a single pass.
-	var largeMatches, smallMatches []modelMatch
+	var brainMatches, exploreMatches []modelMatch
 	for name, provider := range providers {
 		if provider.Disable {
 			continue
 		}
 		for _, m := range provider.Models {
-			if filter(largeModelID, largeProviderFilter, m.ID, name) {
-				largeMatches = append(largeMatches, modelMatch{provider: name, modelID: m.ID})
+			if filter(brainModelID, brainProviderFilter, m.ID, name) {
+				brainMatches = append(brainMatches, modelMatch{provider: name, modelID: m.ID})
 			}
-			if filter(smallModelID, smallProviderFilter, m.ID, name) {
-				smallMatches = append(smallMatches, modelMatch{provider: name, modelID: m.ID})
+			if filter(exploreModelID, exploreProviderFilter, m.ID, name) {
+				exploreMatches = append(exploreMatches, modelMatch{provider: name, modelID: m.ID})
 			}
 		}
 	}
 
-	return largeMatches, smallMatches, nil
+	return brainMatches, exploreMatches, nil
 }
 
 func filter(modelFilter, providerFilter, model, provider string) bool {

@@ -40,10 +40,13 @@ import (
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 	"golang.org/x/sync/errgroup"
 
 	"charm.land/fantasy/providers/anthropic"
+	"charm.land/fantasy/providers/anthropicoauth"
+	"charm.land/fantasy/providers/antigravity"
 	"charm.land/fantasy/providers/azure"
 	"charm.land/fantasy/providers/bedrock"
 	"charm.land/fantasy/providers/google"
@@ -57,24 +60,43 @@ import (
 
 // Coordinator errors.
 var (
-	errCoderAgentNotConfigured           = errors.New("coder agent not configured")
+	errWorkerAgentNotConfigured          = errors.New("worker agent not configured")
 	errModelProviderNotConfigured        = errors.New("model provider not configured")
-	errBuildModelNotSelected             = errors.New("build model not selected")
-	errCoderModelNotSelected             = errors.New("coder model not selected")
+	errBrainModelNotSelected             = errors.New("brain model not selected")
+	errWorkerModelNotSelected            = errors.New("worker model not selected")
 	errExploreModelNotSelected           = errors.New("explore model not selected")
-	errLargeModelNotSelected             = errors.New("large model not selected")
-	errSmallModelNotSelected             = errors.New("small model not selected")
-	errBuildModelProviderNotConfigured   = errors.New("build model provider not configured")
-	errCoderModelProviderNotConfigured   = errors.New("coder model provider not configured")
+	errBrainModelProviderNotConfigured   = errors.New("brain model provider not configured")
+	errWorkerModelProviderNotConfigured  = errors.New("worker model provider not configured")
 	errExploreModelProviderNotConfigured = errors.New("explore model provider not configured")
-	errLargeModelProviderNotConfigured   = errors.New("large model provider not configured")
-	errSmallModelProviderNotConfigured   = errors.New("small model provider not configured")
-	errBuildModelNotFound                = errors.New("build model not found in provider config")
-	errCoderModelNotFound                = errors.New("coder model not found in provider config")
+	errBrainModelNotFound                = errors.New("brain model not found in provider config")
+	errWorkerModelNotFound               = errors.New("worker model not found in provider config")
 	errExploreModelNotFound              = errors.New("explore model not found in provider config")
-	errLargeModelNotFound                = errors.New("large model not found in provider config")
-	errSmallModelNotFound                = errors.New("small model not found in provider config")
 )
+
+// anthropicBudgetForEffort maps the OpenAI-style reasoning effort string onto
+// an Anthropic `thinking.budget_tokens` integer. Anthropic Messages API has no
+// effort field — only an explicit budget — so we translate cross-provider
+// configs here. Numbers are picked to match Opus/Sonnet thinking depth tiers
+// the user expects from each effort label.
+//
+// Falls through to 2000 when effort is empty / unknown, matching the original
+// hard-coded default so existing `think:true` configs don't regress.
+func anthropicBudgetForEffort(effort string) int64 {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "none":
+		return 1024
+	case "low":
+		return 4000
+	case "medium":
+		return 8000
+	case "high":
+		return 16000
+	case "xhigh":
+		return 32000
+	default:
+		return 2000
+	}
+}
 
 // Copilot models that use the Responses API instead of Chat Completions.
 var copilotResponsesModels = map[string]bool{
@@ -109,6 +131,7 @@ type coordinator struct {
 	history     history.Service
 	filetracker filetracker.Service
 	lspManager  *lsp.Manager
+	bgManager   *shell.BackgroundShellManager
 	notify      pubsub.Publisher[notify.Notification]
 	runtime     *agentruntime.RuntimeSession
 	traceMu     sync.RWMutex
@@ -136,6 +159,7 @@ func NewCoordinator(
 	filetracker filetracker.Service,
 	lspManager *lsp.Manager,
 	notify pubsub.Publisher[notify.Notification],
+	bgManager *shell.BackgroundShellManager,
 ) (Coordinator, error) {
 	// Discover skills once at session start.
 	allSkills, activeSkills := discoverSkills(cfg)
@@ -149,6 +173,7 @@ func NewCoordinator(
 		history:      history,
 		filetracker:  filetracker,
 		lspManager:   lspManager,
+		bgManager:    bgManager,
 		notify:       notify,
 		agents:       make(map[string]SessionAgent),
 		allSkills:    allSkills,
@@ -157,14 +182,14 @@ func NewCoordinator(
 		runtime:      agentruntime.NewSession(cfg.WorkingDir(), nil),
 	}
 
-	agentName := config.AgentBuild
+	agentName := config.AgentBrain
 	agentCfg, ok := cfg.Config().Agents[agentName]
 	if !ok {
-		agentName = config.AgentBuild
+		agentName = config.AgentBrain
 		agentCfg, ok = cfg.Config().Agents[agentName]
 	}
 	if !ok {
-		return nil, errCoderAgentNotConfigured
+		return nil, errWorkerAgentNotConfigured
 	}
 
 	systemPrompt, err := promptForAgentRole(agentName, prompt.WithWorkingDir(c.cfg.WorkingDir()))
@@ -178,18 +203,18 @@ func NewCoordinator(
 	}
 	c.currentAgent = agent
 	c.currentAgentName = agentName
-	c.agents[config.AgentBuild] = agent
+	c.agents[config.AgentBrain] = agent
 
-	if coderCfg, ok := cfg.Config().Agents[config.AgentCoder]; ok {
-		coderSystemPrompt, err := promptForAgentRole(config.AgentCoder, prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	if workerCfg, ok := cfg.Config().Agents[config.AgentWorker]; ok {
+		workerSystemPrompt, err := promptForAgentRole(config.AgentWorker, prompt.WithWorkingDir(c.cfg.WorkingDir()))
 		if err != nil {
 			return nil, err
 		}
-		coderAgent, err := c.buildAgent(ctx, coderSystemPrompt, coderCfg, true)
+		workerAgent, err := c.buildAgent(ctx, workerSystemPrompt, workerCfg, true)
 		if err != nil {
 			return nil, err
 		}
-		c.agents[config.AgentCoder] = coderAgent
+		c.agents[config.AgentWorker] = workerAgent
 	}
 
 	if exploreCfg, ok := cfg.Config().Agents[config.AgentExplore]; ok {
@@ -203,7 +228,117 @@ func NewCoordinator(
 		}
 		c.agents[config.AgentExplore] = exploreAgent
 	}
+
+	// Drive event-driven re-wakeups: when a backgrounded shell job finishes or
+	// a monitor fires, automatically continue the session that launched it
+	// instead of leaving the agent idle waiting for the user to poll.
+	go c.watchBackgroundJobs(ctx)
+	// Drive timer-based re-wakeups requested via the schedule_wakeup tool.
+	go c.watchScheduledWakeups(ctx)
+
 	return c, nil
+}
+
+// watchScheduledWakeups resumes a session when a schedule_wakeup timer fires,
+// handing the agent the reason it asked to be woken for.
+func (c *coordinator) watchScheduledWakeups(ctx context.Context) {
+	events := tools.SubscribeWakeups(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			req := ev.Payload
+			if req.SessionID == "" {
+				continue
+			}
+			prompt := fmt.Sprintf(
+				"Scheduled wake-up fired — this is an automatic continuation, not a new user request.\n\n"+
+					"Reason you asked to be woken: %s\n\n"+
+					"Proceed with that now. If the thing you were waiting on still isn't ready, you may schedule another wake-up.",
+				req.Reason)
+			slog.DebugContext(ctx, "Scheduled wake-up fired", "session_id", req.SessionID)
+			go func() {
+				if _, err := c.Run(ctx, req.SessionID, prompt); err != nil {
+					slog.Error("Scheduled wake-up run failed", "session_id", req.SessionID, "error", err)
+				}
+			}()
+		}
+	}
+}
+
+// watchBackgroundJobs subscribes to background-job completion events and, for
+// each finished job tied to a session, kicks off a follow-up run that feeds the
+// result back to the agent so it can continue. A busy session queues the
+// follow-up via the agent's normal message queue, so this never races an
+// in-flight turn.
+func (c *coordinator) watchBackgroundJobs(ctx context.Context) {
+	events := shell.SubscribeBackgroundJobs(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			job := ev.Payload
+			if job.SessionID == "" {
+				continue
+			}
+			prompt := buildBackgroundWakePrompt(job)
+			slog.DebugContext(ctx, "Background job finished — waking session",
+				"job", job.ID, "session_id", job.SessionID, "exit_code", job.ExitCode)
+			go func() {
+				if _, err := c.Run(ctx, job.SessionID, prompt); err != nil {
+					slog.Error("Background job wake-up run failed",
+						"job", job.ID, "session_id", job.SessionID, "error", err)
+				}
+			}()
+		}
+	}
+}
+
+// buildBackgroundWakePrompt renders the system-style message handed to the
+// agent when a background job it started finished, or when a monitor it set on
+// a running job fired.
+func buildBackgroundWakePrompt(job shell.BackgroundJobEvent) string {
+	output := job.OutputTail
+	if output == "" {
+		output = "(no output)"
+	}
+	const tail = "\n\nThis is an automatic continuation, not a new user request. Review this and continue the original task; if it is complete, summarize. Do not repeat work already done."
+
+	switch job.Kind {
+	case shell.BackgroundKindMonitorHit:
+		return fmt.Sprintf(
+			"Your monitor on background job %s matched pattern %q.\nMatched line: %s\nCommand: %s\n\nOutput (tail):\n%s%s",
+			job.ID, job.Pattern, job.MatchLine, job.Command, output, tail)
+	case shell.BackgroundKindMonitorEOF:
+		return fmt.Sprintf(
+			"Background job %s ended before your monitored pattern %q ever appeared (exit code %d).\nCommand: %s\n\nOutput (tail):\n%s%s",
+			job.ID, job.Pattern, job.ExitCode, job.Command, output, tail)
+	case shell.BackgroundKindMonitorTimeout:
+		return fmt.Sprintf(
+			"Your monitor on background job %s timed out without matching pattern %q; the job is still running.\nCommand: %s\n\nOutput (tail):\n%s%s",
+			job.ID, job.Pattern, job.Command, output, tail)
+	default: // BackgroundKindDone
+		var status string
+		switch {
+		case job.Interrupted:
+			status = "was interrupted/killed before completing"
+		case job.ExitCode == 0:
+			status = "finished successfully (exit code 0)"
+		default:
+			status = fmt.Sprintf("failed with exit code %d", job.ExitCode)
+		}
+		return fmt.Sprintf(
+			"A background job you previously started has now completed.\nJob ID: %s\nCommand: %s\nResult: it %s.\n\nOutput (tail):\n%s%s",
+			job.ID, job.Command, status, output, tail)
+	}
 }
 
 // Run implements Coordinator.
@@ -423,16 +558,21 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 			}
 		}
 	case anthropic.Name, bedrock.Name:
-		var (
-			_, hasEffort = mergedOptions["effort"]
-			_, hasThink  = mergedOptions["thinking"]
-		)
-		switch {
-		case !hasEffort && model.ModelCfg.ReasoningEffort != "" && model.CatwalkCfg.CanReason:
-			mergedOptions["effort"] = model.ModelCfg.ReasoningEffort
-		case !hasThink && model.ModelCfg.Think:
-			mergedOptions["thinking"] = map[string]any{"budget_tokens": 2000}
+		// Anthropic Messages API has no `effort` field; the only thinking knob
+		// is `thinking.budget_tokens` (integer hard cap). To keep crush.json
+		// portable across providers we map OpenAI-style effort strings onto
+		// equivalent budgets when the model has thinking enabled.
+		if _, hasThink := mergedOptions["thinking"]; !hasThink && model.ModelCfg.Think && model.CatwalkCfg.CanReason {
+			budget := model.ModelCfg.ThinkingBudget
+			if budget <= 0 {
+				budget = anthropicBudgetForEffort(model.ModelCfg.ReasoningEffort)
+			}
+			mergedOptions["thinking"] = map[string]any{"budget_tokens": budget}
 		}
+		// `effort` is OpenAI-shaped — drop it before parsing so the Anthropic
+		// SDK doesn't see an unknown key. (We translated whatever the user
+		// asked for into budget_tokens above.)
+		delete(mergedOptions, "effort")
 		parsed, err := anthropic.ParseOptions(mergedOptions)
 		if err == nil {
 			options[anthropic.Name] = parsed
@@ -547,16 +687,16 @@ func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderO
 }
 
 func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
-	large, small, err := c.buildAgentModels(ctx, agent, isSubAgent)
+	primary, title, err := c.buildAgentModels(ctx, agent, isSubAgent)
 	if err != nil {
 		return nil, err
 	}
 
-	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
+	primaryProviderCfg, _ := c.cfg.Config().Providers.Get(primary.ModelCfg.Provider)
 	result := NewSessionAgent(SessionAgentOptions{
-		LargeModel:           large,
-		SmallModel:           small,
-		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
+		PrimaryModel:         primary,
+		TitleModel:           title,
+		SystemPromptPrefix:   primaryProviderCfg.SystemPromptPrefix,
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
@@ -566,7 +706,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Notify:               c.notify,
 	})
 
-	systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
+	systemPrompt, err := prompt.Build(ctx, primary.Model.Provider(), primary.Model.Model(), c.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -616,7 +756,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	logFile := filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")
 
-	// Build hook runner if PreToolUse hooks are configured.
+	// Brain hook runner if PreToolUse hooks are configured.
 	var hookRunner *hooks.Runner
 	if preToolHooks := c.cfg.Config().Hooks[hooks.EventPreToolUse]; len(preToolHooks) > 0 {
 		hookRunner = hooks.NewRunner(preToolHooks, c.cfg.WorkingDir(), c.cfg.WorkingDir())
@@ -624,12 +764,13 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	allTools = append(
 		allTools,
-		tools.NewBashTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelID),
-		tools.NewCommandDAGTool(c.cfg.WorkingDir()),
+		tools.NewBashTool(c.permissions, c.bgManager, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelID),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
-		tools.NewJobOutputTool(),
-		tools.NewJobKillTool(),
+		tools.NewJobOutputTool(c.bgManager),
+		tools.NewJobKillTool(c.bgManager),
+		tools.NewMonitorTool(c.bgManager),
+		tools.NewScheduleWakeupTool(),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -704,10 +845,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	})
 
 	// Wrap tools with hook interception for the top-level agent only.
-	// Sub-agents (the `agent` task tool, `agentic_fetch`, etc.) run
+	// Sub-agents (the `agent` tool, `agentic_fetch`, etc.) run
 	// without hook interception to avoid firing the user's hook N times
 	// per delegated turn. The top-level invocation of the sub-agent tool
-	// itself is still wrapped from the coder's side.
+	// itself is still wrapped from the brain's side.
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
 
 	if c.runtime != nil {
@@ -729,27 +870,27 @@ func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, 
 		secondaryType = primaryType
 	}
 
-	large, err := c.buildModelForType(ctx, primaryType, isSubAgent)
+	primary, err := c.buildModelForType(ctx, primaryType, isSubAgent)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
-	small, err := c.buildModelForType(ctx, secondaryType, true)
+	title, err := c.buildModelForType(ctx, secondaryType, true)
 	if err != nil {
 		return Model{}, Model{}, err
 	}
-	return large, small, nil
+	return primary, title, nil
 }
 
 func selectedModelTypeForAgent(agentID string) config.SelectedModelType {
 	switch agentID {
-	case config.AgentBuild:
-		return config.SelectedModelTypeBuild
-	case config.AgentCoder:
-		return config.SelectedModelTypeCoder
+	case config.AgentBrain:
+		return config.SelectedModelTypeBrain
+	case config.AgentWorker:
+		return config.SelectedModelTypeWorker
 	case config.AgentExplore:
 		return config.SelectedModelTypeExplore
 	default:
-		return config.SelectedModelTypeBuild
+		return config.SelectedModelTypeBrain
 	}
 }
 
@@ -757,28 +898,28 @@ func (c *coordinator) buildModelForType(ctx context.Context, modelType config.Se
 	selectedModelCfg, ok := c.cfg.Config().SelectedModelForType(modelType)
 	if !ok {
 		switch modelType {
-		case config.SelectedModelTypeBuild:
-			return Model{}, errBuildModelNotSelected
-		case config.SelectedModelTypeCoder:
-			return Model{}, errCoderModelNotSelected
-		case config.SelectedModelTypeExplore, config.SelectedModelTypeSmall:
+		case config.SelectedModelTypeBrain:
+			return Model{}, errBrainModelNotSelected
+		case config.SelectedModelTypeWorker:
+			return Model{}, errWorkerModelNotSelected
+		case config.SelectedModelTypeExplore:
 			return Model{}, errExploreModelNotSelected
 		default:
-			return Model{}, errBuildModelNotSelected
+			return Model{}, errBrainModelNotSelected
 		}
 	}
 
 	providerCfg, ok := c.cfg.Config().Providers.Get(selectedModelCfg.Provider)
 	if !ok {
 		switch modelType {
-		case config.SelectedModelTypeBuild:
-			return Model{}, errBuildModelProviderNotConfigured
-		case config.SelectedModelTypeCoder:
-			return Model{}, errCoderModelProviderNotConfigured
-		case config.SelectedModelTypeExplore, config.SelectedModelTypeSmall:
+		case config.SelectedModelTypeBrain:
+			return Model{}, errBrainModelProviderNotConfigured
+		case config.SelectedModelTypeWorker:
+			return Model{}, errWorkerModelProviderNotConfigured
+		case config.SelectedModelTypeExplore:
 			return Model{}, errExploreModelProviderNotConfigured
 		default:
-			return Model{}, errBuildModelProviderNotConfigured
+			return Model{}, errBrainModelProviderNotConfigured
 		}
 	}
 
@@ -797,14 +938,14 @@ func (c *coordinator) buildModelForType(ctx context.Context, modelType config.Se
 	}
 	if catwalkModel == nil {
 		switch modelType {
-		case config.SelectedModelTypeBuild:
-			return Model{}, errBuildModelNotFound
-		case config.SelectedModelTypeCoder:
-			return Model{}, errCoderModelNotFound
-		case config.SelectedModelTypeExplore, config.SelectedModelTypeSmall:
+		case config.SelectedModelTypeBrain:
+			return Model{}, errBrainModelNotFound
+		case config.SelectedModelTypeWorker:
+			return Model{}, errWorkerModelNotFound
+		case config.SelectedModelTypeExplore:
 			return Model{}, errExploreModelNotFound
 		default:
-			return Model{}, errBuildModelNotFound
+			return Model{}, errBrainModelNotFound
 		}
 	}
 
@@ -852,8 +993,7 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 		opts = append(opts, anthropic.WithBaseURL(baseURL))
 	}
 
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+	if httpClient := log.NewProviderHTTPClient("anthropic", c.cfg.Config().Options.Debug); httpClient != nil {
 		opts = append(opts, anthropic.WithHTTPClient(httpClient))
 	}
 	return anthropic.New(opts...)
@@ -864,8 +1004,7 @@ func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[st
 		openai.WithAPIKey(apiKey),
 		openai.WithUseResponsesAPI(),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+	if httpClient := log.NewProviderHTTPClient("openai", c.cfg.Config().Options.Debug); httpClient != nil {
 		opts = append(opts, openai.WithHTTPClient(httpClient))
 	}
 	if len(headers) > 0 {
@@ -881,8 +1020,7 @@ func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[stri
 	opts := []openrouter.Option{
 		openrouter.WithAPIKey(apiKey),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+	if httpClient := log.NewProviderHTTPClient("openrouter", c.cfg.Config().Options.Debug); httpClient != nil {
 		opts = append(opts, openrouter.WithHTTPClient(httpClient))
 	}
 	if len(headers) > 0 {
@@ -895,8 +1033,7 @@ func (c *coordinator) buildVercelProvider(_, apiKey string, headers map[string]s
 	opts := []vercel.Option{
 		vercel.WithAPIKey(apiKey),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+	if httpClient := log.NewProviderHTTPClient("vercel", c.cfg.Config().Options.Debug); httpClient != nil {
 		opts = append(opts, vercel.WithHTTPClient(httpClient))
 	}
 	if len(headers) > 0 {
@@ -922,8 +1059,8 @@ func (c *coordinator) buildOpenaiCompatProvider(baseURL, apiKey string, headers 
 			}),
 		)
 		httpClient = copilot.NewClient(isSubAgent, c.cfg.Config().Options.Debug)
-	} else if c.cfg.Config().Options.Debug {
-		httpClient = log.NewHTTPClient()
+	} else {
+		httpClient = log.NewProviderHTTPClient(providerID, c.cfg.Config().Options.Debug)
 	}
 	if httpClient != nil {
 		opts = append(opts, openaicompat.WithHTTPClient(httpClient))
@@ -946,8 +1083,7 @@ func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[str
 		azure.WithAPIKey(apiKey),
 		azure.WithUseResponsesAPI(),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+	if httpClient := log.NewProviderHTTPClient("azure", c.cfg.Config().Options.Debug); httpClient != nil {
 		opts = append(opts, azure.WithHTTPClient(httpClient))
 	}
 	if options == nil {
@@ -965,8 +1101,7 @@ func (c *coordinator) buildAzureProvider(baseURL, apiKey string, headers map[str
 
 func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]string) (fantasy.Provider, error) {
 	var opts []bedrock.Option
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+	if httpClient := log.NewProviderHTTPClient("bedrock", c.cfg.Config().Options.Debug); httpClient != nil {
 		opts = append(opts, bedrock.WithHTTPClient(httpClient))
 	}
 	if len(headers) > 0 {
@@ -988,8 +1123,7 @@ func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[st
 		google.WithBaseURL(baseURL),
 		google.WithGeminiAPIKey(apiKey),
 	}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+	if httpClient := log.NewProviderHTTPClient("google", c.cfg.Config().Options.Debug); httpClient != nil {
 		opts = append(opts, google.WithHTTPClient(httpClient))
 	}
 	if len(headers) > 0 {
@@ -998,10 +1132,60 @@ func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[st
 	return google.New(opts...)
 }
 
+// buildAntigravityProvider wires the Antigravity (Google CodeAssist subscription)
+// provider. OAuth credentials live in libsecret keyring + ~/.gemini/oauth_creds.json
+// — both managed by the provider itself, no API key plumbing required.
+//
+// `extra_params` honoured:
+//   - "default_project": pins the cloudaicompanion project id
+func (c *coordinator) buildAntigravityProvider(headers map[string]string, options map[string]string) (fantasy.Provider, error) {
+	opts := []antigravity.Option{}
+	if httpClient := log.NewProviderHTTPClient("antigravity", c.cfg.Config().Options.Debug); httpClient != nil {
+		opts = append(opts, antigravity.WithHTTPClient(httpClient))
+	}
+	if len(headers) > 0 {
+		// Antigravity has no header injection path of its own yet — surfacing
+		// the warning here keeps the dispatch table honest if a user sets
+		// extra_headers on this provider in crush.json.
+		slog.Warn("Antigravity provider ignores extra_headers", "headers", headers)
+	}
+	if project := options["default_project"]; project != "" {
+		opts = append(opts, antigravity.WithDefaultProject(project))
+	}
+	return antigravity.New(opts...)
+}
+
+// buildAnthropicOAuthProvider wires the Claude Code subscription-side OAuth
+// provider. Credentials come from ~/.claude/.credentials.json by default
+// (the path the official CLI writes).
+//
+// `extra_params` honoured:
+//   - "credentials_path": override the on-disk creds file location
+//   - "profile":          legacy wecode-CLI layout (~/.claude-accounts/<p>/)
+//   - "app_name":         override the `x-app` header (defaults to "cli")
+func (c *coordinator) buildAnthropicOAuthProvider(headers map[string]string, options map[string]string) (fantasy.Provider, error) {
+	var opts []anthropicoauth.Option
+	if httpClient := log.NewProviderHTTPClient("anthropic-oauth", c.cfg.Config().Options.Debug); httpClient != nil {
+		opts = append(opts, anthropicoauth.WithHTTPClient(httpClient))
+	}
+	if path := options["credentials_path"]; path != "" {
+		opts = append(opts, anthropicoauth.WithCredentialsPath(path))
+	}
+	if profile := options["profile"]; profile != "" {
+		opts = append(opts, anthropicoauth.WithProfile(profile))
+	}
+	if appName := options["app_name"]; appName != "" {
+		opts = append(opts, anthropicoauth.WithAppName(appName))
+	}
+	if len(headers) > 0 {
+		slog.Warn("Anthropic-OAuth provider ignores extra_headers (server-side validates Claude Code header set)", "headers", headers)
+	}
+	return anthropicoauth.New(opts...)
+}
+
 func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, options map[string]string) (fantasy.Provider, error) {
 	opts := []google.Option{}
-	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+	if httpClient := log.NewProviderHTTPClient("google-vertex", c.cfg.Config().Options.Debug); httpClient != nil {
 		opts = append(opts, google.WithHTTPClient(httpClient))
 	}
 	if len(headers) > 0 {
@@ -1059,6 +1243,10 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 		return c.buildGoogleProvider(baseURL, apiKey, headers)
 	case "google-vertex":
 		return c.buildGoogleVertexProvider(headers, providerCfg.ExtraParams)
+	case antigravity.Name:
+		return c.buildAntigravityProvider(headers, providerCfg.ExtraParams)
+	case anthropicoauth.Name:
+		return c.buildAnthropicOAuthProvider(headers, providerCfg.ExtraParams)
 	case openaicompat.Name, hyper.Name:
 		switch providerCfg.ID {
 		case hyper.Name:
@@ -1117,15 +1305,15 @@ func (c *coordinator) agentForProfile(profile scheduler.WorkerProfile) SessionAg
 	}
 	switch profile {
 	case scheduler.ProfileWorkerAgent:
-		if agent, ok := c.agents[config.AgentCoder]; ok {
+		if agent, ok := c.agents[config.AgentWorker]; ok {
 			return agent
 		}
-	case scheduler.ProfileToolsAgent:
+	case scheduler.ProfileExploreAgent:
 		if agent, ok := c.agents[config.AgentExplore]; ok {
 			return agent
 		}
 	default:
-		if agent, ok := c.agents[config.AgentBuild]; ok {
+		if agent, ok := c.agents[config.AgentBrain]; ok {
 			return agent
 		}
 	}
@@ -1133,7 +1321,7 @@ func (c *coordinator) agentForProfile(profile scheduler.WorkerProfile) SessionAg
 }
 
 func (c *coordinator) UpdateModels(ctx context.Context) error {
-	for _, agentName := range []string{config.AgentBuild, config.AgentCoder, config.AgentExplore} {
+	for _, agentName := range []string{config.AgentBrain, config.AgentWorker, config.AgentExplore} {
 		agent, ok := c.agents[agentName]
 		if !ok || agent == nil {
 			continue
@@ -1142,17 +1330,17 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		large, small, err := c.buildAgentModels(ctx, agentCfg, agentName != config.AgentBuild)
+		primary, title, err := c.buildAgentModels(ctx, agentCfg, agentName != config.AgentBrain)
 		if err != nil {
 			return err
 		}
-		agent.SetModels(large, small)
-		tools, err := c.buildTools(ctx, agentCfg, agentName != config.AgentBuild)
+		agent.SetModels(primary, title)
+		tools, err := c.buildTools(ctx, agentCfg, agentName != config.AgentBrain)
 		if err != nil {
 			return err
 		}
 		agent.SetTools(tools)
-		if agentName == config.AgentBuild {
+		if agentName == config.AgentBrain {
 			c.currentAgent = agent
 		}
 	}
@@ -1221,7 +1409,7 @@ func (c *coordinator) isUnauthorized(err error) bool {
 }
 
 func (c *coordinator) refreshOAuth2Token(ctx context.Context, providerCfg config.ProviderConfig) error {
-	if err := c.cfg.RefreshOAuthToken(ctx, config.ScopeGlobal, providerCfg.ID); err != nil {
+	if err := c.cfg.RefreshOAuthToken(ctx, providerCfg.ID); err != nil {
 		slog.Error("Failed to refresh OAuth token after 401 error", "provider", providerCfg.ID, "error", err)
 		return err
 	}
@@ -1254,6 +1442,7 @@ type subAgentParams struct {
 	AgentMessageID string
 	ToolCallID     string
 	Prompt         string
+	Profile        scheduler.WorkerProfile
 	SessionTitle   string
 	// SessionSetup is an optional callback invoked after session creation
 	// but before agent execution, for custom session configuration.
@@ -1288,9 +1477,14 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		maxTokens = model.ModelCfg.MaxTokens
 	}
 
+	profile := params.Profile
+	if profile == "" {
+		profile = scheduler.ProfileWorkerAgent
+	}
+
 	taskRuntime := c.newTaskRuntime(session.ID)
 	taskScheduler := scheduler.NewAgentScheduler(taskRuntime)
-	taskNode := c.ensureChildTask(taskScheduler, params.SessionID, session.ID, params.Prompt, maxTokens)
+	taskNode := c.ensureChildTask(taskScheduler, params.SessionID, session.ID, params.Prompt, profile, maxTokens)
 	if taskNode == nil {
 		return fantasy.ToolResponse{}, errors.New("failed to create child task")
 	}
@@ -1400,6 +1594,7 @@ func (c *coordinator) publishSubAgentEvent(t notify.Type, params subAgentParams,
 		Type:               t,
 		SubAgentToolCallID: params.ToolCallID,
 		SubAgentPrompt:     params.Prompt,
+		SubAgentProfile:    string(normalizeSubAgentProfile(params.Profile)),
 		SubAgentError:      errText,
 	})
 }
@@ -1439,7 +1634,7 @@ func (c *coordinator) ensureRootTask(taskScheduler *scheduler.AgentScheduler, se
 	if c == nil || taskScheduler == nil {
 		return nil
 	}
-	node := taskScheduler.EnsureRoot(sessionID, goal, nil, scheduler.ProfileBuildAgent)
+	node := taskScheduler.EnsureRoot(sessionID, goal, nil, scheduler.ProfileBrainAgent)
 	if node == nil {
 		return nil
 	}
@@ -1450,23 +1645,39 @@ func (c *coordinator) ensureRootTask(taskScheduler *scheduler.AgentScheduler, se
 	return node
 }
 
-func (c *coordinator) ensureChildTask(taskScheduler *scheduler.AgentScheduler, parentSessionID, sessionID, goal string, maxTokens int64) *scheduler.TaskNode {
+func (c *coordinator) ensureChildTask(taskScheduler *scheduler.AgentScheduler, parentSessionID, sessionID, goal string, profile scheduler.WorkerProfile, maxTokens int64) *scheduler.TaskNode {
 	if c == nil || taskScheduler == nil {
 		return nil
 	}
 	parent, ok := taskScheduler.Root(parentSessionID)
 	if !ok || parent == nil {
-		parent = taskScheduler.EnsureRoot(parentSessionID, "", nil, scheduler.ProfileBuildAgent)
+		parent = taskScheduler.EnsureRoot(parentSessionID, "", nil, scheduler.ProfileBrainAgent)
 	}
-	node := taskScheduler.SpawnChild(parent, sessionID, goal, scheduler.ProfileWorkerAgent, nil, "")
+	profile = normalizeSubAgentProfile(profile)
+	node := taskScheduler.SpawnChild(parent, sessionID, goal, profile, nil, "")
 	if node == nil {
 		return nil
 	}
-	node.Kind = scheduler.TaskEdit
-	node.Mode = scheduler.TaskWrite
+	node.Kind, node.Mode = taskKindAndModeForProfile(profile)
 	node.MaxRetries = 0
 	node.Intent.BudgetTokens = int(maxTokens)
 	return node
+}
+
+func normalizeSubAgentProfile(profile scheduler.WorkerProfile) scheduler.WorkerProfile {
+	if profile == scheduler.ProfileExploreAgent {
+		return profile
+	}
+	return scheduler.ProfileWorkerAgent
+}
+
+func taskKindAndModeForProfile(profile scheduler.WorkerProfile) (scheduler.TaskKind, scheduler.TaskMode) {
+	switch profile {
+	case scheduler.ProfileExploreAgent:
+		return scheduler.TaskExplore, scheduler.TaskReadOnly
+	default:
+		return scheduler.TaskEdit, scheduler.TaskWrite
+	}
 }
 
 func (c *coordinator) composeTaskPrompt(runtime *agentruntime.RuntimeSession, node *scheduler.TaskNode, fallback string) string {

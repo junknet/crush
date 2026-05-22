@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
@@ -302,7 +303,7 @@ func getOrRenewClient(ctx context.Context, cfg *config.ConfigStore, name string)
 	m := cfg.Config().MCP[name]
 	state, _ := states.Get(name)
 
-	timeout := mcpTimeout(m)
+	timeout := connectTimeout(m)
 	pingCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err := sess.Ping(pingCtx, nil)
@@ -349,7 +350,7 @@ func updateState(name string, state State, err error, client *ClientSession, cou
 }
 
 func createSession(ctx context.Context, name string, m config.MCPConfig, resolver config.VariableResolver) (*ClientSession, error) {
-	timeout := mcpTimeout(m)
+	timeout := connectTimeout(m)
 	mcpCtx, cancel := context.WithCancel(ctx)
 	cancelTimer := time.AfterFunc(timeout, cancel)
 
@@ -457,6 +458,12 @@ func createTransport(ctx context.Context, m config.MCPConfig, resolver config.Va
 		}
 		cmd := exec.CommandContext(ctx, home.Long(command), args...)
 		cmd.Env = append(os.Environ(), envs...)
+		// ESC must actually kill stdio MCP children. Default CommandContext
+		// behaviour SIGKILLs on ctx cancel; we replace that with SIGTERM
+		// + 3s grace before WaitDelay escalates to SIGKILL so servers can
+		// flush logs / close subresources cleanly.
+		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+		cmd.WaitDelay = 3 * time.Second
 		return &mcp.CommandTransport{
 			Command: cmd,
 		}, nil
@@ -518,8 +525,18 @@ func (rt headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	return http.DefaultTransport.RoundTrip(req)
 }
 
-func mcpTimeout(m config.MCPConfig) time.Duration {
-	return time.Duration(cmp.Or(m.Timeout, 15)) * time.Second
+// connectTimeout bounds session establishment and health pings.
+func connectTimeout(m config.MCPConfig) time.Duration {
+	return time.Duration(cmp.Or(m.ConnectTimeout, 15)) * time.Second
+}
+
+// callTimeout bounds a single tool invocation. Returns 0 when disabled
+// (caller should skip wrapping ctx).
+func callTimeout(m config.MCPConfig) time.Duration {
+	if m.CallTimeout < 0 {
+		return 0
+	}
+	return time.Duration(cmp.Or(m.CallTimeout, 300)) * time.Second
 }
 
 func stdioCheck(old *exec.Cmd) error {

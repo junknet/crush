@@ -24,10 +24,10 @@ internal/
     provider.go                    Provider configuration and model resolution
   agent/
     agent.go                       SessionAgent: runs LLM conversations per session
-    coordinator.go                 Coordinator: manages named agents ("coder", "task")
+    coordinator.go                 Coordinator: manages named agents ("brain", "worker", "explore")
     hooked_tool.go                 Decorator that runs PreToolUse hooks before tool execution
     prompts.go                     Loads Go-template system prompts
-    templates/                     System prompt templates (coder.md.tpl, task.md.tpl, etc.)
+    templates/                     System prompt templates (brain.md.tpl, worker.md.tpl, explore.md.tpl)
     tools/                         All built-in tools (bash, edit, view, grep, glob, etc.)
       mcp/                         MCP client integration
   hooks/                           Hook engine: runs user shell commands on hook events
@@ -86,7 +86,8 @@ internal/
 
 ## Build/Test/Lint Commands
 
-- **Build**: `go build .` or `go run .`
+- **Build**: `task build` (refreshes `~/.local/bin/crush` launchers and
+  overwrites the cached binaries they execute)
 - **Test**: `task test` or `go test ./...` (run single test:
   `go test ./internal/llm/prompt -run TestGetContextFromPaths`)
 - **Update Golden Files**: `go test ./... -update` (regenerates `.golden`

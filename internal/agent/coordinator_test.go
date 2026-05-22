@@ -10,6 +10,8 @@ import (
 	"charm.land/fantasy/providers/anthropic"
 	"charm.land/fantasy/providers/bedrock"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/runtime"
+	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +28,7 @@ func (m *mockSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fan
 }
 
 func (m *mockSessionAgent) Model() Model                        { return m.model }
-func (m *mockSessionAgent) SetModels(large, small Model)        {}
+func (m *mockSessionAgent) SetModels(primary, title Model)      {}
 func (m *mockSessionAgent) SetTools(tools []fantasy.AgentTool)  {}
 func (m *mockSessionAgent) SetSystemPrompt(systemPrompt string) {}
 func (m *mockSessionAgent) Cancel(sessionID string) {
@@ -102,6 +104,7 @@ func TestRunSubAgent(t *testing.T) {
 			AgentMessageID: "msg-1",
 			ToolCallID:     "call-1",
 			Prompt:         "do something",
+			Profile:        scheduler.ProfileWorkerAgent,
 			SessionTitle:   "Test Session",
 		})
 		require.NoError(t, err)
@@ -110,6 +113,35 @@ func TestRunSubAgent(t *testing.T) {
 		require.Len(t, calls, 1)
 		assert.Equal(t, "do something", calls[0].Prompt)
 		assert.Equal(t, int64(4096), calls[0].MaxOutputTokens)
+		assert.Equal(t, string(scheduler.ProfileWorkerAgent), calls[0].TaskProfile)
+	})
+
+	t.Run("explore profile propagates to agent call", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		calls := make([]SessionAgentCall, 0, 1)
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			calls = append(calls, call)
+			return agentResultWithText("done"), nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "inspect",
+			Profile:        scheduler.ProfileExploreAgent,
+			SessionTitle:   "Explore Session",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "done", resp.Content)
+		require.Len(t, calls, 1)
+		assert.Equal(t, string(scheduler.ProfileExploreAgent), calls[0].TaskProfile)
 	})
 
 	t.Run("ModelCfg.MaxTokens overrides default", func(t *testing.T) {
@@ -289,6 +321,29 @@ func TestRunSubAgent(t *testing.T) {
 	})
 }
 
+func TestEnsureChildTaskUsesProfile(t *testing.T) {
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{ID: "test-provider"})
+	taskRuntime := runtime.NewSession(env.workingDir, nil)
+	taskScheduler := scheduler.NewAgentScheduler(taskRuntime)
+	parent := taskScheduler.EnsureRoot("parent-session", "root goal", nil, scheduler.ProfileBrainAgent)
+	require.NotNil(t, parent)
+
+	exploreNode := coord.ensureChildTask(taskScheduler, parent.SessionID, "child-explore", "inspect repo", scheduler.ProfileExploreAgent, 2048)
+	require.NotNil(t, exploreNode)
+	assert.Equal(t, scheduler.ProfileExploreAgent, exploreNode.Profile)
+	assert.Equal(t, scheduler.TaskExplore, exploreNode.Kind)
+	assert.Equal(t, scheduler.TaskReadOnly, exploreNode.Mode)
+	assert.Equal(t, 2048, exploreNode.Intent.BudgetTokens)
+
+	workerNode := coord.ensureChildTask(taskScheduler, parent.SessionID, "child-worker", "edit file", scheduler.ProfileWorkerAgent, 4096)
+	require.NotNil(t, workerNode)
+	assert.Equal(t, scheduler.ProfileWorkerAgent, workerNode.Profile)
+	assert.Equal(t, scheduler.TaskEdit, workerNode.Kind)
+	assert.Equal(t, scheduler.TaskWrite, workerNode.Mode)
+	assert.Equal(t, 4096, workerNode.Intent.BudgetTokens)
+}
+
 func TestUpdateParentSessionCost(t *testing.T) {
 	t.Run("accumulates cost correctly", func(t *testing.T) {
 		env := testEnv(t)
@@ -412,7 +467,8 @@ func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 				CatwalkCfg: catwalk.Model{ID: "claude-opus-4-7", CanReason: true},
 				ModelCfg: config.SelectedModel{
 					Provider:        "test",
-					ReasoningEffort: "max",
+					Think:           true,
+					ReasoningEffort: "high",
 				},
 			}
 			providerCfg := config.ProviderConfig{ID: "test", Type: tc.providerType}
@@ -423,8 +479,8 @@ func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 			require.True(t, ok, "options should be keyed under anthropic.Name for type %q", tc.providerType)
 			parsed, ok := raw.(*anthropic.ProviderOptions)
 			require.True(t, ok)
-			require.NotNil(t, parsed.Effort)
-			assert.Equal(t, anthropic.Effort("max"), *parsed.Effort)
+			require.NotNil(t, parsed.Thinking)
+			assert.Equal(t, int64(16000), parsed.Thinking.BudgetTokens)
 		})
 	}
 }

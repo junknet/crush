@@ -230,12 +230,12 @@ func (w *ClientWorkspace) UpdateAgentModel(ctx context.Context) error {
 	return w.client.UpdateAgent(ctx, w.workspaceID())
 }
 
-func (w *ClientWorkspace) InitCoderAgent(ctx context.Context) error {
+func (w *ClientWorkspace) InitBrainAgent(ctx context.Context) error {
 	return w.client.InitiateAgentProcessing(ctx, w.workspaceID())
 }
 
-func (w *ClientWorkspace) GetDefaultSmallModel(providerID string) config.SelectedModel {
-	model, err := w.client.GetDefaultSmallModel(context.Background(), w.workspaceID(), providerID)
+func (w *ClientWorkspace) GetDefaultExploreModel(providerID string) config.SelectedModel {
+	model, err := w.client.GetDefaultExploreModel(context.Background(), w.workspaceID(), providerID)
 	if err != nil {
 		return config.SelectedModel{}
 	}
@@ -387,40 +387,40 @@ func (w *ClientWorkspace) Resolver() config.VariableResolver {
 
 // -- Config mutations --
 
-func (w *ClientWorkspace) UpdatePreferredModel(scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel) error {
-	err := w.client.UpdatePreferredModel(context.Background(), w.workspaceID(), scope, modelType, model)
+func (w *ClientWorkspace) UpdatePreferredModel(modelType config.SelectedModelType, model config.SelectedModel) error {
+	err := w.client.UpdatePreferredModel(context.Background(), w.workspaceID(), modelType, model)
 	if err == nil {
 		w.refreshWorkspace()
 	}
 	return err
 }
 
-func (w *ClientWorkspace) SetCompactMode(scope config.Scope, enabled bool) error {
-	err := w.client.SetCompactMode(context.Background(), w.workspaceID(), scope, enabled)
+func (w *ClientWorkspace) SetCompactMode(enabled bool) error {
+	err := w.client.SetCompactMode(context.Background(), w.workspaceID(), enabled)
 	if err == nil {
 		w.refreshWorkspace()
 	}
 	return err
 }
 
-func (w *ClientWorkspace) SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error {
-	err := w.client.SetProviderAPIKey(context.Background(), w.workspaceID(), scope, providerID, apiKey)
+func (w *ClientWorkspace) SetProviderAPIKey(providerID string, apiKey any) error {
+	err := w.client.SetProviderAPIKey(context.Background(), w.workspaceID(), providerID, apiKey)
 	if err == nil {
 		w.refreshWorkspace()
 	}
 	return err
 }
 
-func (w *ClientWorkspace) SetConfigField(scope config.Scope, key string, value any) error {
-	err := w.client.SetConfigField(context.Background(), w.workspaceID(), scope, key, value)
+func (w *ClientWorkspace) SetConfigField(key string, value any) error {
+	err := w.client.SetConfigField(context.Background(), w.workspaceID(), key, value)
 	if err == nil {
 		w.refreshWorkspace()
 	}
 	return err
 }
 
-func (w *ClientWorkspace) RemoveConfigField(scope config.Scope, key string) error {
-	err := w.client.RemoveConfigField(context.Background(), w.workspaceID(), scope, key)
+func (w *ClientWorkspace) RemoveConfigField(key string) error {
+	err := w.client.RemoveConfigField(context.Background(), w.workspaceID(), key)
 	if err == nil {
 		w.refreshWorkspace()
 	}
@@ -438,8 +438,8 @@ func (w *ClientWorkspace) ImportCopilot() (*oauth.Token, bool) {
 	return token, ok
 }
 
-func (w *ClientWorkspace) RefreshOAuthToken(ctx context.Context, scope config.Scope, providerID string) error {
-	err := w.client.RefreshOAuthToken(ctx, w.workspaceID(), scope, providerID)
+func (w *ClientWorkspace) RefreshOAuthToken(ctx context.Context, providerID string) error {
+	err := w.client.RefreshOAuthToken(ctx, w.workspaceID(), providerID)
 	if err == nil {
 		w.refreshWorkspace()
 	}

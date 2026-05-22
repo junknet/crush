@@ -1,10 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +28,11 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/dnaeon/go-vcr.v4/pkg/cassette"
+	"gopkg.in/dnaeon/go-vcr.v4/pkg/recorder"
 
 	_ "github.com/joho/godotenv/autoload"
 )
@@ -42,9 +51,9 @@ type fakeEnv struct {
 type builderFunc func(t *testing.T, r *vcr.Recorder) (fantasy.LanguageModel, error)
 
 type modelPair struct {
-	name       string
-	largeModel builderFunc
-	smallModel builderFunc
+	name         string
+	primaryModel builderFunc
+	titleModel   builderFunc
 }
 
 func hyperBuilder(model string) builderFunc {
@@ -96,24 +105,134 @@ func testEnv(t *testing.T) fakeEnv {
 	}
 }
 
-func testSessionAgent(env fakeEnv, large, small fantasy.LanguageModel, systemPrompt string, tools ...fantasy.AgentTool) SessionAgent {
-	largeModel := Model{
-		Model: large,
+func newTestRecorder(t *testing.T) *vcr.Recorder {
+	cassetteName := filepath.Join("testdata", t.Name())
+	r, err := recorder.New(
+		cassetteName,
+		recorder.WithMode(recorder.ModeReplayOnly),
+		recorder.WithMatcher(systemPromptAwareMatcher(t)),
+		recorder.WithSkipRequestLatency(true),
+	)
+	if err != nil {
+		t.Fatalf("vcr: failed to create recorder: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if err := r.Stop(); err != nil {
+			t.Errorf("vcr: failed to stop recorder: %v", err)
+		}
+	})
+
+	return r
+}
+
+func systemPromptAwareMatcher(t *testing.T) recorder.MatcherFunc {
+	return func(r *http.Request, i cassette.Request) bool {
+		if r.Body == nil || r.Body == http.NoBody {
+			return cassette.DefaultMatcher(r, i)
+		}
+		if r.Method != i.Method || r.URL.String() != i.URL {
+			return false
+		}
+
+		reqBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("vcr: failed to read request body")
+		}
+		_ = r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
+
+		requestContent := normalizeLineEndings(reqBody)
+		cassetteContent := normalizeLineEndings(i.Body)
+		if requestContent == cassetteContent {
+			return true
+		}
+
+		var requestJSON any
+		var cassetteJSON any
+		if err := json.Unmarshal([]byte(requestContent), &requestJSON); err != nil {
+			return false
+		}
+		if err := json.Unmarshal([]byte(cassetteContent), &cassetteJSON); err != nil {
+			return false
+		}
+
+		normalizePromptPayload(requestJSON)
+		normalizePromptPayload(cassetteJSON)
+		if reflect.DeepEqual(requestJSON, cassetteJSON) {
+			return true
+		}
+		t.Logf("Request interaction not found for %q.\nDiff:\n%s", t.Name(), cmp.Diff(cassetteJSON, requestJSON))
+		return false
+	}
+}
+
+func normalizePromptPayload(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		if messages, ok := v["messages"].([]any); ok {
+			for _, message := range messages {
+				msgMap, ok := message.(map[string]any)
+				if !ok {
+					continue
+				}
+				normalizeMessagePayload(msgMap)
+			}
+		}
+		for _, nested := range v {
+			normalizePromptPayload(nested)
+		}
+	case []any:
+		for _, nested := range v {
+			normalizePromptPayload(nested)
+		}
+	}
+}
+
+func normalizeMessagePayload(message map[string]any) {
+	for key, value := range message {
+		switch typed := value.(type) {
+		case string:
+			if key == "content" || key == "arguments" {
+				message[key] = ""
+			}
+		case map[string]any:
+			normalizeMessagePayload(typed)
+		case []any:
+			for _, nested := range typed {
+				if nestedMap, ok := nested.(map[string]any); ok {
+					normalizeMessagePayload(nestedMap)
+				}
+			}
+		}
+	}
+}
+
+func normalizeLineEndings[T string | []byte](s T) string {
+	str := string(s)
+	str = strings.ReplaceAll(str, "\r\n", "\n")
+	str = strings.ReplaceAll(str, `\r\n`, `\n`)
+	return str
+}
+
+func testSessionAgent(env fakeEnv, primary, title fantasy.LanguageModel, systemPrompt string, tools ...fantasy.AgentTool) SessionAgent {
+	primaryModel := Model{
+		Model: primary,
 		CatwalkCfg: catwalk.Model{
 			ContextWindow:    200000,
 			DefaultMaxTokens: 10000,
 		},
 	}
-	smallModel := Model{
-		Model: small,
+	titleModel := Model{
+		Model: title,
 		CatwalkCfg: catwalk.Model{
 			ContextWindow:    200000,
 			DefaultMaxTokens: 10000,
 		},
 	}
 	agent := NewSessionAgent(SessionAgentOptions{
-		LargeModel:   largeModel,
-		SmallModel:   smallModel,
+		PrimaryModel: primaryModel,
+		TitleModel:   titleModel,
 		SystemPrompt: systemPrompt,
 		Sessions:     env.sessions,
 		Messages:     env.messages,
@@ -122,12 +241,21 @@ func testSessionAgent(env fakeEnv, large, small fantasy.LanguageModel, systemPro
 	return agent
 }
 
-func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel) (SessionAgent, error) {
+type nonInteractiveSessionAgent struct {
+	SessionAgent
+}
+
+func (a nonInteractiveSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+	call.NonInteractive = true
+	return a.SessionAgent.Run(ctx, call)
+}
+
+func workerAgent(r *vcr.Recorder, env fakeEnv, primary, title fantasy.LanguageModel) (SessionAgent, error) {
 	fixedTime := func() time.Time {
 		t, _ := time.Parse("1/2/2006", "1/1/2025")
 		return t
 	}
-	prompt, err := coderPrompt(
+	prompt, err := workerPrompt(
 		prompt.WithTimeFunc(fixedTime),
 		prompt.WithPlatform("linux"),
 		prompt.WithWorkingDir(filepath.ToSlash(env.workingDir)),
@@ -153,19 +281,19 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 	cfg.Config().Options.ContextPaths = nil
 	cfg.Config().LSP = nil
 
-	systemPrompt, err := prompt.Build(context.TODO(), large.Provider(), large.Model(), cfg)
+	systemPrompt, err := prompt.Build(context.TODO(), primary.Provider(), primary.Model(), cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	// Get the model name for the bash tool
-	modelName := large.Model() // fallback to ID if Name not available
-	if model := cfg.Config().GetModel(large.Provider(), large.Model()); model != nil {
+	modelName := primary.Model() // fallback to ID if Name not available
+	if model := cfg.Config().GetModel(primary.Provider(), primary.Model()); model != nil {
 		modelName = model.Name
 	}
 
 	allTools := []fantasy.AgentTool{
-		tools.NewBashTool(env.permissions, env.workingDir, cfg.Config().Options.Attribution, modelName),
+		tools.NewBashTool(env.permissions, shell.NewBackgroundShellManager(), env.workingDir, cfg.Config().Options.Attribution, modelName),
 		tools.NewDownloadTool(env.permissions, env.workingDir, r.GetDefaultClient()),
 		tools.NewEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
@@ -178,7 +306,7 @@ func coderAgent(r *vcr.Recorder, env fakeEnv, large, small fantasy.LanguageModel
 		tools.NewWriteTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 	}
 
-	return testSessionAgent(env, large, small, systemPrompt, allTools...), nil
+	return nonInteractiveSessionAgent{SessionAgent: testSessionAgent(env, primary, title, systemPrompt, allTools...)}, nil
 }
 
 // createSimpleGoProject creates a simple Go project structure in the given directory.

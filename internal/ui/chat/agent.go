@@ -3,13 +3,13 @@ package chat
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/tree"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 )
 
@@ -62,13 +62,15 @@ func NewAgentToolMessageItem(
 // parent's version. Without the bump, the list cache would serve the
 // previously rendered frame indefinitely and the spinner would appear
 // frozen.
-func (a *AgentToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
+func (a *AgentToolMessageItem) Animate(msg StepMsg) tea.Cmd {
 	if a.result != nil || a.Status() == ToolStatusCanceled {
 		return nil
 	}
 	if msg.ID == a.ID() {
 		a.Bump()
-		return a.anim.Animate(msg)
+		return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+			return StepMsg{ID: a.ID()}
+		})
 	}
 	for _, nestedTool := range a.nestedTools {
 		if msg.ID != nestedTool.ID() {
@@ -127,7 +129,7 @@ type AgentToolRenderContext struct {
 func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if !opts.ToolCall.Finished && !opts.IsCanceled() && len(r.agent.nestedTools) == 0 {
-		return pendingTool(sty, "Agent", opts.Anim, opts.Compact)
+		return pendingTool(sty, "Agent", opts.Compact)
 	}
 
 	var params agent.AgentParams
@@ -141,8 +143,8 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 		return header
 	}
 
-	// Build the task tag and prompt.
-	taskTag := sty.Tool.AgentTaskTag.Render("Task")
+	// Render the agent label and prompt.
+	taskTag := sty.Tool.AgentWorkTag.Render("Agent")
 	taskTagWidth := lipgloss.Width(taskTag)
 
 	// Calculate remaining width for prompt.
@@ -162,7 +164,7 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 		),
 	)
 
-	// Build tree with nested tool calls.
+	// Brain tree with nested tool calls.
 	childTools := tree.Root(header)
 
 	for _, nestedTool := range r.agent.nestedTools {
@@ -170,7 +172,7 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 		childTools.Child(childView)
 	}
 
-	// Build parts.
+	// Brain parts.
 	var parts []string
 	parts = append(parts, childTools.Enumerator(roundedEnumerator(2, taskTagWidth-5)).String())
 
@@ -231,13 +233,15 @@ func NewAgenticFetchToolMessageItem(
 // (anim.Animate's ID check at internal/ui/anim/anim.go:326-329
 // silently returns nil), and (b) never invalidate the parent's
 // list-cache entry on a parent tick.
-func (a *AgenticFetchToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
+func (a *AgenticFetchToolMessageItem) Animate(msg StepMsg) tea.Cmd {
 	if a.result != nil || a.Status() == ToolStatusCanceled {
 		return nil
 	}
 	if msg.ID == a.ID() {
 		a.Bump()
-		return a.anim.Animate(msg)
+		return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+			return StepMsg{ID: a.ID()}
+		})
 	}
 	for _, nestedTool := range a.nestedTools {
 		if msg.ID != nestedTool.ID() {
@@ -290,7 +294,7 @@ type agenticFetchParams struct {
 func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if !opts.ToolCall.Finished && !opts.IsCanceled() && len(r.fetch.nestedTools) == 0 {
-		return pendingTool(sty, "Agentic Fetch", opts.Anim, opts.Compact)
+		return pendingTool(sty, "Agentic Fetch", opts.Compact)
 	}
 
 	var params agenticFetchParams
@@ -299,7 +303,7 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 	prompt := params.Prompt
 	prompt = strings.ReplaceAll(prompt, "\n", " ")
 
-	// Build header with optional URL param.
+	// Brain header with optional URL param.
 	var toolParams []string
 	if params.URL != "" {
 		toolParams = append(toolParams, params.URL)
@@ -310,7 +314,7 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 		return header
 	}
 
-	// Build the prompt tag.
+	// Brain the prompt tag.
 	promptTag := sty.Tool.AgenticFetchPromptTag.Render("Prompt")
 	promptTagWidth := lipgloss.Width(promptTag)
 
@@ -331,7 +335,7 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 		),
 	)
 
-	// Build tree with nested tool calls.
+	// Brain tree with nested tool calls.
 	childTools := tree.Root(header)
 
 	for _, nestedTool := range r.fetch.nestedTools {
@@ -339,7 +343,7 @@ func (r *AgenticFetchToolRenderContext) RenderTool(sty *styles.Styles, width int
 		childTools.Child(childView)
 	}
 
-	// Build parts.
+	// Brain parts.
 	var parts []string
 	parts = append(parts, childTools.Enumerator(roundedEnumerator(2, promptTagWidth-5)).String())
 

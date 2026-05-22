@@ -190,26 +190,47 @@ func dispatchShebang(ctx context.Context, scriptPath string, probe []byte, args 
 	cmdArgs = append(cmdArgs, scriptPath)
 	cmdArgs = append(cmdArgs, args[1:]...)
 
-	cmd := exec.CommandContext(ctx, interpreter, cmdArgs...)
 	hc := interp.HandlerCtx(ctx)
+	// Plain exec.Command (not CommandContext): runInProcessGroup owns
+	// cancellation so the interpreter and every grandchild it forks are torn
+	// down as a process group, not just the direct child.
+	cmd := exec.Command(interpreter, cmdArgs...)
 	cmd.Dir = hc.Dir
 	cmd.Env = execEnvList(hc.Env)
 	cmd.Stdin = hc.Stdin
 	cmd.Stdout = hc.Stdout
 	cmd.Stderr = hc.Stderr
 
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			code := exitErr.ExitCode()
-			if code < 0 {
-				code = 1
-			}
-			return interp.ExitStatus(uint8(code))
-		}
-		return err
+	return runInProcessGroup(ctx, cmd, hc.Stderr)
+}
+
+// classifyExecErr maps the error from a finished exec.Cmd to the
+// interp.ExitStatus convention mvdan's default handler uses: a cancelled or
+// timed-out ctx surfaces as ctx.Err() so [IsInterrupt] recognizes it; a
+// non-zero exit becomes the matching ExitStatus; a failure to start becomes
+// 127 (message written to stderr). It is the shared tail of both the shebang
+// dispatch path and the unix process-group exec handler.
+func classifyExecErr(ctx context.Context, stderr io.Writer, err error) error {
+	if err == nil {
+		return nil
 	}
-	return nil
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code := exitErr.ExitCode()
+		if code < 0 {
+			code = 1
+		}
+		return interp.ExitStatus(uint8(code))
+	}
+	var execErr *exec.Error
+	if errors.As(err, &execErr) {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return interp.ExitStatus(127)
+	}
+	return err
 }
 
 // resolveInterpreter tries the literal shebang path first, then falls back

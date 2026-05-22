@@ -17,10 +17,10 @@ import (
 )
 
 // PrettyPath formats a file path with home directory shortening and applies
-// muted styling.
+// clickable path styling.
 func PrettyPath(t *styles.Styles, path string, width int) string {
 	formatted := home.Short(path)
-	return t.Sidebar.WorkingDir.Width(width).Render(formatted)
+	return PathLink(t.Sidebar.WorkingDir.Width(width), formatted, path)
 }
 
 // FormatReasoningEffort formats a reasoning effort level for display.

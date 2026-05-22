@@ -43,7 +43,18 @@ func RunTool(ctx context.Context, cfg *config.ConfigStore, name, toolName string
 	if err != nil {
 		return ToolResult{}, err
 	}
-	result, err := c.CallTool(ctx, &mcp.CallToolParams{
+
+	// Per-tool timeout. Without this, a wedged stdio server (e.g. a
+	// foreman task that never completes) would only end when the
+	// outer agent run is cancelled by the user.
+	callCtx := ctx
+	if d := callTimeout(cfg.Config().MCP[name]); d > 0 {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
+	}
+
+	result, err := c.CallTool(callCtx, &mcp.CallToolParams{
 		Name:      toolName,
 		Arguments: args,
 	})

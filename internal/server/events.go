@@ -86,9 +86,14 @@ func wrapEvent(ev any) *pubsub.Payload {
 		return envelope(pubsub.PayloadTypeAgentEvent, pubsub.Event[proto.AgentEvent]{
 			Type: e.Type,
 			Payload: proto.AgentEvent{
-				SessionID:    e.Payload.SessionID,
-				SessionTitle: e.Payload.SessionTitle,
-				Type:         proto.AgentEventType(e.Payload.Type),
+				SessionID:          e.Payload.SessionID,
+				SessionTitle:       e.Payload.SessionTitle,
+				Type:               proto.AgentEventType(e.Payload.Type),
+				ProviderID:         e.Payload.ProviderID,
+				SubAgentToolCallID: e.Payload.SubAgentToolCallID,
+				SubAgentPrompt:     e.Payload.SubAgentPrompt,
+				SubAgentProfile:    e.Payload.SubAgentProfile,
+				SubAgentError:      e.Payload.SubAgentError,
 			},
 		})
 	default:

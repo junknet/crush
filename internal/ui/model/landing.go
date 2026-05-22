@@ -9,9 +9,9 @@ import (
 	"github.com/charmbracelet/ultraviolet/layout"
 )
 
-// selectedLargeModel returns the currently selected large language model from
+// selectedBrainModel returns the currently selected brain language model from
 // the agent coordinator, if one exists.
-func (m *UI) selectedLargeModel() *workspace.AgentModel {
+func (m *UI) selectedBrainModel() *workspace.AgentModel {
 	if m.com.Workspace.AgentIsReady() {
 		model := m.com.Workspace.AgentModel()
 		return &model

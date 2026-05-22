@@ -54,7 +54,8 @@ func Setup(logFile string, debug bool, ws ...io.Writer) {
 			}
 		}
 
-		slog.SetDefault(slog.New(slog.NewMultiHandler(handlers...)))
+		base := slog.NewMultiHandler(handlers...)
+		slog.SetDefault(slog.New(NewTraceContextHandler(base)))
 		initialized.Store(true)
 	})
 }

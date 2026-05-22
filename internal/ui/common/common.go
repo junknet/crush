@@ -32,19 +32,19 @@ func (c *Common) Config() *config.Config {
 }
 
 // DefaultCommon returns the default common UI configurations. When the
-// workspace has a large model selected, the theme is chosen based on its
+// workspace has a brain model selected, the theme is chosen based on its
 // provider; otherwise the default theme is used.
 func DefaultCommon(ws workspace.Workspace) *Common {
-	s := styles.ThemeForProvider(largeModelProviderID(ws))
+	s := styles.ThemeForProvider(brainModelProviderID(ws))
 	return &Common{
 		Workspace: ws,
 		Styles:    &s,
 	}
 }
 
-// largeModelProviderID returns the provider ID of the currently selected
-// large model, or the empty string if none is set or the workspace is nil.
-func largeModelProviderID(ws workspace.Workspace) string {
+// brainModelProviderID returns the provider ID of the currently selected
+// brain model, or the empty string if none is set or the workspace is nil.
+func brainModelProviderID(ws workspace.Workspace) string {
 	if ws == nil {
 		return ""
 	}
@@ -52,13 +52,13 @@ func largeModelProviderID(ws workspace.Workspace) string {
 	if cfg == nil {
 		return ""
 	}
-	return cfg.Models[config.SelectedModelTypeLarge].Provider
+	return cfg.Models[config.SelectedModelTypeBrain].Provider
 }
 
-// IsHyper reports whether the currently selected large model is provided
+// IsHyper reports whether the currently selected brain model is provided
 // by Hyper.
 func (c *Common) IsHyper() bool {
-	return largeModelProviderID(c.Workspace) == "hyper"
+	return brainModelProviderID(c.Workspace) == "hyper"
 }
 
 // CenterRect returns a new [Rectangle] centered within the given area with the

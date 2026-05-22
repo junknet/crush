@@ -8,11 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	stdpath "path"
 	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/server"
 )
@@ -53,8 +55,14 @@ func NewClient(path, network, address string) (*Client, error) {
 	if c.network == "npipe" || c.network == "unix" {
 		tr.DisableCompression = true
 	}
+	var rt http.RoundTripper = tr
+	if dir := os.Getenv(log.HTTPDumpDirEnv); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err == nil {
+			rt = log.DumpRoundTripper(tr, filepath.Join(dir, "ipc-client.jsonl"))
+		}
+	}
 	c.h = &http.Client{
-		Transport: tr,
+		Transport: rt,
 		Timeout:   0,
 	}
 	return c, nil

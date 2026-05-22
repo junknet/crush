@@ -71,6 +71,11 @@ func (m *UI) loadSession(sessionID string) tea.Cmd {
 			return util.ReportError(err)
 		}
 
+		// Touch the session's updated_at timestamp to sync with mobile clients.
+		if savedSession, err := m.com.Workspace.SaveSession(context.Background(), session); err == nil {
+			session = savedSession
+		}
+
 		sessionFiles, err := m.loadSessionFiles(sessionID)
 		if err != nil {
 			return util.ReportError(err)
@@ -220,7 +225,7 @@ func fileList(t *styles.Styles, cwd string, filesWithChanges []SessionFile, widt
 		maxPathWidth := max(width-lipgloss.Width(suffix), 0)
 		filePath = ansi.Truncate(filePath, maxPathWidth, "…")
 
-		line := t.Files.Path.Render(filePath)
+		line := common.PathLink(t.Files.Link, filePath, f.FirstVersion.Path)
 		if extraContent != "" {
 			line = fmt.Sprintf("%s %s", line, extraContent)
 		}

@@ -26,6 +26,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
+	"charm.land/fantasy/providers/antigravity"
 	"charm.land/fantasy/providers/bedrock"
 	"charm.land/fantasy/providers/google"
 	"charm.land/fantasy/providers/openai"
@@ -38,6 +39,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	crushlog "github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
@@ -45,15 +47,16 @@ import (
 	"github.com/charmbracelet/crush/internal/stringext"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/x/exp/charmtone"
+	"github.com/google/uuid"
 )
 
 const (
 	DefaultSessionName = "Untitled Session"
 
-	// Constants for auto-summarization thresholds
-	largeContextWindowThreshold = 200_000
-	largeContextWindowBuffer    = 20_000
-	smallContextWindowRatio     = 0.2
+	// Auto-summarization triggers when used >= 70% of context window
+	// (i.e. remaining <= 30%). Single ratio for every window size so
+	// large-window models compact at the same proportional point as small ones.
+	autoSummarizeRemainingRatio = 0.30
 )
 
 var userAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
@@ -93,7 +96,7 @@ type SessionAgentCall struct {
 
 type SessionAgent interface {
 	Run(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
-	SetModels(large Model, small Model)
+	SetModels(primary Model, title Model)
 	SetTools(tools []fantasy.AgentTool)
 	SetSystemPrompt(systemPrompt string)
 	Cancel(sessionID string)
@@ -116,8 +119,8 @@ type Model struct {
 }
 
 type sessionAgent struct {
-	largeModel         *csync.Value[Model]
-	smallModel         *csync.Value[Model]
+	primaryModel       *csync.Value[Model]
+	titleModel         *csync.Value[Model]
 	systemPromptPrefix *csync.Value[string]
 	systemPrompt       *csync.Value[string]
 	tools              *csync.Slice[fantasy.AgentTool]
@@ -130,11 +133,17 @@ type sessionAgent struct {
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, context.CancelFunc]
+	// cancelGen is incremented every time Cancel(sessionID) is called.
+	// Each in-flight Run snapshots the value at start and refuses to
+	// auto-resume queued / summarize follow-up work if the generation
+	// has advanced — that's what makes ESC mean "stop everything" and
+	// not "stop this turn, then keep going with whatever was queued".
+	cancelGen *csync.Map[string, uint64]
 }
 
 type SessionAgentOptions struct {
-	LargeModel           Model
-	SmallModel           Model
+	PrimaryModel         Model
+	TitleModel           Model
 	SystemPromptPrefix   string
 	SystemPrompt         string
 	IsSubAgent           bool
@@ -149,8 +158,8 @@ func NewSessionAgent(
 	opts SessionAgentOptions,
 ) SessionAgent {
 	return &sessionAgent{
-		largeModel:           csync.NewValue(opts.LargeModel),
-		smallModel:           csync.NewValue(opts.SmallModel),
+		primaryModel:         csync.NewValue(opts.PrimaryModel),
+		titleModel:           csync.NewValue(opts.TitleModel),
 		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:         csync.NewValue(opts.SystemPrompt),
 		isSubAgent:           opts.IsSubAgent,
@@ -161,6 +170,7 @@ func NewSessionAgent(
 		notify:               opts.Notify,
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, context.CancelFunc](),
+		cancelGen:            csync.NewMap[string, uint64](),
 	}
 }
 
@@ -183,9 +193,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		return nil, nil
 	}
 
+	// Snapshot the cancellation generation at the start of this Run.
+	// Any Cancel() call during this Run will bump it; we re-read at
+	// each auto-resume checkpoint and bail out if it advanced.
+	startCancelGen, _ := a.cancelGen.Get(call.SessionID)
+
 	// Copy mutable fields under lock to avoid races with SetTools/SetModels.
 	agentTools := a.tools.Copy()
-	largeModel := a.largeModel.Get()
+	primaryModel := a.primaryModel.Get()
 	systemPrompt := a.systemPrompt.Get()
 	promptPrefix := a.systemPromptPrefix.Get()
 	var instructions strings.Builder
@@ -210,7 +225,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	}
 
 	agent := fantasy.NewAgent(
-		largeModel.Model,
+		primaryModel.Model,
 		fantasy.WithSystemPrompt(systemPrompt),
 		fantasy.WithTools(agentTools...),
 		fantasy.WithUserAgent(userAgent),
@@ -228,14 +243,23 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	}
 
 	var wg sync.WaitGroup
-	// Generate title if first message.
-	if len(msgs) == 0 {
+	// Generate title if first message and the caller is interactive.
+	if len(msgs) == 0 && !call.NonInteractive {
 		titleCtx := ctx // Copy to avoid race with ctx reassignment below.
 		wg.Go(func() {
 			a.generateTitle(titleCtx, call.SessionID, call.Prompt)
 		})
 	}
 	defer wg.Wait()
+
+	// L2: If the previous brain turn was cancelled by the user, prepend an
+	// interrupt marker so brain.md.tpl's <interruption_handling> rule
+	// activates and brain re-evaluates the plan instead of silently
+	// resuming. Only applies at the top-level (non sub-agent) — sub-agents
+	// are invoked via tool calls, not user ESC.
+	if !a.isSubAgent && wasPreviousTurnCancelled(msgs) {
+		call.Prompt = interruptMarker + "\n\n" + call.Prompt
+	}
 
 	// Add the user message to the session.
 	_, err = a.createUserMessage(ctx, call)
@@ -246,6 +270,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Add the session to the context.
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
 	ctx = tools.WithTraceContext(ctx, call.TraceRuntime, call.TaskNodeID, call.TaskParentID, call.TaskProfile, call.ProviderID, call.ProviderType, call.ModelID)
+
+	// Establish a turn-level trace id that threads through every observability
+	// surface (slog, provider HTTP dumps, IPC dumps). session_id is the join
+	// key back to the DAG trace JSONL, which already records it.
+	traceID := uuid.NewString()
+	ctx = crushlog.WithTraceID(ctx, traceID)
+	ctx = crushlog.WithSessionID(ctx, call.SessionID)
+	slog.DebugContext(ctx, "Agent run started", "sub_agent", a.isSubAgent)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	a.activeRequests.Set(call.SessionID, cancel)
@@ -262,7 +294,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 	}()
 
-	history, files := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, largeModel.ProviderType, call.Attachments...)
+	history, files := a.preparePrompt(msgs, primaryModel.CatwalkCfg.SupportsImages, primaryModel.ProviderType, call.Attachments...)
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		roles := make([]string, 0, len(history))
 		emptyCount := 0
@@ -281,7 +313,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			"empty_messages", emptyCount,
 			"file_parts", len(files),
 			"sub_agent", a.isSubAgent,
-			"supports_images", largeModel.CatwalkCfg.SupportsImages,
+			"supports_images", primaryModel.CatwalkCfg.SupportsImages,
 		)
 	}
 
@@ -325,7 +357,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
 			}
 
-			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel.ProviderType)
+			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, primaryModel.ProviderType)
 
 			lastSystemRoleInx := 0
 			systemMessageUpdated := false
@@ -351,15 +383,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			assistantMsg, err = a.messages.Create(callContext, call.SessionID, message.CreateMessageParams{
 				Role:     message.Assistant,
 				Parts:    []message.ContentPart{},
-				Model:    largeModel.ModelCfg.Model,
-				Provider: largeModel.ModelCfg.Provider,
+				Model:    primaryModel.ModelCfg.Model,
+				Provider: primaryModel.ModelCfg.Provider,
 			})
 			if err != nil {
 				return callContext, prepared, err
 			}
 			callContext = context.WithValue(callContext, tools.MessageIDContextKey, assistantMsg.ID)
-			callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, largeModel.CatwalkCfg.SupportsImages)
-			callContext = context.WithValue(callContext, tools.ModelNameContextKey, largeModel.CatwalkCfg.Name)
+			callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, primaryModel.CatwalkCfg.SupportsImages)
+			callContext = context.WithValue(callContext, tools.ModelNameContextKey, primaryModel.CatwalkCfg.Name)
 			currentAssistant = &assistantMsg
 			return callContext, prepared, err
 		},
@@ -425,6 +457,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				ProviderExecuted: false,
 				Finished:         true,
 			}
+			// Gemini 3 (antigravity) attaches a thought_signature to each
+			// functionCall and rejects replayed tool-call history that lacks
+			// it. Persist it so the next turn can round-trip it.
+			if po := antigravity.GetProviderOptions(fantasy.ProviderOptions(tc.ProviderMetadata)); po != nil {
+				toolCall.ThoughtSignature = po.ThoughtSignature
+			}
 			currentAssistant.AddToolCall(toolCall)
 			// Use parent ctx instead of genCtx to ensure the update succeeds
 			// even if the request is canceled mid-stream
@@ -464,7 +502,23 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					}
 				}
 			}
-			currentAssistant.AddFinish(finishReason, "", "")
+			// A reasoning model can return finish_reason=length having spent
+			// its whole output budget on reasoning, emitting no text and no
+			// tool call. Without this guard the turn ends "successfully" with
+			// an empty footer, so the user keeps prompting into a dead end
+			// (typically a context window that is full but mis-declared larger
+			// than it really is). Surface it as an explicit error instead.
+			if finishReason == message.FinishReasonMaxTokens &&
+				stepResult.Content.Text() == "" &&
+				len(stepResult.Content.ToolCalls()) == 0 {
+				currentAssistant.AddFinish(
+					message.FinishReasonError,
+					"Response truncated before any output",
+					"The model hit its output-token limit while reasoning and produced no text or tool call. The context window is likely full — run /compact or start a new session, and verify the provider's context_window matches the backend's real limit.",
+				)
+			} else {
+				currentAssistant.AddFinish(finishReason, "", "")
+			}
 			sessionLock.Lock()
 			defer sessionLock.Unlock()
 
@@ -472,7 +526,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			if getSessionErr != nil {
 				return getSessionErr
 			}
-			a.updateSessionUsage(largeModel, &updatedSession, stepResult.Usage, a.openrouterCost(stepResult.ProviderMetadata))
+			a.updateSessionUsage(primaryModel, &updatedSession, stepResult.Usage, a.openrouterCost(stepResult.ProviderMetadata))
 			_, sessionErr := a.sessions.Save(ctx, updatedSession)
 			if sessionErr != nil {
 				return sessionErr
@@ -482,7 +536,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		},
 		StopWhen: []fantasy.StopCondition{
 			func(_ []fantasy.StepResult) bool {
-				cw := int64(largeModel.CatwalkCfg.ContextWindow)
+				cw := int64(primaryModel.CatwalkCfg.ContextWindow)
 				// If context window is unknown (0), skip auto-summarize
 				// to avoid immediately truncating custom/local models.
 				if cw == 0 {
@@ -490,12 +544,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				}
 				tokens := currentSession.CompletionTokens + currentSession.PromptTokens
 				remaining := cw - tokens
-				var threshold int64
-				if cw > largeContextWindowThreshold {
-					threshold = largeContextWindowBuffer
-				} else {
-					threshold = int64(float64(cw) * smallContextWindowRatio)
-				}
+				threshold := int64(float64(cw) * autoSummarizeRemainingRatio)
 				if (remaining <= threshold) && !a.disableAutoSummarize {
 					shouldSummarize = true
 					return true
@@ -511,7 +560,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	a.eventPromptResponded(call.SessionID, time.Since(startTime).Truncate(time.Second))
 
 	if err != nil {
-		isHyper := largeModel.ModelCfg.Provider == hyper.Name
+		isHyper := primaryModel.ModelCfg.Provider == hyper.Name
 		isCancelErr := errors.Is(err, context.Canceled)
 		if currentAssistant == nil {
 			return result, err
@@ -585,7 +634,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					SessionID:    call.SessionID,
 					SessionTitle: currentSession.Title,
 					Type:         notify.TypeReAuthenticate,
-					ProviderID:   largeModel.ModelCfg.Provider,
+					ProviderID:   primaryModel.ModelCfg.Provider,
 				})
 			}
 		} else if isHyper && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusPaymentRequired {
@@ -599,7 +648,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				currentAssistant.AddFinish(
 					message.FinishReasonError,
 					"Copilot model not enabled",
-					fmt.Sprintf("%q is not enabled in Copilot. Go to the following page to enable it. Then, wait 5 minutes before trying again. %s", largeModel.CatwalkCfg.Name, link),
+					fmt.Sprintf("%q is not enabled in Copilot. Go to the following page to enable it. Then, wait 5 minutes before trying again. %s", primaryModel.CatwalkCfg.Name, link),
 				)
 			} else {
 				currentAssistant.AddFinish(message.FinishReasonError, cmp.Or(stringext.Capitalize(providerErr.Title), defaultTitle), providerErr.Message)
@@ -625,13 +674,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 		// If the agent wasn't done...
 		if len(currentAssistant.ToolCalls()) > 0 {
-			existing, ok := a.messageQueue.Get(call.SessionID)
-			if !ok {
-				existing = []SessionAgentCall{}
+			// Skip the re-queue if the user cancelled during this run —
+			// the "previous session was interrupted because it got too
+			// long" follow-up shouldn't fire when the actual interrupt
+			// was a user ESC, not a context overflow.
+			if curGen, _ := a.cancelGen.Get(call.SessionID); curGen == startCancelGen {
+				existing, ok := a.messageQueue.Get(call.SessionID)
+				if !ok {
+					existing = []SessionAgentCall{}
+				}
+				call.Prompt = fmt.Sprintf("The previous session was interrupted because it got too long, the initial user request was: `%s`", call.Prompt)
+				existing = append(existing, call)
+				a.messageQueue.Set(call.SessionID, existing)
 			}
-			call.Prompt = fmt.Sprintf("The previous session was interrupted because it got too long, the initial user request was: `%s`", call.Prompt)
-			existing = append(existing, call)
-			a.messageQueue.Set(call.SessionID, existing)
 		}
 	}
 
@@ -652,6 +707,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		})
 	}
 
+	// User-cancellation gate: if Cancel was called at any point during
+	// this Run, the cancel generation is now ahead of the snapshot. In
+	// that case ESC means "stop everything" — drop any queued prompts
+	// and return without spawning a follow-up Run. Without this gate
+	// a prompt that landed in the queue moments before ESC would
+	// silently auto-execute and surface as a fresh "Working..."
+	// spinner right after "Canceled".
+	if curGen, _ := a.cancelGen.Get(call.SessionID); curGen != startCancelGen {
+		a.messageQueue.Del(call.SessionID)
+		return result, err
+	}
+
 	queuedMessages, ok := a.messageQueue.Get(call.SessionID)
 	if !ok || len(queuedMessages) == 0 {
 		return result, err
@@ -667,8 +734,14 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return ErrSessionBusy
 	}
 
+	// Snapshot cancel generation. A Cancel during summarize must
+	// block the post-summarize queue drain (line ~838) for the same
+	// reason as the post-Run drain — ESC means stop, not "stop this
+	// step then start the next queued prompt".
+	startCancelGen, _ := a.cancelGen.Get(sessionID)
+
 	// Copy mutable fields under lock to avoid races with SetModels.
-	largeModel := a.largeModel.Get()
+	primaryModel := a.primaryModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
 	currentSession, err := a.sessions.Get(ctx, sessionID)
@@ -684,7 +757,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
-	aiMsgs, _ := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages, largeModel.ProviderType)
+	aiMsgs, _ := a.preparePrompt(msgs, primaryModel.CatwalkCfg.SupportsImages, primaryModel.ProviderType)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	a.activeRequests.Set(sessionID, cancel)
@@ -697,14 +770,14 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	}()
 
 	agent := fantasy.NewAgent(
-		largeModel.Model,
+		primaryModel.Model,
 		fantasy.WithSystemPrompt(string(summaryPrompt)),
 		fantasy.WithUserAgent(userAgent),
 	)
 	summaryMessage, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
 		Role:             message.Assistant,
-		Model:            largeModel.Model.Model(),
-		Provider:         largeModel.Model.Provider(),
+		Model:            primaryModel.Model.Model(),
+		Provider:         primaryModel.Model.Provider(),
 		IsSummaryMessage: true,
 	})
 	if err != nil {
@@ -777,7 +850,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		}
 	}
 
-	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost)
+	a.updateSessionUsage(primaryModel, &currentSession, resp.TotalUsage, openrouterCost)
 
 	// Just in case, get just the last usage info.
 	usage := resp.Response.Usage
@@ -793,6 +866,12 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	// Run() does not see the session as busy.
 	a.activeRequests.Del(sessionID)
 	cancel()
+
+	// User-cancellation gate (same semantics as in Run).
+	if curGen, _ := a.cancelGen.Get(sessionID); curGen != startCancelGen {
+		a.messageQueue.Del(sessionID)
+		return nil
+	}
 
 	// Process any messages that were queued while summarizing.
 	queuedMessages, ok := a.messageQueue.Get(sessionID)
@@ -820,6 +899,22 @@ func (a *sessionAgent) getCacheControlOptions() fantasy.ProviderOptions {
 			CacheControl: anthropic.CacheControl{Type: "ephemeral"},
 		},
 	}
+}
+
+const interruptMarker = "[Previous turn was interrupted by user — re-evaluate before continuing]"
+
+// wasPreviousTurnCancelled reports whether the most recent assistant
+// message in msgs finished with FinishReasonCanceled. Used by L2 to
+// signal brain that the user pressed ESC before sending this message.
+func wasPreviousTurnCancelled(msgs []message.Message) bool {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Role != message.Assistant {
+			continue
+		}
+		return m.FinishReason() == message.FinishReasonCanceled
+	}
+	return false
 }
 
 func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentCall) (message.Message, error) {
@@ -1048,13 +1143,13 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		return
 	}
 
-	smallModel := a.smallModel.Get()
-	largeModel := a.largeModel.Get()
+	titleModel := a.titleModel.Get()
+	primaryModel := a.primaryModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
 	var maxOutputTokens int64 = 40
-	if smallModel.CatwalkCfg.CanReason {
-		maxOutputTokens = smallModel.CatwalkCfg.DefaultMaxTokens
+	if titleModel.CatwalkCfg.CanReason {
+		maxOutputTokens = titleModel.CatwalkCfg.DefaultMaxTokens
 	}
 
 	newAgent := func(m fantasy.LanguageModel, p []byte, tok int64) fantasy.Agent {
@@ -1079,25 +1174,23 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		},
 	}
 
-	// Use the small model to generate the title.
-	model := smallModel
+	// Use the title model first because title generation is utility work.
+	model := titleModel
 	agent := newAgent(model.Model, titlePrompt, maxOutputTokens)
 	resp, err := agent.Stream(ctx, streamCall)
 	if err == nil {
-		// We successfully generated a title with the small model.
-		slog.Debug("Generated title with small model")
+		slog.Debug("Generated title with title model")
 	} else {
-		// It didn't work. Let's try with the big model.
-		slog.Error("Error generating title with small model; trying big model", "err", err)
-		model = largeModel
+		slog.Error("Error generating title with title model; trying primary model", "err", err)
+		model = primaryModel
 		agent = newAgent(model.Model, titlePrompt, maxOutputTokens)
 		resp, err = agent.Stream(ctx, streamCall)
 		if err == nil {
-			slog.Debug("Generated title with large model")
+			slog.Debug("Generated title with primary model")
 		} else {
-			// Welp, the large model didn't work either. Use the default
+			// The primary model did not work either. Use the default
 			// session name and return.
-			slog.Error("Error generating title with large model", "err", err)
+			slog.Error("Error generating title with primary model", "err", err)
 			saveErr := a.sessions.Rename(ctx, sessionID, DefaultSessionName)
 			if saveErr != nil {
 				slog.Error("Failed to save session title", "error", saveErr)
@@ -1207,6 +1300,15 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 }
 
 func (a *sessionAgent) Cancel(sessionID string) {
+	// Bump the cancel generation BEFORE cancelling the ctx. The Run
+	// goroutine compares against the snapshot it captured at start; if
+	// it sees an advanced value at any auto-resume checkpoint
+	// (post-Stream queue drain, post-Summarize queue drain) it bails
+	// out. Bumping first closes the race where the goroutine unwinds
+	// and dequeues a follow-up prompt before we get to increment.
+	prev, _ := a.cancelGen.Get(sessionID)
+	a.cancelGen.Set(sessionID, prev+1)
+
 	// Cancel regular requests. Don't use Take() here - we need the entry to
 	// remain in activeRequests so IsBusy() returns true until the goroutine
 	// fully completes (including error handling that may access the DB).
@@ -1290,9 +1392,9 @@ func (a *sessionAgent) QueuedPromptsList(sessionID string) []string {
 	return prompts
 }
 
-func (a *sessionAgent) SetModels(large Model, small Model) {
-	a.largeModel.Set(large)
-	a.smallModel.Set(small)
+func (a *sessionAgent) SetModels(primary Model, title Model) {
+	a.primaryModel.Set(primary)
+	a.titleModel.Set(title)
 }
 
 func (a *sessionAgent) SetTools(tools []fantasy.AgentTool) {
@@ -1304,10 +1406,31 @@ func (a *sessionAgent) SetSystemPrompt(systemPrompt string) {
 }
 
 func (a *sessionAgent) Model() Model {
-	return a.largeModel.Get()
+	return a.primaryModel.Get()
 }
 
 // convertToToolResult converts a fantasy tool result to a message tool result.
+// maxToolResultLength caps the characters of any single tool result that
+// reaches the model. Auto-summarize is reactive (checked between steps, see
+// StopWhen), so a single oversized result — a huge file View, MCP/ptc payload —
+// could otherwise leap the context window past its limit in one step before the
+// next summarize check runs. ~120k chars ≈ 30k tokens, generous for legitimate
+// reads while bounding the worst case to a fraction of the window. Tools with
+// their own caps (bash at MaxOutputLength) arrive well under this.
+const maxToolResultLength = 120_000
+
+// truncateToolResultContent keeps the head and tail and drops the middle, with
+// an explicit marker so the model knows output was clipped.
+func truncateToolResultContent(content string) string {
+	if len(content) <= maxToolResultLength {
+		return content
+	}
+	half := maxToolResultLength / 2
+	omitted := len(content) - 2*half
+	return fmt.Sprintf("%s\n\n... [%d characters truncated to protect the context window] ...\n\n%s",
+		content[:half], omitted, content[len(content)-half:])
+}
+
 func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) message.ToolResult {
 	baseResult := message.ToolResult{
 		ToolCallID: result.ToolCallID,
@@ -1346,6 +1469,11 @@ func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) mes
 			}
 		}
 	}
+
+	// Bound any single result so one oversized payload can't blow the context
+	// window in a step. Media Data (base64) lives in baseResult.Data, not
+	// Content, so image bytes are unaffected.
+	baseResult.Content = truncateToolResultContent(baseResult.Content)
 
 	return baseResult
 }

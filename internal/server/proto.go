@@ -205,6 +205,13 @@ func (c *controllerV1) handleGetWorkspaceEvents(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Bracket this stream's lifetime as one connected client. When the last
+	// client of a workspace disconnects, the backend reaps that workspace's
+	// in-flight agent runs and background jobs (see Backend.ClientDisconnected)
+	// so nothing orphans after the TUI/mobile client goes away.
+	c.backend.ClientConnected(id)
+	defer c.backend.ClientDisconnected(id)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -835,9 +842,9 @@ func (c *controllerV1) handleGetWorkspaceAgentSessionPromptList(w http.ResponseW
 	jsonEncode(w, prompts)
 }
 
-// handleGetWorkspaceAgentDefaultSmallModel returns the default small model for a provider.
+// handleGetWorkspaceAgentDefaultExploreModel returns the default explore model for a provider.
 //
-//	@Summary		Get default small model
+//	@Summary		Get default explore model
 //	@Tags			agent
 //	@Produce		json
 //	@Param			id			path		string	true	"Workspace ID"
@@ -845,11 +852,11 @@ func (c *controllerV1) handleGetWorkspaceAgentSessionPromptList(w http.ResponseW
 //	@Success		200			{object}	object
 //	@Failure		404			{object}	proto.Error
 //	@Failure		500			{object}	proto.Error
-//	@Router			/workspaces/{id}/agent/default-small-model [get]
-func (c *controllerV1) handleGetWorkspaceAgentDefaultSmallModel(w http.ResponseWriter, r *http.Request) {
+//	@Router			/workspaces/{id}/agent/default-explore-model [get]
+func (c *controllerV1) handleGetWorkspaceAgentDefaultExploreModel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	providerID := r.URL.Query().Get("provider_id")
-	model, err := c.backend.GetDefaultSmallModel(id, providerID)
+	model, err := c.backend.GetDefaultExploreModel(id, providerID)
 	if err != nil {
 		c.handleError(w, r, err)
 		return

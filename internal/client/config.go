@@ -12,12 +12,11 @@ import (
 )
 
 // SetConfigField sets a config key/value pair on the server.
-func (c *Client) SetConfigField(ctx context.Context, id string, scope config.Scope, key string, value any) error {
+func (c *Client) SetConfigField(ctx context.Context, id string, key string, value any) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/config/set", id), nil, jsonBody(struct {
-		Scope config.Scope `json:"scope"`
-		Key   string       `json:"key"`
-		Value any          `json:"value"`
-	}{Scope: scope, Key: key, Value: value}), http.Header{"Content-Type": []string{"application/json"}})
+		Key   string `json:"key"`
+		Value any    `json:"value"`
+	}{Key: key, Value: value}), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return fmt.Errorf("failed to set config field: %w", err)
 	}
@@ -29,11 +28,10 @@ func (c *Client) SetConfigField(ctx context.Context, id string, scope config.Sco
 }
 
 // RemoveConfigField removes a config key on the server.
-func (c *Client) RemoveConfigField(ctx context.Context, id string, scope config.Scope, key string) error {
+func (c *Client) RemoveConfigField(ctx context.Context, id string, key string) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/config/remove", id), nil, jsonBody(struct {
-		Scope config.Scope `json:"scope"`
-		Key   string       `json:"key"`
-	}{Scope: scope, Key: key}), http.Header{"Content-Type": []string{"application/json"}})
+		Key string `json:"key"`
+	}{Key: key}), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return fmt.Errorf("failed to remove config field: %w", err)
 	}
@@ -45,12 +43,11 @@ func (c *Client) RemoveConfigField(ctx context.Context, id string, scope config.
 }
 
 // UpdatePreferredModel updates the preferred model on the server.
-func (c *Client) UpdatePreferredModel(ctx context.Context, id string, scope config.Scope, modelType config.SelectedModelType, model config.SelectedModel) error {
+func (c *Client) UpdatePreferredModel(ctx context.Context, id string, modelType config.SelectedModelType, model config.SelectedModel) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/config/model", id), nil, jsonBody(struct {
-		Scope     config.Scope             `json:"scope"`
 		ModelType config.SelectedModelType `json:"model_type"`
 		Model     config.SelectedModel     `json:"model"`
-	}{Scope: scope, ModelType: modelType, Model: model}), http.Header{"Content-Type": []string{"application/json"}})
+	}{ModelType: modelType, Model: model}), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return fmt.Errorf("failed to update preferred model: %w", err)
 	}
@@ -62,11 +59,10 @@ func (c *Client) UpdatePreferredModel(ctx context.Context, id string, scope conf
 }
 
 // SetCompactMode sets compact mode on the server.
-func (c *Client) SetCompactMode(ctx context.Context, id string, scope config.Scope, enabled bool) error {
+func (c *Client) SetCompactMode(ctx context.Context, id string, enabled bool) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/config/compact", id), nil, jsonBody(struct {
-		Scope   config.Scope `json:"scope"`
-		Enabled bool         `json:"enabled"`
-	}{Scope: scope, Enabled: enabled}), http.Header{"Content-Type": []string{"application/json"}})
+		Enabled bool `json:"enabled"`
+	}{Enabled: enabled}), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return fmt.Errorf("failed to set compact mode: %w", err)
 	}
@@ -81,7 +77,7 @@ func (c *Client) SetCompactMode(ctx context.Context, id string, scope config.Sco
 // format tags the credential with an explicit Kind so the server can
 // decode it back into the right Go type — JSON's `any` loses that
 // information across the socket.
-func (c *Client) SetProviderAPIKey(ctx context.Context, id string, scope config.Scope, providerID string, apiKey any) error {
+func (c *Client) SetProviderAPIKey(ctx context.Context, id string, providerID string, apiKey any) error {
 	var (
 		kind proto.APIKeyKind
 		raw  json.RawMessage
@@ -109,7 +105,6 @@ func (c *Client) SetProviderAPIKey(ctx context.Context, id string, scope config.
 	}
 
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/config/provider-key", id), nil, jsonBody(proto.ConfigProviderKeyRequest{
-		Scope:      scope,
 		ProviderID: providerID,
 		Kind:       kind,
 		APIKey:     raw,
@@ -147,11 +142,10 @@ func (c *Client) ImportCopilot(ctx context.Context, id string) (*oauth.Token, bo
 
 // RefreshOAuthToken refreshes an OAuth token for a provider on the
 // server.
-func (c *Client) RefreshOAuthToken(ctx context.Context, id string, scope config.Scope, providerID string) error {
+func (c *Client) RefreshOAuthToken(ctx context.Context, id string, providerID string) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/config/refresh-oauth", id), nil, jsonBody(struct {
-		Scope      config.Scope `json:"scope"`
-		ProviderID string       `json:"provider_id"`
-	}{Scope: scope, ProviderID: providerID}), http.Header{"Content-Type": []string{"application/json"}})
+		ProviderID string `json:"provider_id"`
+	}{ProviderID: providerID}), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return fmt.Errorf("failed to refresh OAuth token: %w", err)
 	}

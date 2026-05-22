@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/scheduler"
 )
 
 //go:embed templates/agentic_fetch.md
@@ -158,9 +159,9 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				return fantasy.ToolResponse{}, fmt.Errorf("error building system prompt: %s", err)
 			}
 
-			smallProviderCfg, ok := c.cfg.Config().Providers.Get(explore.ModelCfg.Provider)
+			exploreProviderCfg, ok := c.cfg.Config().Providers.Get(explore.ModelCfg.Provider)
 			if !ok {
-				return fantasy.ToolResponse{}, errors.New("small model provider not configured")
+				return fantasy.ToolResponse{}, errors.New("explore model provider not configured")
 			}
 
 			webFetchTool := tools.NewWebFetchTool(tmpDir, client)
@@ -175,14 +176,14 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 			}
 
 			// Sub-agent tools run without hook interception. The top-level
-			// `agentic_fetch` call itself is already wrapped from the coder's
+			// `agentic_fetch` call itself is already wrapped from the worker's
 			// side; firing hooks again for every inner tool call would run
 			// the user's hooks N times per delegated turn.
 
 			agent := NewSessionAgent(SessionAgentOptions{
-				LargeModel:           explore,
-				SmallModel:           explore,
-				SystemPromptPrefix:   smallProviderCfg.SystemPromptPrefix,
+				PrimaryModel:         explore,
+				TitleModel:           explore,
+				SystemPromptPrefix:   exploreProviderCfg.SystemPromptPrefix,
 				SystemPrompt:         systemPrompt,
 				DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
 				Sessions:             c.sessions,
@@ -196,6 +197,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 				AgentMessageID: validationResult.AgentMessageID,
 				ToolCallID:     call.ID,
 				Prompt:         fullPrompt,
+				Profile:        scheduler.ProfileExploreAgent,
 				SessionTitle:   "Fetch Analysis",
 				SessionSetup: func(sessionID string) {
 					c.permissions.AutoApproveSession(sessionID)

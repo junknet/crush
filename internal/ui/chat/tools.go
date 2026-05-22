@@ -17,7 +17,6 @@ import (
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/stringext"
-	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/list"
 	"github.com/charmbracelet/crush/internal/ui/styles"
@@ -93,7 +92,6 @@ func (d *DefaultToolRenderContext) RenderTool(sty *styles.Styles, width int, opt
 type ToolRenderOpts struct {
 	ToolCall        message.ToolCall
 	Result          *message.ToolResult
-	Anim            *anim.Anim
 	ExpandedContent bool
 	Compact         bool
 	IsSpinning      bool
@@ -156,7 +154,6 @@ type baseToolMessageItem struct {
 	spinningFunc SpinningFunc
 
 	sty             *styles.Styles
-	anim            *anim.Anim
 	expandedContent bool
 }
 
@@ -191,15 +188,6 @@ func newBaseToolMessageItem(
 		status:                   status,
 		hasCappedWidth:           hasCappedWidth,
 	}
-	t.anim = anim.New(anim.Settings{
-		ID:          toolCall.ID,
-		Size:        15,
-		GradColorA:  sty.WorkingGradFromColor,
-		GradColorB:  sty.WorkingGradToColor,
-		LabelColor:  sty.WorkingLabelColor,
-		CycleColors: true,
-	})
-
 	return t
 }
 
@@ -292,7 +280,9 @@ func (t *baseToolMessageItem) StartAnimation() tea.Cmd {
 	if !t.isSpinning() {
 		return nil
 	}
-	return t.anim.Start()
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return StepMsg{ID: t.toolCall.ID}
+	})
 }
 
 // Animate progresses the assistant message animation if it should be spinning.
@@ -304,7 +294,7 @@ func (t *baseToolMessageItem) StartAnimation() tea.Cmd {
 // rendered frame indefinitely and the spinner would appear frozen.
 // The ID gate keeps unrelated ticks (routed here by a future change
 // to chat.Animate's dispatch) from churning the cache.
-func (t *baseToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
+func (t *baseToolMessageItem) Animate(msg StepMsg) tea.Cmd {
 	if !t.isSpinning() {
 		return nil
 	}
@@ -312,7 +302,9 @@ func (t *baseToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
 		return nil
 	}
 	t.Bump()
-	return t.anim.Animate(msg)
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return StepMsg{ID: t.toolCall.ID}
+	})
 }
 
 // RawRender implements [MessageItem].
@@ -328,7 +320,6 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 		content = t.toolRenderer.RenderTool(t.sty, toolItemWidth, &ToolRenderOpts{
 			ToolCall:        t.toolCall,
 			Result:          t.result,
-			Anim:            t.anim,
 			ExpandedContent: t.expandedContent,
 			Compact:         t.isCompact,
 			IsSpinning:      t.isSpinning(),
@@ -501,7 +492,7 @@ func (t *baseToolMessageItem) HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd) {
 }
 
 // pendingTool renders a tool that is still in progress with an animation.
-func pendingTool(sty *styles.Styles, name string, anim *anim.Anim, nested bool) string {
+func pendingTool(sty *styles.Styles, name string, nested bool) string {
 	icon := sty.Tool.IconPending.Render()
 	nameStyle := sty.Tool.NameNormal
 	if nested {
@@ -509,10 +500,7 @@ func pendingTool(sty *styles.Styles, name string, anim *anim.Anim, nested bool) 
 	}
 	toolName := nameStyle.Render(name)
 
-	var animView string
-	if anim != nil {
-		animView = anim.Render()
-	}
+	animView := renderBrailleSpinner(sty, "")
 
 	return fmt.Sprintf("%s %s %s", icon, toolName, animView)
 }
@@ -594,6 +582,9 @@ func toolParamList(sty *styles.Styles, params []string, width int) string {
 
 	if width >= 0 {
 		output = ansi.Truncate(output, width, "…")
+	}
+	if target, ok := common.LinkTarget(ansi.Strip(output)); ok {
+		return common.TextLink(sty.Tool.ParamLink, output, target)
 	}
 	return sty.Tool.ParamMain.Render(output)
 }

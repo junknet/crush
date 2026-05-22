@@ -11,6 +11,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
+	"charm.land/fantasy/providers/antigravity"
 	"charm.land/fantasy/providers/google"
 	"charm.land/fantasy/providers/openai"
 	"github.com/charmbracelet/crush/internal/stringext"
@@ -104,6 +105,10 @@ type ToolCall struct {
 	Input            string `json:"input"`
 	ProviderExecuted bool   `json:"provider_executed"`
 	Finished         bool   `json:"finished"`
+	// ThoughtSignature carries the Gemini/antigravity functionCall thought
+	// signature so it can be replayed on the next turn. Gemini 3 rejects tool
+	// call history whose functionCall parts lack it (HTTP 400 INVALID_ARGUMENT).
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 func (ToolCall) isPart() {}
@@ -526,12 +531,18 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 			parts = append(parts, reasoningPart)
 		}
 		for _, call := range m.ToolCalls() {
-			parts = append(parts, fantasy.ToolCallPart{
+			toolCallPart := fantasy.ToolCallPart{
 				ToolCallID:       call.ID,
 				ToolName:         call.Name,
 				Input:            call.Input,
 				ProviderExecuted: call.ProviderExecuted,
-			})
+			}
+			if call.ThoughtSignature != "" {
+				toolCallPart.ProviderOptions = fantasy.ProviderOptions{
+					antigravity.Name: &antigravity.ProviderOptions{ThoughtSignature: call.ThoughtSignature},
+				}
+			}
+			parts = append(parts, toolCallPart)
 		}
 		messages = append(messages, fantasy.Message{
 			Role:    fantasy.MessageRoleAssistant,

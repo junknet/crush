@@ -8,25 +8,36 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 )
 
-//go:embed templates/coder.md.tpl
-var coderPromptTmpl []byte
+//go:embed templates/brain.md.tpl
+var brainPromptTmpl []byte
 
-//go:embed templates/task.md.tpl
-var taskPromptTmpl []byte
+//go:embed templates/worker.md.tpl
+var workerPromptTmpl []byte
+
+//go:embed templates/explore.md.tpl
+var explorePromptTmpl []byte
 
 //go:embed templates/initialize.md.tpl
 var initializePromptTmpl []byte
 
-func coderPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
-	systemPrompt, err := prompt.NewPrompt("coder", string(coderPromptTmpl), opts...)
+func brainPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
+	systemPrompt, err := prompt.NewPrompt("brain", string(brainPromptTmpl), opts...)
 	if err != nil {
 		return nil, err
 	}
 	return systemPrompt, nil
 }
 
-func taskPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
-	systemPrompt, err := prompt.NewPrompt("task", string(taskPromptTmpl), opts...)
+func workerPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
+	systemPrompt, err := prompt.NewPrompt("worker", string(workerPromptTmpl), opts...)
+	if err != nil {
+		return nil, err
+	}
+	return systemPrompt, nil
+}
+
+func explorePrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
+	systemPrompt, err := prompt.NewPrompt("explore", string(explorePromptTmpl), opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -35,10 +46,14 @@ func taskPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 
 func promptForAgentRole(role string, opts ...prompt.Option) (*prompt.Prompt, error) {
 	switch role {
+	case config.AgentBrain:
+		return brainPrompt(opts...)
+	case config.AgentWorker:
+		return workerPrompt(opts...)
 	case config.AgentExplore:
-		return taskPrompt(opts...)
+		return explorePrompt(opts...)
 	default:
-		return coderPrompt(opts...)
+		return brainPrompt(opts...)
 	}
 }
 

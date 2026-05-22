@@ -6,8 +6,10 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
+	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/charmbracelet/crush/internal/ui/common"
+	"github.com/charmbracelet/crush/internal/ui/dialog"
 )
 
 // testMessageItem is a minimal chat item used to populate the chat list
@@ -42,17 +44,43 @@ func newTestUI() *UI {
 	ta.Focus()
 
 	u := &UI{
-		com:      com,
-		status:   NewStatus(com, nil),
-		chat:     NewChat(com),
-		textarea: ta,
-		state:    uiChat,
-		focus:    uiFocusEditor,
-		width:    140,
-		height:   45,
+		com:         com,
+		status:      NewStatus(com, nil),
+		chat:        NewChat(com),
+		dialog:      dialog.NewOverlay(),
+		attachments: attachments.New(nil, attachments.Keymap{}),
+		textarea:    ta,
+		state:       uiChat,
+		focus:       uiFocusEditor,
+		width:       140,
+		height:      45,
 	}
 
 	return u
+}
+
+func TestTerminalEditorCursorAnchorsWhenChatFocused(t *testing.T) {
+	t.Parallel()
+
+	u := newTestUI()
+	u.focus = uiFocusMain
+	u.textarea.Blur()
+
+	u.updateLayoutAndSize()
+	cur := u.terminalEditorCursor()
+
+	if cur == nil {
+		t.Fatal("expected terminal cursor to remain anchored to editor")
+	}
+	if u.focus != uiFocusMain {
+		t.Fatal("expected keyboard focus to remain on chat")
+	}
+	if u.textarea.Focused() {
+		t.Fatal("expected textarea focus state to stay blurred")
+	}
+	if cur.Y < u.layout.editor.Min.Y || cur.Y >= u.layout.editor.Max.Y {
+		t.Fatalf("expected cursor inside editor: cursor y=%d editor=%v", cur.Y, u.layout.editor)
+	}
 }
 
 func TestUpdateLayoutAndSize_EditorGrowthShrinksChat(t *testing.T) {

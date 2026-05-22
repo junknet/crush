@@ -106,11 +106,9 @@ func writeModels(b *strings.Builder, cfg *config.ConfigStore) {
 		fmt.Fprintf(b, "default_agent = %s\n", c.DefaultAgent)
 	}
 	for _, typ := range []config.SelectedModelType{
-		config.SelectedModelTypeBuild,
-		config.SelectedModelTypeCoder,
+		config.SelectedModelTypeBrain,
+		config.SelectedModelTypeWorker,
 		config.SelectedModelTypeExplore,
-		config.SelectedModelTypeLarge,
-		config.SelectedModelTypeSmall,
 	} {
 		m, ok := c.Models[typ]
 		if !ok {
@@ -348,7 +346,7 @@ func writeSkills(b *strings.Builder, allSkills []*skills.Skill, activeSkills []*
 		return
 	}
 
-	// Build origin map from the pre-filter list.
+	// Brain origin map from the pre-filter list.
 	originMap := make(map[string]string, len(allSkills))
 	for _, s := range allSkills {
 		if s.Builtin {
