@@ -132,7 +132,7 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 	}
 
 	// Check if file already exists
-	if _, err := os.Stat(params.FilePath); err == nil {
+	if _, err := CtxStat(edit.ctx, params.FilePath); err == nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("file already exists: %s", params.FilePath)), nil
 	} else if !os.IsNotExist(err) {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to access file: %w", err)
@@ -140,7 +140,7 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 
 	// Create parent directories
 	dir := filepath.Dir(params.FilePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := CtxMkdirAll(edit.ctx, dir, 0o755); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories: %w", err)
 	}
 
@@ -200,7 +200,7 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 	}
 
 	// Write the file
-	err = os.WriteFile(params.FilePath, []byte(currentContent), 0o644)
+	err = CtxWriteFile(edit.ctx, params.FilePath, []byte(currentContent), 0o644)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
@@ -240,7 +240,7 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 
 func processMultiEditExistingFile(edit editContext, params MultiEditParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	// Validate file exists and is readable
-	fileInfo, err := os.Stat(params.FilePath)
+	fileInfo, err := CtxStat(edit.ctx, params.FilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", params.FilePath)), nil
@@ -275,7 +275,7 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 	}
 
 	// Read current file content
-	content, err := os.ReadFile(params.FilePath)
+	content, err := CtxReadFile(edit.ctx, params.FilePath)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -348,7 +348,7 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 	}
 
 	// Write the updated content
-	err = os.WriteFile(params.FilePath, []byte(currentContent), 0o644)
+	err = CtxWriteFile(edit.ctx, params.FilePath, []byte(currentContent), 0o644)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}

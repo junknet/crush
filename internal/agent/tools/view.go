@@ -1,13 +1,11 @@
 package tools
 
 import (
-	"bufio"
 	"context"
 	_ "embed"
 	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -155,7 +153,7 @@ func NewViewTool(
 			}
 
 			// Check if file exists
-			fileInfo, err := os.Stat(filePath)
+			fileInfo, err := CtxStat(ctx, filePath)
 			if err != nil {
 				if os.IsNotExist(err) {
 					// Try to offer suggestions for similarly named files
@@ -211,7 +209,7 @@ func NewViewTool(
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("This model (%s) does not support image data.", modelName)), nil
 				}
 
-				imageData, readErr := os.ReadFile(filePath)
+				imageData, readErr := CtxReadFile(ctx, filePath)
 				if readErr != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error reading image file: %w", readErr)
 				}
@@ -232,7 +230,7 @@ func NewViewTool(
 			if isSkillFile {
 				maxContentSize = 0
 			}
-			content, hasMore, err := readTextFile(filePath, params.Offset, params.Limit, maxContentSize)
+			content, hasMore, err := readTextFile(ctx, filePath, params.Offset, params.Limit, maxContentSize)
 			if err != nil {
 				var tooLarge contentTooLargeError
 				if errors.As(err, &tooLarge) {
@@ -304,41 +302,40 @@ func addLineNumbers(content string, startLine int) string {
 	return strings.Join(result, "\n")
 }
 
-func readTextFile(filePath string, offset, limit, maxContentSize int) (string, bool, error) {
-	file, err := os.Open(filePath)
+func readTextFile(ctx context.Context, filePath string, offset, limit, maxContentSize int) (string, bool, error) {
+	// Use the driver-aware read path so SSH workspaces fetch the file in
+	// a single SFTP round-trip instead of streaming line-by-line. For
+	// view's typical use (offset+limit slicing of a code file) the whole
+	// file is comparable in size to the slice anyway; for genuinely huge
+	// files the maxContentSize check below catches them.
+	data, err := CtxReadFile(ctx, filePath)
 	if err != nil {
 		return "", false, err
 	}
-	defer file.Close()
-
-	reader := bufio.NewReader(file)
-	skipped := 0
-	for skipped < offset {
-		_, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				return "", false, nil
-			}
-			return "", false, err
-		}
-		skipped++
+	all := strings.Split(string(data), "\n")
+	// Strip a trailing empty element from a final newline so line counts
+	// match the editor's notion of "lines in the file".
+	if len(all) > 0 && all[len(all)-1] == "" {
+		all = all[:len(all)-1]
 	}
+	if offset >= len(all) {
+		return "", false, nil
+	}
+	end := offset + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	slice := all[offset:end]
 
-	lines := make([]string, 0, min(limit, DefaultReadLimit))
+	lines := make([]string, 0, len(slice))
 	contentSize := 0
-
-	for len(lines) < limit {
-		lineText, err := reader.ReadString('\n')
-		if err != nil && err != io.EOF {
-			return "", false, err
-		}
-		lineText = strings.TrimSuffix(lineText, "\n")
+	for i, lineText := range slice {
 		lineText = strings.TrimSuffix(lineText, "\r")
 		if len(lineText) > MaxLineLength {
 			lineText = lineText[:MaxLineLength] + "..."
 		}
 		projectedSize := contentSize + len(lineText)
-		if len(lines) > 0 {
+		if i > 0 {
 			projectedSize++
 		}
 		if maxContentSize > 0 && projectedSize > maxContentSize {
@@ -346,18 +343,9 @@ func readTextFile(filePath string, offset, limit, maxContentSize int) (string, b
 		}
 		contentSize = projectedSize
 		lines = append(lines, lineText)
-		if err == io.EOF {
-			break
-		}
 	}
 
-	// Peek one more line only when we filled the limit.
-	hasMore := false
-	if len(lines) == limit {
-		lineText, peekErr := reader.ReadString('\n')
-		hasMore = len(lineText) > 0 || peekErr == nil
-	}
-
+	hasMore := end < len(all)
 	return strings.Join(lines, "\n"), hasMore, nil
 }
 

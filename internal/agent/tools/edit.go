@@ -109,7 +109,7 @@ func NewEditTool(
 }
 
 func createNewFile(edit editContext, filePath, content string, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := CtxStat(edit.ctx, filePath)
 	if err == nil {
 		if fileInfo.IsDir() {
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("path is a directory, not a file: %s", filePath)), nil
@@ -120,7 +120,7 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 	}
 
 	dir := filepath.Dir(filePath)
-	if err = os.MkdirAll(dir, 0o755); err != nil {
+	if err = CtxMkdirAll(edit.ctx, dir, 0o755); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories: %w", err)
 	}
 
@@ -157,7 +157,7 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 		return NewPermissionDeniedResponse(), nil
 	}
 
-	err = os.WriteFile(filePath, []byte(content), 0o644)
+	err = CtxWriteFile(edit.ctx, filePath, []byte(content), 0o644)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
@@ -190,7 +190,7 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 }
 
 func deleteContent(edit editContext, filePath, oldString string, replaceAll bool, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := CtxStat(edit.ctx, filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", filePath)), nil
@@ -222,7 +222,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 		), nil
 	}
 
-	content, err := os.ReadFile(filePath)
+	content, err := CtxReadFile(edit.ctx, filePath)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -292,7 +292,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 		newContent, _ = fsext.ToWindowsLineEndings(newContent)
 	}
 
-	err = os.WriteFile(filePath, []byte(newContent), 0o644)
+	err = CtxWriteFile(edit.ctx, filePath, []byte(newContent), 0o644)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
@@ -333,7 +333,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 }
 
 func replaceContent(edit editContext, filePath, oldString, newString string, replaceAll bool, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	fileInfo, err := os.Stat(filePath)
+	fileInfo, err := CtxStat(edit.ctx, filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fantasy.NewTextErrorResponse(fmt.Sprintf("file not found: %s", filePath)), nil
@@ -365,7 +365,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 		), nil
 	}
 
-	content, err := os.ReadFile(filePath)
+	content, err := CtxReadFile(edit.ctx, filePath)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -443,7 +443,7 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 		newContent, _ = fsext.ToWindowsLineEndings(newContent)
 	}
 
-	err = os.WriteFile(filePath, []byte(newContent), 0o644)
+	err = CtxWriteFile(edit.ctx, filePath, []byte(newContent), 0o644)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
 	}
