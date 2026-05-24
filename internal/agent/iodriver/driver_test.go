@@ -173,3 +173,27 @@ func TestFactory_LocalAndSSHStub(t *testing.T) {
 		t.Fatal("ssh stub should error before M3")
 	}
 }
+
+func TestURIRegistry(t *testing.T) {
+	t.Parallel()
+	r := NewURIRegistry()
+	if got := r.Get("s1"); got != "" {
+		t.Fatalf("empty registry should return empty, got %q", got)
+	}
+	r.Set("s1", "ssh://root@host/srv")
+	r.Set("s2", "local:/tmp")
+	if r.Get("s1") != "ssh://root@host/srv" {
+		t.Fatal("s1 missing after Set")
+	}
+	if r.Get("s2") != "local:/tmp" {
+		t.Fatal("s2 missing after Set")
+	}
+	if len(r.All()) != 2 {
+		t.Fatalf("All want 2, got %d", len(r.All()))
+	}
+	// Empty URI removes.
+	r.Set("s1", "")
+	if r.Get("s1") != "" {
+		t.Fatal("s1 not cleared after Set(\"\")")
+	}
+}
