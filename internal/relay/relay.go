@@ -19,9 +19,10 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/server"
+	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
 const (
@@ -121,7 +122,8 @@ func Run(ctx context.Context, p *tea.Program, a *app.App, store *config.ConfigSt
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 
-	go presenceLoop(runCtx, a, store, sessionID, kv)
+	trigger := make(chan struct{}, 1)
+	go presenceLoop(runCtx, a, store, sessionID, kv, trigger)
 	go commandLoop(runCtx, p, a, sessionID, nc, runCancel)
 
 	subject := "crush.sess." + sessionID + ".events"
@@ -135,7 +137,19 @@ func Run(ctx context.Context, p *tea.Program, a *app.App, store *config.ConfigSt
 			if !ok {
 				return
 			}
-			payload := server.WrapEvent(ev.Payload)
+			if notifyEv, ok := ev.Payload.(pubsub.Event[notify.Notification]); ok {
+				if notifyEv.Payload.SessionID == sessionID {
+					if notifyEv.Payload.Type == notify.TypeAgentStarted ||
+						notifyEv.Payload.Type == notify.TypeAgentFinished {
+						select {
+						case trigger <- struct{}{}:
+						default:
+						}
+					}
+				}
+			}
+
+			payload := wrapEvent(ev.Payload)
 			if payload == nil {
 				continue
 			}
@@ -156,7 +170,7 @@ func Run(ctx context.Context, p *tea.Program, a *app.App, store *config.ConfigSt
 	}
 }
 
-func presenceLoop(ctx context.Context, a *app.App, store *config.ConfigStore, sessionID string, kv jetstream.KeyValue) {
+func presenceLoop(ctx context.Context, a *app.App, store *config.ConfigStore, sessionID string, kv jetstream.KeyValue, trigger <-chan struct{}) {
 	tick := time.NewTicker(heartbeat)
 	defer tick.Stop()
 	put := func() {
@@ -205,6 +219,8 @@ func presenceLoop(ctx context.Context, a *app.App, store *config.ConfigStore, se
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			put()
+		case <-trigger:
 			put()
 		}
 	}

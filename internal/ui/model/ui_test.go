@@ -301,7 +301,7 @@ func TestMouseDragAtViewportEdgeAutoScrolls(t *testing.T) {
 	ui.chat.list.SetGap(0)
 	ui.chat.list.SetItems(items...)
 	ui.chat.SetSize(20, 3)
-	ui.chat.ScrollToBottom()
+	ui.chat.ForceScrollToBottom()
 	ui.state = uiChat
 	ui.focus = uiFocusMain
 	ui.layout.main = uv.Rect(0, 5, 20, 3)
@@ -334,7 +334,7 @@ func TestEscapeStopsMouseAutoScroll(t *testing.T) {
 	ui.chat.list.SetGap(0)
 	ui.chat.list.SetItems(items...)
 	ui.chat.SetSize(20, 3)
-	ui.chat.ScrollToBottom()
+	ui.chat.ForceScrollToBottom()
 	ui.state = uiChat
 	ui.focus = uiFocusMain
 	ui.layout.main = uv.Rect(0, 5, 20, 3)

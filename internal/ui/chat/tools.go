@@ -586,6 +586,13 @@ func toolParamList(sty *styles.Styles, params []string, width int) string {
 	if target, ok := common.LinkTarget(ansi.Strip(output)); ok {
 		return common.TextLink(sty.Tool.ParamLink, output, target)
 	}
+	// If the caller already embedded SGR escapes (e.g. todos.go renders the
+	// ratio with TodoRatio), do not re-render with ParamMain — lipgloss
+	// would wrap the styled string in another reset and the inner SGR
+	// leaks as visible text. Pass styled strings through untouched.
+	if ansi.Strip(output) != output {
+		return output
+	}
 	return sty.Tool.ParamMain.Render(output)
 }
 

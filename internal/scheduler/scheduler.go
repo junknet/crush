@@ -169,20 +169,58 @@ func (s *AgentScheduler) dispatchNode(ctx context.Context, node *TaskNode, worke
 
 	intent := node.ToRequestIntent()
 	var err error
-	for attempt := 0; attempt <= max(node.MaxRetries, 0); attempt++ {
+	maxAttempts := max(node.MaxRetries, 0)
+	const retryBudget = 10 * time.Minute
+	start := time.Now()
+	for attempt := 0; attempt <= maxAttempts; attempt++ {
 		node.RetryCount = attempt
 		node.LastOutput, err = worker.RunTask(ctx, node, intent)
 		if err == nil {
 			s.publishFinished(node, true, "", node.LastOutput)
 			return nil
 		}
-		if attempt < max(node.MaxRetries, 0) {
-			s.publishProgress(node, fmt.Sprintf("retrying after error: %v", err))
-			continue
+		if ctx.Err() != nil {
+			break
+		}
+		if attempt >= maxAttempts {
+			break
+		}
+		delay := retryBackoff(attempt)
+		elapsed := time.Since(start)
+		if elapsed+delay > retryBudget {
+			s.publishProgress(node, fmt.Sprintf("Retry budget %s exhausted after %d attempts: %v", retryBudget, attempt+1, err))
+			break
+		}
+		s.publishProgress(node, fmt.Sprintf("Retrying in %s after error (attempt %d/%d, %s elapsed): %v", delay, attempt+1, maxAttempts, elapsed.Truncate(time.Second), err))
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+			s.publishFailed(node, err)
+			return err
+		case <-time.After(delay):
 		}
 	}
 	s.publishFailed(node, err)
 	return err
+}
+
+// retryBackoff returns the wait duration before the (attempt+1)-th retry.
+// Exponential schedule capped at 30s: 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
+func retryBackoff(attempt int) time.Duration {
+	const base = time.Second
+	const cap = 30 * time.Second
+	if attempt < 0 {
+		attempt = 0
+	}
+	shift := attempt
+	if shift > 5 {
+		shift = 5
+	}
+	d := base << shift
+	if d > cap {
+		d = cap
+	}
+	return d
 }
 
 func (s *AgentScheduler) dispatchChildren(ctx context.Context, parent *TaskNode, worker Worker) error {

@@ -380,10 +380,23 @@ func (m *Chat) Follow() bool {
 	return m.follow
 }
 
-// ScrollToBottom scrolls the chat view to the bottom.
+// ScrollToBottom scrolls the chat view to the bottom only when follow mode
+// is enabled (sticky-bottom semantics). LLM streaming updates and other
+// "passive" callers go through this so they cannot yank the viewport away
+// from a user who has scrolled up. Use ForceScrollToBottom for explicit
+// user actions (keyboard End / message submit / "jump to bottom").
 func (m *Chat) ScrollToBottom() {
+	if !m.follow {
+		return
+	}
 	m.list.ScrollToBottom()
-	m.follow = true // Enable follow mode when user scrolls to bottom
+}
+
+// ForceScrollToBottom unconditionally scrolls the chat view to the bottom
+// and re-enables follow mode. Use for explicit user actions only.
+func (m *Chat) ForceScrollToBottom() {
+	m.list.ScrollToBottom()
+	m.follow = true
 }
 
 // ScrollToTop scrolls the chat view to the top.
@@ -421,6 +434,15 @@ func (m *Chat) ScrollToTopAndAnimate() tea.Cmd {
 // restart any paused animations that are now visible.
 func (m *Chat) ScrollToBottomAndAnimate() tea.Cmd {
 	m.ScrollToBottom()
+	return m.RestartPausedVisibleAnimations()
+}
+
+// ForceScrollToBottomAndAnimate is the explicit-user-action variant: it
+// re-enables follow mode and jumps to the bottom regardless of where the
+// user previously scrolled. Use only for keyboard End / submit / new session
+// flows.
+func (m *Chat) ForceScrollToBottomAndAnimate() tea.Cmd {
+	m.ForceScrollToBottom()
 	return m.RestartPausedVisibleAnimations()
 }
 

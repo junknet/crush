@@ -2055,7 +2055,7 @@ func (c *coordinator) ensureRootTask(taskScheduler *scheduler.AgentScheduler, se
 		return nil
 	}
 	node.Kind, node.Mode = taskKindAndModeForProfile(profile)
-	node.MaxRetries = 0
+	node.MaxRetries = 10
 	node.Intent.BudgetTokens = int(maxTokens)
 	return node
 }
@@ -2074,7 +2074,7 @@ func (c *coordinator) ensureChildTask(taskScheduler *scheduler.AgentScheduler, p
 		return nil
 	}
 	node.Kind, node.Mode = taskKindAndModeForProfile(profile)
-	node.MaxRetries = 0
+	node.MaxRetries = 10
 	node.Intent.BudgetTokens = int(maxTokens)
 	return node
 }

@@ -676,6 +676,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	if err != nil {
 		isHyper := primaryModel.ModelCfg.Provider == hyper.Name
 		isCancelErr := errors.Is(err, context.Canceled)
+		isContextOverflow := isContextLengthExceeded(err)
 		if currentAssistant == nil {
 			return result, err
 		}
@@ -739,9 +740,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		var providerErr *fantasy.ProviderError
 		const defaultTitle = "Provider Error"
 		linkStyle := lipgloss.NewStyle().Foreground(charmtone.Guac).Underline(true)
-		if isCancelErr {
+		switch {
+		case isCancelErr:
 			currentAssistant.AddFinish(message.FinishReasonCanceled, "User canceled request", "")
-		} else if isHyper && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized {
+		case isContextOverflow:
+			// Provider reported the input exceeded the model's context
+			// window. Don't treat this as a hard failure: trigger an
+			// automatic summarize (Phase below at line ~784) and re-queue
+			// the original prompt so the run transparently retries.
+			shouldSummarize = true
+			currentAssistant.AddFinish(message.FinishReasonEndTurn, "", "")
+			slog.Warn("Context window exceeded; auto-summarizing and retrying", "session_id", call.SessionID, "error", err)
+			err = nil
+		case isHyper && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusUnauthorized:
 			currentAssistant.AddFinish(message.FinishReasonError, "Unauthorized", `Please re-authenticate with Hyper. You can also run "crush auth" to re-authenticate.`)
 			if a.notify != nil {
 				a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
@@ -751,11 +762,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					ProviderID:   primaryModel.ModelCfg.Provider,
 				})
 			}
-		} else if isHyper && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusPaymentRequired {
+		case isHyper && errors.As(err, &providerErr) && providerErr.StatusCode == http.StatusPaymentRequired:
 			url := hyper.BaseURL()
 			link := linkStyle.Hyperlink(url, "id=hyper").Render(url)
 			currentAssistant.AddFinish(message.FinishReasonError, "No credits", "You're out of credits. Add more at "+link)
-		} else if errors.As(err, &providerErr) {
+		case errors.As(err, &providerErr):
 			if providerErr.Message == "The requested model is not supported." {
 				url := "https://github.com/settings/copilot/features"
 				link := linkStyle.Hyperlink(url, "id=copilot").Render(url)
@@ -767,9 +778,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			} else {
 				currentAssistant.AddFinish(message.FinishReasonError, cmp.Or(stringext.Capitalize(providerErr.Title), defaultTitle), providerErr.Message)
 			}
-		} else if errors.As(err, &fantasyErr) {
+		case errors.As(err, &fantasyErr):
 			currentAssistant.AddFinish(message.FinishReasonError, cmp.Or(stringext.Capitalize(fantasyErr.Title), defaultTitle), fantasyErr.Message)
-		} else {
+		default:
 			currentAssistant.AddFinish(message.FinishReasonError, defaultTitle, err.Error())
 		}
 		// Note: we use the parent context here because the genCtx has been
@@ -778,7 +789,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		if updateErr != nil {
 			return nil, updateErr
 		}
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+		// err was cleared above (context overflow path) — fall through to
+		// the shouldSummarize block so the prompt is re-queued.
 	}
 
 	if shouldSummarize {
@@ -2117,4 +2132,34 @@ func (a *sessionAgent) backupDiscardedMessages(ctx context.Context, sessionID st
 		return
 	}
 	slog.Info("Session backup written", "session", sessionID, "path", path, "messages", len(discarded))
+}
+
+// isContextLengthExceeded returns true if the error stems from the provider
+// rejecting the request because the input does not fit in the model's
+// context window. Different providers signal this differently — Anthropic
+// uses an HTTP 400 with code "context_length_exceeded", OpenAI streams a
+// similar shape, others embed the phrase in the message. We pattern-match
+// on the underlying error text to cover all of them, since fantasy.Error /
+// fantasy.ProviderError do not yet expose a discriminator code.
+func isContextLengthExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "context_length_exceeded"):
+		return true
+	case strings.Contains(msg, "context length") && strings.Contains(msg, "exceed"):
+		return true
+	case strings.Contains(msg, "input exceeds the context window"):
+		return true
+	case strings.Contains(msg, "prompt is too long"):
+		return true
+	case strings.Contains(msg, "maximum context length"):
+		return true
+	case strings.Contains(msg, "exceeds the model's context"):
+		return true
+	default:
+		return false
+	}
 }

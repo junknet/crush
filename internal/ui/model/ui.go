@@ -391,6 +391,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		initialSessionID:    initialSessionID,
 		continueLastSession: continueLast,
 		skillStates:         skills.GetLatestStates(),
+		pillsExpanded:       true,
 	}
 
 	status := NewStatus(com, ui)
@@ -537,7 +538,7 @@ func (m *UI) focusEditor() tea.Cmd {
 	m.textarea.Focus()
 	if m.chat != nil {
 		m.chat.Blur()
-		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+		if cmd := m.chat.ForceScrollToBottomAndAnimate(); cmd != nil {
 			return cmd
 		}
 	}
@@ -1160,7 +1161,7 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 	}
 
 	m.chat.SetMessages(items...)
-	if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+	if cmd := m.chat.ForceScrollToBottomAndAnimate(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 	m.chat.SelectLast()
@@ -2047,7 +2048,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			m.focus = uiFocusEditor
 			cmds = append(cmds, m.textarea.Focus())
 			m.chat.Blur()
-			if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+			if cmd := m.chat.ForceScrollToBottomAndAnimate(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 		}
@@ -2373,7 +2374,7 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 				m.chat.SelectFirst()
 			case key.Matches(msg, m.keyMap.Chat.End):
-				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+				if cmd := m.chat.ForceScrollToBottomAndAnimate(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 				m.chat.SelectLast()
@@ -3924,7 +3925,7 @@ func (m *UI) newSession() tea.Cmd {
 	m.textarea.Focus()
 	m.chat.Blur()
 	m.chat.ClearMessages()
-	m.pillsExpanded = false
+	m.pillsExpanded = true
 	m.promptQueue = 0
 	m.pillsView = ""
 	m.historyReset()

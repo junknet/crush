@@ -127,7 +127,7 @@ func TestHandleTextareaHeightChange_FollowModeStaysAtBottom(t *testing.T) {
 	u.updateLayoutAndSize()
 
 	// Enter follow mode and verify we're anchored at the bottom first.
-	u.chat.ScrollToBottom()
+	u.chat.ForceScrollToBottom()
 	if !u.chat.AtBottom() {
 		t.Fatal("expected chat to start at bottom")
 	}
