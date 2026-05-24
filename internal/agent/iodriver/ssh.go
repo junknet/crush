@@ -480,7 +480,9 @@ func parsePlainGrep(data []byte, max int) []GrepHit {
 	return hits
 }
 
-// resolveRG checks (once) whether rg is available on the remote.
+// resolveRG checks (once) whether rg is available on the remote and
+// auto-pushes the embedded binary when missing so subsequent Grep
+// calls get the fast --json path.
 func (d *sshDriver) resolveRG(ctx context.Context) string {
 	d.mu.Lock()
 	checked, p := d.rgChecked, d.rgPath
@@ -489,12 +491,18 @@ func (d *sshDriver) resolveRG(ctx context.Context) string {
 		return p
 	}
 	stdout, _, code, err := d.Exec(ctx, []string{"sh", "-c", "command -v rg || command -v ~/.local/share/crush/bin/rg"}, nil)
+	if err == nil && code == 0 {
+		p = strings.TrimSpace(string(stdout))
+	}
+	if p == "" {
+		// No rg on the remote — try to push the embedded binary.
+		if pushed, perr := d.bootstrapRemoteRg(ctx); perr == nil {
+			p = pushed
+		}
+	}
 	d.mu.Lock()
 	d.rgChecked = true
-	if err == nil && code == 0 {
-		d.rgPath = strings.TrimSpace(string(stdout))
-	}
-	p = d.rgPath
+	d.rgPath = p
 	d.mu.Unlock()
 	return p
 }

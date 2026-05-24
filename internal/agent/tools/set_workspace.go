@@ -58,6 +58,12 @@ Authentication order for SSH: explicit identity_file → SSH_AUTH_SOCK → ~/.ss
 // each task's ctx. The factory is reused so two sessions pointing at
 // the same SSH host share one connection.
 func NewSetWorkspaceTool(registry *iodriver.URIRegistry, factory *iodriver.Factory) fantasy.AgentTool {
+	// Hand the embedded rg bytes to iodriver so SSH bootstrap can push
+	// it to remote hosts that lack ripgrep. On platforms where rg is
+	// not embedded (any non-linux-amd64 build) EmbeddedRgBytes returns
+	// nil and the SSH driver gracefully falls back to `grep -rn`.
+	iodriver.RegisterRgBytes(EmbeddedRgBytes())
+
 	return fantasy.NewAgentTool(
 		SetWorkspaceToolName,
 		setWorkspaceDescription,
