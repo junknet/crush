@@ -30,7 +30,7 @@ const hotReloadCheckInterval = 3 * time.Second
 func startHotReload(shutdown func()) {
 	exe, err := os.Executable()
 	if err != nil {
-		slog.Warn("hot reload disabled: cannot resolve binary path", "error", err)
+		slog.Warn("Hot reload disabled: cannot resolve binary path", "error", err)
 		return
 	}
 	// Resolve symlinks so a wrapper like ~/.local/bin/crush -> .cache/.../crush
@@ -61,12 +61,12 @@ func startHotReload(shutdown func()) {
 		fired = true
 		mu.Unlock()
 
-		slog.Info("hot reload triggered", "reason", reason, "binary", exe)
+		slog.Info("Hot reload triggered", "reason", reason, "binary", exe)
 		if shutdown != nil {
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						slog.Warn("shutdown hook panicked during hot reload", "recover", r)
+						slog.Warn("Shutdown hook panicked during hot reload", "recover", r)
 					}
 				}()
 				shutdown()
@@ -75,7 +75,7 @@ func startHotReload(shutdown func()) {
 		argv := append([]string{exe}, os.Args[1:]...)
 		env := os.Environ()
 		if err := syscall.Exec(exe, argv, env); err != nil {
-			slog.Error("hot reload exec failed; exiting so supervisor can restart us",
+			slog.Error("Hot reload exec failed; exiting so supervisor can restart us",
 				"error", err)
 			os.Exit(0)
 		}
@@ -131,15 +131,15 @@ func hotReloadConfigPaths() []string {
 			paths = append(paths, p)
 		}
 	}
-	// Config lives in a single location: the declarative crush.{yaml,json}
-	// and the runtime state.{yaml,yml} next to it.
+	// Only watch the DECLARATIVE config (crush.{yaml,yml,json}) — a hand-edited
+	// file change should hot-reload. NEVER watch state.{yaml,yml}: the app
+	// itself writes it on every model switch / think toggle, and a re-exec
+	// mid-write tears down the in-flight DB session ("sql: database is closed").
 	if base := config.GlobalConfig(); base != "" {
 		dir := filepath.Dir(base)
 		add(filepath.Join(dir, "crush.yaml"))
 		add(filepath.Join(dir, "crush.yml"))
 		add(filepath.Join(dir, "crush.json"))
-		add(filepath.Join(dir, "state.yaml"))
-		add(filepath.Join(dir, "state.yml"))
 	}
 	return paths
 }

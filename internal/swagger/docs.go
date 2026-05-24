@@ -294,56 +294,6 @@ const docTemplate = `{
                         }
                     }
                 }
-            },
-            "post": {
-                "consumes": [
-                    "application/json"
-                ],
-                "tags": [
-                    "agent"
-                ],
-                "summary": "Send message to agent",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Workspace ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "Agent message",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/proto.AgentMessage"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK"
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    }
-                }
             }
         },
         "/workspaces/{id}/agent/default-explore-model": {
@@ -392,40 +342,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/workspaces/{id}/agent/init": {
-            "post": {
-                "tags": [
-                    "agent"
-                ],
-                "summary": "Initialize agent",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Workspace ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK"
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    }
-                }
-            }
-        },
         "/workspaces/{id}/agent/sessions/{sid}": {
             "get": {
                 "produces": [
@@ -457,47 +373,6 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/proto.AgentSession"
                         }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    }
-                }
-            }
-        },
-        "/workspaces/{id}/agent/sessions/{sid}/cancel": {
-            "post": {
-                "tags": [
-                    "agent"
-                ],
-                "summary": "Cancel agent session",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Workspace ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "Session ID",
-                        "name": "sid",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK"
                     },
                     "404": {
                         "description": "Not Found",
@@ -670,40 +545,6 @@ const docTemplate = `{
                         "type": "string",
                         "description": "Session ID",
                         "name": "sid",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK"
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    }
-                }
-            }
-        },
-        "/workspaces/{id}/agent/update": {
-            "post": {
-                "tags": [
-                    "agent"
-                ],
-                "summary": "Update agent",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Workspace ID",
-                        "name": "id",
                         "in": "path",
                         "required": true
                     }
@@ -1103,43 +944,6 @@ const docTemplate = `{
                         "schema": {
                             "$ref": "#/definitions/proto.Error"
                         }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/proto.Error"
-                        }
-                    }
-                }
-            }
-        },
-        "/workspaces/{id}/events": {
-            "get": {
-                "produces": [
-                    "text/event-stream"
-                ],
-                "tags": [
-                    "workspaces"
-                ],
-                "summary": "Stream workspace events (SSE)",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Workspace ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK"
                     },
                     "404": {
                         "description": "Not Found",
@@ -2131,12 +1935,12 @@ const docTemplate = `{
                         "required": true
                     },
                     {
-                        "description": "Session creation params (title)",
+                        "description": "Session creation params",
                         "name": "request",
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/proto.Session"
+                            "$ref": "#/definitions/proto.SessionCreateRequest"
                         }
                     }
                 ],
@@ -2868,11 +2672,13 @@ const docTemplate = `{
             "type": "string",
             "enum": [
                 "brain",
+                "plan",
                 "worker",
                 "explore"
             ],
             "x-enum-varnames": [
                 "SelectedModelTypeBrain",
+                "SelectedModelTypePlan",
                 "SelectedModelTypeWorker",
                 "SelectedModelTypeExplore"
             ]
@@ -3152,26 +2958,12 @@ const docTemplate = `{
                 }
             }
         },
-        "proto.AgentMessage": {
-            "type": "object",
-            "properties": {
-                "attachments": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/proto.Attachment"
-                    }
-                },
-                "prompt": {
-                    "type": "string"
-                },
-                "session_id": {
-                    "type": "string"
-                }
-            }
-        },
         "proto.AgentSession": {
             "type": "object",
             "properties": {
+                "alive": {
+                    "type": "boolean"
+                },
                 "completion_tokens": {
                     "type": "integer"
                 },
@@ -3190,7 +2982,14 @@ const docTemplate = `{
                 "message_count": {
                     "type": "integer"
                 },
+                "mode": {
+                    "type": "string"
+                },
                 "parent_session_id": {
+                    "type": "string"
+                },
+                "path": {
+                    "description": "Path is the session's working directory; Alive reports whether a driver\n(a TUI) is currently attached. These power the session-primary view that\nreplaces the workspace grouping on clients.",
                     "type": "string"
                 },
                 "prompt_tokens": {
@@ -3210,26 +3009,6 @@ const docTemplate = `{
                 },
                 "updated_at": {
                     "type": "integer"
-                }
-            }
-        },
-        "proto.Attachment": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "array",
-                    "items": {
-                        "type": "integer"
-                    }
-                },
-                "file_name": {
-                    "type": "string"
-                },
-                "file_path": {
-                    "type": "string"
-                },
-                "mime_type": {
-                    "type": "string"
                 }
             }
         },
@@ -3550,6 +3329,9 @@ const docTemplate = `{
         "proto.Session": {
             "type": "object",
             "properties": {
+                "alive": {
+                    "type": "boolean"
+                },
                 "completion_tokens": {
                     "type": "integer"
                 },
@@ -3565,7 +3347,14 @@ const docTemplate = `{
                 "message_count": {
                     "type": "integer"
                 },
+                "mode": {
+                    "type": "string"
+                },
                 "parent_session_id": {
+                    "type": "string"
+                },
+                "path": {
+                    "description": "Path is the session's working directory; Alive reports whether a driver\n(a TUI) is currently attached. These power the session-primary view that\nreplaces the workspace grouping on clients.",
                     "type": "string"
                 },
                 "prompt_tokens": {
@@ -3585,6 +3374,17 @@ const docTemplate = `{
                 },
                 "updated_at": {
                     "type": "integer"
+                }
+            }
+        },
+        "proto.SessionCreateRequest": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
                 }
             }
         },

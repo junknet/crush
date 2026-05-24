@@ -9,13 +9,13 @@ import (
 )
 
 // CreateSession creates a new session in the given workspace.
-func (b *Backend) CreateSession(ctx context.Context, workspaceID, title string) (session.Session, error) {
+func (b *Backend) CreateSession(ctx context.Context, workspaceID, title string, mode session.Mode) (session.Session, error) {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return session.Session{}, err
 	}
 
-	return ws.Sessions.Create(ctx, title)
+	return ws.Sessions.Create(ctx, title, mode)
 }
 
 // GetSession retrieves a session by workspace and session ID.
@@ -60,6 +60,7 @@ func (b *Backend) GetAgentSession(ctx context.Context, workspaceID, sessionID st
 		Session: proto.Session{
 			ID:    se.ID,
 			Title: se.Title,
+			Mode:  string(se.Mode),
 		},
 		IsBusy: isSessionBusy,
 	}, nil

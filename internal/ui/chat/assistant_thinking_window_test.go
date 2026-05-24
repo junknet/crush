@@ -43,8 +43,9 @@ func thinkingMessageWithLines(id string, count int) *message.Message {
 		Role: message.Assistant,
 		Parts: []message.ContentPart{
 			message.ReasoningContent{
-				Thinking:  b.String(),
-				StartedAt: testStartedAt,
+				Thinking:   b.String(),
+				StartedAt:  testStartedAt,
+				FinishedAt: testStartedAt,
 			},
 		},
 	}

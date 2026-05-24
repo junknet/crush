@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
@@ -85,10 +86,17 @@ func (c *Client) DeleteWorkspace(ctx context.Context, id string) error {
 }
 
 // SubscribeEvents subscribes to server-sent events for a workspace.
-func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, error) {
+// driverSessionID, when non-empty, declares this stream as the live "driver" of
+// that session so the server drops it from the session-primary listing once the
+// stream ends (the TUI exited).
+func (c *Client) SubscribeEvents(ctx context.Context, id string, driverSessionID string) (<-chan any, error) {
 	events := make(chan any, 100)
+	var query url.Values
+	if driverSessionID != "" {
+		query = url.Values{"session_id": {driverSessionID}, "role": {"driver"}}
+	}
 	//nolint:bodyclose
-	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/events", id), nil, http.Header{
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/events", id), query, http.Header{
 		"Accept":        []string{"text/event-stream"},
 		"Cache-Control": []string{"no-cache"},
 		"Connection":    []string{"keep-alive"},
@@ -454,8 +462,8 @@ func (c *Client) ListSessionHistoryFiles(ctx context.Context, id string, session
 }
 
 // CreateSession creates a new session in a workspace as a proto type.
-func (c *Client) CreateSession(ctx context.Context, id string, title string) (*proto.Session, error) {
-	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/sessions", id), nil, jsonBody(proto.Session{Title: title}), http.Header{"Content-Type": []string{"application/json"}})
+func (c *Client) CreateSession(ctx context.Context, id string, title string, mode session.Mode) (*proto.Session, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/sessions", id), nil, jsonBody(proto.SessionCreateRequest{Title: title, Mode: string(mode)}), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}

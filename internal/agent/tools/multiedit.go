@@ -151,7 +151,7 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 	var failedEdits []FailedEdit
 	for i := 1; i < len(params.Edits); i++ {
 		edit := params.Edits[i]
-		newContent, err := applyEditToContent(currentContent, edit)
+		newContent, err := applyEditToContentPath(currentContent, edit, params.FilePath)
 		if err != nil {
 			failedEdits = append(failedEdits, FailedEdit{
 				Index: i + 1,
@@ -286,7 +286,7 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 	// Apply all edits sequentially, tracking failures
 	var failedEdits []FailedEdit
 	for i, edit := range params.Edits {
-		newContent, err := applyEditToContent(currentContent, edit)
+		newContent, err := applyEditToContentPath(currentContent, edit, params.FilePath)
 		if err != nil {
 			failedEdits = append(failedEdits, FailedEdit{
 				Index: i + 1,
@@ -398,6 +398,13 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 }
 
 func applyEditToContent(content string, edit MultiEditOperation) (string, error) {
+	return applyEditToContentPath(content, edit, "")
+}
+
+// applyEditToContentPath is the file-aware variant used by the multi-edit
+// driver: it knows the destination path so it can skip trailing-whitespace
+// stripping on markdown.
+func applyEditToContentPath(content string, edit MultiEditOperation, filePath string) (string, error) {
 	if edit.OldString == "" && edit.NewString == "" {
 		return content, nil
 	}
@@ -406,27 +413,38 @@ func applyEditToContent(content string, edit MultiEditOperation) (string, error)
 		return "", fmt.Errorf("old_string cannot be empty for content replacement")
 	}
 
+	// Normalise quotes / desanitise sanitised provider tokens.
+	oldString := edit.OldString
+	newString := edit.NewString
+	if actual, fixedNew, changed := resolveOldString(content, oldString, newString); changed {
+		oldString = actual
+		newString = fixedNew
+	}
+	if filePath != "" && shouldStripTrailingWhitespace(filePath) {
+		newString = stripTrailingWhitespace(newString)
+	}
+
 	var newContent string
 	var replacementCount int
 
 	if edit.ReplaceAll {
-		newContent = strings.ReplaceAll(content, edit.OldString, edit.NewString)
-		replacementCount = strings.Count(content, edit.OldString)
+		newContent = strings.ReplaceAll(content, oldString, newString)
+		replacementCount = strings.Count(content, oldString)
 		if replacementCount == 0 {
-			return "", fmt.Errorf("old_string not found in content. Make sure it matches exactly, including whitespace and line breaks")
+			return "", fmt.Errorf("%s", notFoundDiagnostic(content, oldString, "in-memory edit chain"))
 		}
 	} else {
-		index := strings.Index(content, edit.OldString)
+		index := strings.Index(content, oldString)
 		if index == -1 {
-			return "", fmt.Errorf("old_string not found in content. Make sure it matches exactly, including whitespace and line breaks")
+			return "", fmt.Errorf("%s", notFoundDiagnostic(content, oldString, "in-memory edit chain"))
 		}
 
-		lastIndex := strings.LastIndex(content, edit.OldString)
+		lastIndex := strings.LastIndex(content, oldString)
 		if index != lastIndex {
-			return "", fmt.Errorf("old_string appears multiple times in the content. Please provide more context to ensure a unique match, or set replace_all to true")
+			return "", fmt.Errorf("%s", multipleMatchesDiagnostic(content, oldString))
 		}
 
-		newContent = content[:index] + edit.NewString + content[index+len(edit.OldString):]
+		newContent = content[:index] + newString + content[index+len(oldString):]
 		replacementCount = 1
 	}
 

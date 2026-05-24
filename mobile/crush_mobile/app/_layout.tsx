@@ -13,6 +13,7 @@ const Layout = () => {
     const [loaded, error] = useFonts({
         'FiraCode-Regular': require('../assets/fonts/FiraCode-Regular.ttf'),
     })
+    console.log('[_layout] fonts loaded:', loaded, 'error:', error)
 
     useEffect(() => {
         if (loaded || error) {
@@ -20,9 +21,9 @@ const Layout = () => {
         }
     }, [loaded, error])
 
-    if (!loaded && !error) {
-        return null
-    }
+    // if (!loaded && !error) {
+    //     return null
+    // }
 
     return (
         <GestureHandlerRootView style={{ flex: 1 }}>

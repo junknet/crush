@@ -67,9 +67,9 @@ func TestEnableDockerMCP(t *testing.T) {
 			MCP: make(map[string]MCPConfig),
 		}
 		store := &ConfigStore{
-			config:         cfg,
-			configBase:     configPath,
-			resolver:       NewShellVariableResolver(env.New()),
+			config:     cfg,
+			configBase: configPath,
+			resolver:   NewShellVariableResolver(env.New()),
 		}
 
 		err := store.EnableDockerMCP()
@@ -103,9 +103,9 @@ func TestEnableDockerMCP(t *testing.T) {
 			MCP: make(map[string]MCPConfig),
 		}
 		store := &ConfigStore{
-			config:         cfg,
-			configBase:     configPath,
-			resolver:       NewShellVariableResolver(env.New()),
+			config:     cfg,
+			configBase: configPath,
+			resolver:   NewShellVariableResolver(env.New()),
 		}
 
 		err := store.EnableDockerMCP()
@@ -135,9 +135,9 @@ func TestDisableDockerMCP(t *testing.T) {
 			},
 		}
 		store := &ConfigStore{
-			config:         cfg,
-			configBase:     configPath,
-			resolver:       NewShellVariableResolver(env.New()),
+			config:     cfg,
+			configBase: configPath,
+			resolver:   NewShellVariableResolver(env.New()),
 		}
 
 		// Verify it's enabled first.
@@ -159,9 +159,9 @@ func TestDisableDockerMCP(t *testing.T) {
 			MCP: nil,
 		}
 		store := &ConfigStore{
-			config:         cfg,
-			configBase:     filepath.Join(t.TempDir(), "crush.json"),
-			resolver:       NewShellVariableResolver(env.New()),
+			config:     cfg,
+			configBase: filepath.Join(t.TempDir(), "crush.json"),
+			resolver:   NewShellVariableResolver(env.New()),
 		}
 
 		err := store.DisableDockerMCP()
@@ -183,9 +183,9 @@ func TestEnableDockerMCPWithRealDockerWhenAvailable(t *testing.T) {
 		MCP: make(map[string]MCPConfig),
 	}
 	store := &ConfigStore{
-		config:         cfg,
-		configBase:     configPath,
-		resolver:       NewShellVariableResolver(env.New()),
+		config:     cfg,
+		configBase: configPath,
+		resolver:   NewShellVariableResolver(env.New()),
 	}
 
 	err := store.EnableDockerMCP()

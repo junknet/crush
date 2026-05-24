@@ -29,8 +29,8 @@ func terminalExecHandlers() []func(next interp.ExecHandlerFunc) interp.ExecHandl
 }
 
 // groupExecHandler is the terminal exec handler. Unlike mvdan's
-// DefaultExecHandler it places each spawned command in its own process group
-// (Setpgid) and, when ctx is cancelled, signals the entire group via
+// DefaultExecHandler it places each spawned command in its own detached
+// session (Setsid) and, when ctx is cancelled, signals the entire group via
 // kill(-pgid, …) rather than only the direct child. This guarantees that
 // cancelling an agent turn or a background job kills the whole process
 // subtree — e.g. `nimony c` together with every compiler subprocess it
@@ -47,21 +47,28 @@ func groupExecHandler(_ interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 			return interp.ExitStatus(127)
 		}
 		cmd := &exec.Cmd{
-			Path:        path,
-			Args:        args,
-			Env:         execEnvList(hc.Env),
-			Dir:         hc.Dir,
-			Stdin:       hc.Stdin,
-			Stdout:      hc.Stdout,
-			Stderr:      hc.Stderr,
-			SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
+			Path:   path,
+			Args:   args,
+			Env:    execEnvList(hc.Env),
+			Dir:    hc.Dir,
+			Stdin:  hc.Stdin,
+			Stdout: hc.Stdout,
+			Stderr: hc.Stderr,
+			// Setsid (new session, NO controlling terminal) rather than just
+			// Setpgid: a spawned command must never be able to touch crush's
+			// controlling tty. Tools like valgrind/callgrind tcsetpgrp the
+			// terminal foreground to the program they run; with a shared
+			// session that steals the foreground from crush's TUI, and crush's
+			// next tty read raises SIGTTIN and suspends the whole app
+			// ("zsh: suspended (tty input)"). A detached session can't do that.
+			SysProcAttr: &syscall.SysProcAttr{Setsid: true},
 		}
 		return runInProcessGroup(ctx, cmd, hc.Stderr)
 	}
 }
 
 // runInProcessGroup starts cmd (which the caller has already configured with
-// Setpgid) and waits for it. On ctx cancellation it SIGTERMs the whole
+// Setsid) and waits for it. On ctx cancellation it SIGTERMs the whole
 // process group led by the child, waits [groupKillGrace], then SIGKILLs the
 // group. Error classification matches mvdan's default handler so callers see
 // the same [interp.ExitStatus] semantics. stderr receives spawn failures.
@@ -69,15 +76,19 @@ func runInProcessGroup(ctx context.Context, cmd *exec.Cmd, stderr io.Writer) err
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.Setpgid = true
+	// New session: own process group AND detached from the controlling
+	// terminal, so the command can never steal the tty foreground and SIGTTIN
+	// crush. setsid makes the child the leader of a new group whose pgid is its
+	// pid, so the kill(-pgid) below still reaps the whole subtree.
+	cmd.SysProcAttr.Setsid = true
 
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return interp.ExitStatus(127)
 	}
 
-	// With Setpgid and Pgid 0 the child is its own group leader, so its pid
-	// is the pgid; a negative pid addresses the whole group.
+	// With Setsid the child is its own session/group leader, so its pid is the
+	// pgid; a negative pid addresses the whole group.
 	pgid := cmd.Process.Pid
 	stop := context.AfterFunc(ctx, func() {
 		_ = syscall.Kill(-pgid, syscall.SIGTERM)

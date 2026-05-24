@@ -9,9 +9,11 @@ import (
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
 	"charm.land/fantasy/providers/bedrock"
+	toolsPkg "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/scheduler"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,10 +29,11 @@ func (m *mockSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fan
 	return m.runFunc(ctx, call)
 }
 
-func (m *mockSessionAgent) Model() Model                        { return m.model }
-func (m *mockSessionAgent) SetModels(primary, title Model)      {}
-func (m *mockSessionAgent) SetTools(tools []fantasy.AgentTool)  {}
-func (m *mockSessionAgent) SetSystemPrompt(systemPrompt string) {}
+func (m *mockSessionAgent) Model() Model                                   { return m.model }
+func (m *mockSessionAgent) SetModels(primary, title Model)                 {}
+func (m *mockSessionAgent) SetTools(tools []fantasy.AgentTool)             {}
+func (m *mockSessionAgent) SetDeferredRegistry(*toolsPkg.DeferredRegistry) {}
+func (m *mockSessionAgent) SetSystemPrompt(systemPrompt string)            {}
 func (m *mockSessionAgent) Cancel(sessionID string) {
 	m.cancelled = append(m.cancelled, sessionID)
 }
@@ -89,7 +92,7 @@ func TestRunSubAgent(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
-		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		parentSession, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		calls := make([]SessionAgentCall, 0, 3)
@@ -120,7 +123,7 @@ func TestRunSubAgent(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
-		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		parentSession, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		calls := make([]SessionAgentCall, 0, 1)
@@ -148,7 +151,7 @@ func TestRunSubAgent(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
-		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		parentSession, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		calls := make([]SessionAgentCall, 0, 3)
@@ -186,7 +189,7 @@ func TestRunSubAgent(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
-		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		parentSession, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		agent := newMockAgent(providerID, 4096, nil)
@@ -210,7 +213,7 @@ func TestRunSubAgent(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
-		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		parentSession, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		// Agent references a provider that doesn't exist in config.
@@ -232,7 +235,7 @@ func TestRunSubAgent(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
-		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		parentSession, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
@@ -257,7 +260,7 @@ func TestRunSubAgent(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
-		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		parentSession, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		var setupCalledWith string
@@ -284,7 +287,7 @@ func TestRunSubAgent(t *testing.T) {
 		env := testEnv(t)
 		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
-		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		parentSession, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		callCount := 0
@@ -344,6 +347,27 @@ func TestEnsureChildTaskUsesProfile(t *testing.T) {
 	assert.Equal(t, 4096, workerNode.Intent.BudgetTokens)
 }
 
+func TestEnsureRootTaskUsesPlanProfile(t *testing.T) {
+	env := testEnv(t)
+	coord := newTestCoordinator(t, env, "test-provider", config.ProviderConfig{ID: "test-provider"})
+	taskRuntime := runtime.NewSession(env.workingDir, nil)
+	taskScheduler := scheduler.NewAgentScheduler(taskRuntime)
+
+	planNode := coord.ensureRootTask(taskScheduler, "session-plan", "draft plan", 2048, scheduler.ProfilePlanAgent)
+	require.NotNil(t, planNode)
+	assert.Equal(t, scheduler.ProfilePlanAgent, planNode.Profile)
+	assert.Equal(t, scheduler.TaskPlan, planNode.Kind)
+	assert.Equal(t, scheduler.TaskReadOnly, planNode.Mode)
+	assert.Equal(t, 2048, planNode.Intent.BudgetTokens)
+
+	brainNode := coord.ensureRootTask(taskScheduler, "session-brain", "implement", 4096, scheduler.ProfileBrainAgent)
+	require.NotNil(t, brainNode)
+	assert.Equal(t, scheduler.ProfileBrainAgent, brainNode.Profile)
+	assert.Equal(t, scheduler.TaskEdit, brainNode.Kind)
+	assert.Equal(t, scheduler.TaskWrite, brainNode.Mode)
+	assert.Equal(t, 4096, brainNode.Intent.BudgetTokens)
+}
+
 func TestUpdateParentSessionCost(t *testing.T) {
 	t.Run("accumulates cost correctly", func(t *testing.T) {
 		env := testEnv(t)
@@ -351,7 +375,7 @@ func TestUpdateParentSessionCost(t *testing.T) {
 		require.NoError(t, err)
 		coord := &coordinator{cfg: cfg, sessions: env.sessions}
 
-		parent, err := env.sessions.Create(t.Context(), "Parent")
+		parent, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		child, err := env.sessions.CreateTaskSession(t.Context(), "tool-1", parent.ID, "Child")
@@ -376,7 +400,7 @@ func TestUpdateParentSessionCost(t *testing.T) {
 		require.NoError(t, err)
 		coord := &coordinator{cfg: cfg, sessions: env.sessions}
 
-		parent, err := env.sessions.Create(t.Context(), "Parent")
+		parent, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		child1, err := env.sessions.CreateTaskSession(t.Context(), "tool-1", parent.ID, "Child1")
@@ -407,7 +431,7 @@ func TestUpdateParentSessionCost(t *testing.T) {
 		require.NoError(t, err)
 		coord := &coordinator{cfg: cfg, sessions: env.sessions}
 
-		parent, err := env.sessions.Create(t.Context(), "Parent")
+		parent, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 
 		err = coord.updateParentSessionCost(t.Context(), "non-existent", parent.ID)
@@ -421,7 +445,7 @@ func TestUpdateParentSessionCost(t *testing.T) {
 		require.NoError(t, err)
 		coord := &coordinator{cfg: cfg, sessions: env.sessions}
 
-		parent, err := env.sessions.Create(t.Context(), "Parent")
+		parent, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 		child, err := env.sessions.CreateTaskSession(t.Context(), "tool-1", parent.ID, "Child")
 		require.NoError(t, err)
@@ -437,7 +461,7 @@ func TestUpdateParentSessionCost(t *testing.T) {
 		require.NoError(t, err)
 		coord := &coordinator{cfg: cfg, sessions: env.sessions}
 
-		parent, err := env.sessions.Create(t.Context(), "Parent")
+		parent, err := env.sessions.Create(t.Context(), "Parent", session.ModeExecute)
 		require.NoError(t, err)
 		child, err := env.sessions.CreateTaskSession(t.Context(), "tool-1", parent.ID, "Child")
 		require.NoError(t, err)
@@ -473,7 +497,7 @@ func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 			}
 			providerCfg := config.ProviderConfig{ID: "test", Type: tc.providerType}
 
-			opts := getProviderOptions(model, providerCfg)
+			opts := getProviderOptions("test-session", model, providerCfg, false)
 
 			raw, ok := opts[anthropic.Name]
 			require.True(t, ok, "options should be keyed under anthropic.Name for type %q", tc.providerType)

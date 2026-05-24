@@ -152,6 +152,13 @@ func (l *List) Height() int {
 	return l.height
 }
 
+// ScrollOffset returns the current scroll anchor as (item index, line offset).
+// The line offset is the number of lines of the anchor item that are scrolled
+// out of view above the viewport.
+func (l *List) ScrollOffset() (index int, line int) {
+	return l.offsetIdx, l.offsetLine
+}
+
 // Len returns the number of items in the list.
 func (l *List) Len() int {
 	return len(l.items)

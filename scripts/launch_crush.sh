@@ -57,6 +57,11 @@ zsh -lic '
     wecode_key="$(python3 -c "import json;print(json.load(open(\"$HOME/.codex/auth.json\"))[\"OPENAI_API_KEY\"])" 2>/dev/null || true)"
   fi
 
+  # Local-authoritative: the agent and every subprocess it spawns live IN this
+  # foreground TUI process. Ctrl+C kills the whole subtree. The TUI owns its work.
+  relay_nats_url="${CRUSH_RELAY_NATS_URL:-nats://47.110.255.240:4222}"
+  relay_token="${CRUSH_RELAY_TOKEN:-ymm_rpc_2026}"
+
   exec env \
     CRUSH_DISABLE_METRICS=1 \
     CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 \
@@ -65,5 +70,7 @@ zsh -lic '
     WAITAI_API_KEY="$waitai_key" \
     NCODER_WAITAI_KEY="$waitai_key" \
     WECODE_API_KEY="$wecode_key" \
+    CRUSH_RELAY_NATS_URL="$relay_nats_url" \
+    CRUSH_RELAY_TOKEN="$relay_token" \
     "$binary_path" "$@"
 ' zsh "$@"

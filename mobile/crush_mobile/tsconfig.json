@@ -26,8 +26,7 @@
     "allowJs": true
   },
   "include": [
-    "app/index.tsx",
-    "app/_layout.tsx",
+    "app/**/*.tsx",
     "lib/crush/**/*.ts"
   ]
 }

@@ -12,6 +12,8 @@ const (
 	AgentEventTypeError            AgentEventType = "error"
 	AgentEventTypeResponse         AgentEventType = "response"
 	AgentEventTypeSummarize        AgentEventType = "summarize"
+	AgentEventTypeAgentStarted     AgentEventType = "agent_started"
+	AgentEventTypeAgentFinished    AgentEventType = "agent_finished"
 	AgentEventTypeSubAgentStarted  AgentEventType = "sub_agent_started"
 	AgentEventTypeSubAgentFinished AgentEventType = "sub_agent_finished"
 	AgentEventTypeSubAgentFailed   AgentEventType = "sub_agent_failed"

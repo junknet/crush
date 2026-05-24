@@ -14,6 +14,9 @@ var brainPromptTmpl []byte
 //go:embed templates/worker.md.tpl
 var workerPromptTmpl []byte
 
+//go:embed templates/plan.md.tpl
+var planPromptTmpl []byte
+
 //go:embed templates/explore.md.tpl
 var explorePromptTmpl []byte
 
@@ -36,6 +39,14 @@ func workerPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 	return systemPrompt, nil
 }
 
+func planPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
+	systemPrompt, err := prompt.NewPrompt("plan", string(planPromptTmpl), opts...)
+	if err != nil {
+		return nil, err
+	}
+	return systemPrompt, nil
+}
+
 func explorePrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 	systemPrompt, err := prompt.NewPrompt("explore", string(explorePromptTmpl), opts...)
 	if err != nil {
@@ -48,6 +59,8 @@ func promptForAgentRole(role string, opts ...prompt.Option) (*prompt.Prompt, err
 	switch role {
 	case config.AgentBrain:
 		return brainPrompt(opts...)
+	case config.AgentPlan:
+		return planPrompt(opts...)
 	case config.AgentWorker:
 		return workerPrompt(opts...)
 	case config.AgentExplore:

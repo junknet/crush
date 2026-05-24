@@ -16,6 +16,11 @@ import (
 	"github.com/charmbracelet/crush/internal/session"
 )
 
+// WrapEvent is the exported entry point to [wrapEvent] so other transports
+// (e.g. the NATS relay publisher) can produce the same on-the-wire envelope
+// the SSE handler emits, keeping a single serialization source of truth.
+func WrapEvent(ev any) *pubsub.Payload { return wrapEvent(ev) }
+
 // wrapEvent converts a raw tea.Msg (a pubsub.Event[T] from the app
 // event fan-in) into a pubsub.Payload envelope with the correct
 // PayloadType discriminator and a proto-typed inner payload that has
@@ -135,6 +140,7 @@ func sessionToProto(s session.Session) proto.Session {
 		ID:               s.ID,
 		ParentSessionID:  s.ParentSessionID,
 		Title:            s.Title,
+		Mode:             string(s.Mode),
 		SummaryMessageID: s.SummaryMessageID,
 		MessageCount:     s.MessageCount,
 		PromptTokens:     s.PromptTokens,

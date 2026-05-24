@@ -66,6 +66,7 @@ func (h *header) drawHeader(
 	scr uv.Screen,
 	area uv.Rectangle,
 	session *session.Session,
+	mode session.Mode,
 	compact bool,
 	detailsOpen bool,
 	width int,
@@ -99,6 +100,7 @@ func (h *header) drawHeader(
 	details := renderHeaderDetails(
 		h.com,
 		session,
+		mode,
 		lspErrorCount,
 		detailsOpen,
 		availDetailWidth,
@@ -131,6 +133,7 @@ func (h *header) drawHeader(
 func renderHeaderDetails(
 	com *common.Common,
 	session *session.Session,
+	mode session.Mode,
 	lspErrorCount int,
 	detailsOpen bool,
 	availWidth int,
@@ -155,6 +158,10 @@ func renderHeaderDetails(
 	if com.IsHyper() && hyperCredits != nil {
 		hc := t.Header.Hypercredit.Render(styles.HypercreditIcon) + " " + t.Header.Percentage.Render(common.FormatCredits(*hyperCredits))
 		parts = append(parts, hc)
+	}
+
+	if mode.IsPlan() {
+		parts = append(parts, t.Header.Keystroke.Render("plan mode"))
 	}
 
 	const keystroke = "ctrl+d"

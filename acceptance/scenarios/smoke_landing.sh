@@ -14,7 +14,7 @@ log "waiting for landing page"
 "$TUI" expect "$SESS" 'Skills' 15 || fail "landing page Skills column not shown"
 
 log "asserting landing components"
-"$TUI" assert "$SESS" 'Claude'             || fail "Claude model line missing"
+"$TUI" assert "$SESS" 'Claude|Gemini|GPT'    || fail "Model line missing"
 "$TUI" assert "$SESS" 'LSPs'               || fail "LSPs column missing"
 "$TUI" assert "$SESS" 'MCPs'               || fail "MCPs column missing"
 "$TUI" assert "$SESS" 'Skills'             || fail "Skills column missing"

@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/home"
+	"github.com/charmbracelet/crush/internal/memdir"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 )
@@ -35,10 +36,12 @@ type PromptDat struct {
 	WorkingDir    string
 	IsGitRepo     bool
 	Platform      string
-	Date          string
-	GitStatus     string
 	ContextFiles  []ContextFile
 	AvailSkillXML string
+	// MemoryIndex is the rendered <auto_memory>...</auto_memory> block
+	// from the per-workspace MEMORY.md index. Empty when no index exists
+	// or the index was emptied to its header comment.
+	MemoryIndex string
 }
 
 type ContextFile struct {
@@ -151,76 +154,131 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	workingDir := cmp.Or(p.workingDir, store.WorkingDir())
 	platform := cmp.Or(p.platform, runtime.GOOS)
 
+	// Thin agents skip workspace-wide scaffolding (context files, skills
+	// XML, MEMORY.md index) the parent brain already injected — saving
+	// 3-8K tokens per sub-agent turn. worker is included because its task
+	// brief is always specific enough that global skill discovery is dead
+	// weight; brain is the only role that materialises the full surface.
+	isThinAgent := p.name == "explore" || p.name == "plan" || p.name == "agentic_fetch" || p.name == "speculation" || p.name == "worker"
+
 	files := map[string][]ContextFile{}
 
 	cfg := store.Config()
-	for _, pth := range cfg.Options.ContextPaths {
-		expanded := expandPath(pth, store)
-		pathKey := strings.ToLower(expanded)
-		if _, ok := files[pathKey]; ok {
-			continue
+	if !isThinAgent {
+		for _, pth := range cfg.Options.ContextPaths {
+			expanded := expandPath(pth, store)
+			pathKey := strings.ToLower(expanded)
+			if _, ok := files[pathKey]; ok {
+				continue
+			}
+			content := processContextPath(expanded, store)
+			files[pathKey] = content
 		}
-		content := processContextPath(expanded, store)
-		files[pathKey] = content
 	}
 
 	// Discover and load skills metadata.
 	var availSkillXML string
 
-	// Start with builtin skills.
-	allSkills := skills.DiscoverBuiltin()
-	builtinNames := make(map[string]bool, len(allSkills))
-	for _, s := range allSkills {
-		builtinNames[s.Name] = true
-	}
-
-	// Discover user skills from configured paths.
-	if len(cfg.Options.SkillsPaths) > 0 {
-		expandedPaths := make([]string, 0, len(cfg.Options.SkillsPaths))
-		for _, pth := range cfg.Options.SkillsPaths {
-			expandedPaths = append(expandedPaths, expandPath(pth, store))
+	if !isThinAgent {
+		// Start with builtin skills.
+		allSkills := skills.DiscoverBuiltin()
+		builtinNames := make(map[string]bool, len(allSkills))
+		for _, s := range allSkills {
+			builtinNames[s.Name] = true
 		}
-		for _, userSkill := range skills.Discover(expandedPaths) {
-			if builtinNames[userSkill.Name] {
-				slog.Warn("User skill overrides builtin skill", "name", userSkill.Name)
+
+		// Discover user skills from configured paths.
+		if len(cfg.Options.SkillsPaths) > 0 {
+			expandedPaths := make([]string, 0, len(cfg.Options.SkillsPaths))
+			for _, pth := range cfg.Options.SkillsPaths {
+				expandedPaths = append(expandedPaths, expandPath(pth, store))
 			}
-			allSkills = append(allSkills, userSkill)
+			for _, userSkill := range skills.Discover(expandedPaths) {
+				if builtinNames[userSkill.Name] {
+					slog.Warn("User skill overrides builtin skill", "name", userSkill.Name)
+				}
+				allSkills = append(allSkills, userSkill)
+			}
+		}
+
+		// Deduplicate: user skills override builtins with the same name.
+		allSkills = skills.Deduplicate(allSkills)
+
+		// Filter out disabled skills.
+		allSkills = skills.Filter(allSkills, cfg.Options.DisabledSkills)
+
+		if len(allSkills) > 0 {
+			availSkillXML = skills.ToPromptXML(allSkills)
 		}
 	}
 
-	// Deduplicate: user skills override builtins with the same name.
-	allSkills = skills.Deduplicate(allSkills)
+	// Best-effort: ensure the per-workspace memdir exists so the model
+	// has somewhere to write to. Failure is non-fatal — prompt assembly
+	// must never block on disk operations.
+	_ = memdir.EnsureWorkspace(cfg.Options.DataDirectory, store.WorkingDir())
 
-	// Filter out disabled skills.
-	allSkills = skills.Filter(allSkills, cfg.Options.DisabledSkills)
-
-	if len(allSkills) > 0 {
-		availSkillXML = skills.ToPromptXML(allSkills)
+	// Date and GitStatus are deliberately omitted here so that the static
+	// system prompt hash stays stable across turns. They are produced per
+	// turn by DynamicPrefix and injected as a user message prefix instead,
+	// which keeps prompt caches warm across providers.
+	var memoryIndex string
+	if !isThinAgent {
+		memoryIndex = memdir.IndexPrompt(cfg.Options.DataDirectory, store.WorkingDir())
 	}
 
-	isGit := isGitRepo(store.WorkingDir())
 	data := PromptDat{
 		Provider:      provider,
 		Model:         model,
 		Config:        *cfg,
 		WorkingDir:    filepath.ToSlash(workingDir),
-		IsGitRepo:     isGit,
+		IsGitRepo:     isGitRepo(store.WorkingDir()),
 		Platform:      platform,
-		Date:          p.now().Format("1/2/2006"),
 		AvailSkillXML: availSkillXML,
-	}
-	if isGit {
-		var err error
-		data.GitStatus, err = getGitStatus(ctx, store.WorkingDir())
-		if err != nil {
-			return PromptDat{}, err
-		}
+		MemoryIndex:   memoryIndex,
 	}
 
 	for _, contextFiles := range files {
 		data.ContextFiles = append(data.ContextFiles, contextFiles...)
 	}
 	return data, nil
+}
+
+// DynamicNow is the time source used by DynamicPrefix; tests may replace it.
+var DynamicNow = time.Now
+
+// DynamicPrefix builds the per-turn environment block that is injected as a
+// prefix to the current user prompt. Keeping date and git status out of the
+// system prompt body is what makes the static prefix hash stable enough for
+// Anthropic ephemeral cache, Gemini implicit prefix cache, and OpenAI
+// PromptCacheKey routing to actually hit.
+//
+// Returned string ends with a trailing newline when non-empty so callers can
+// concatenate the original user prompt directly.
+func DynamicPrefix(ctx context.Context, store *config.ConfigStore) string {
+	if os.Getenv("CRUSH_DISABLE_DYNAMIC_PREFIX") == "true" {
+		return ""
+	}
+	var sb strings.Builder
+	// Minute resolution: the wall-clock displayed here is the authoritative
+	// answer to "what time is it" / "几点了" — brain must read this instead
+	// of refusing on the AI-has-no-clock reflex. Cutting to the minute keeps
+	// the prefix stable for ~60 cache-friendly seconds at a time, well within
+	// Anthropic ephemeral cache's 5 min TTL.
+	now := DynamicNow()
+	sb.WriteString("<env_dynamic>\n")
+	fmt.Fprintf(&sb, "Today's date: %s\n", now.Format("1/2/2006"))
+	fmt.Fprintf(&sb, "Current local time: %s\n", now.Format("15:04 MST"))
+	sb.WriteString("</env_dynamic>\n")
+
+	if isGitRepo(store.WorkingDir()) {
+		status, err := getGitStatus(ctx, store.WorkingDir())
+		if err == nil && strings.TrimSpace(status) != "" {
+			sb.WriteString("<git_status>\n")
+			sb.WriteString(strings.TrimRight(status, "\n"))
+			sb.WriteString("\n</git_status>\n")
+		}
+	}
+	return sb.String()
 }
 
 func isGitRepo(dir string) bool {

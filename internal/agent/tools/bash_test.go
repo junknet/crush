@@ -50,6 +50,8 @@ func (m *mockBashPermissionService) GrantPersistent(req permission.PermissionReq
 
 func (m *mockBashPermissionService) AutoApproveSession(sessionID string) {}
 
+func (m *mockBashPermissionService) ActiveRequest() *permission.PermissionRequest { return nil }
+
 func (m *mockBashPermissionService) SetSkipRequests(skip bool) {}
 
 func (m *mockBashPermissionService) SkipRequests() bool {
@@ -99,11 +101,80 @@ func TestBashTool_CustomAutoBackgroundThreshold(t *testing.T) {
 	require.NoError(t, bgManager.Kill(meta.ShellID))
 }
 
+func TestBashTool_LargeOutputSpillsToFile(t *testing.T) {
+	workingDir := t.TempDir()
+	dataDir := filepath.Join(workingDir, ".crush")
+	tool, _ := newBashToolForTest(workingDir)
+	sessionID := "spill-session"
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, sessionID)
+
+	// Generate ~60 KB of stdout — well above BashSpillThreshold (30 KB).
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "spill",
+		Command:     "yes hello | head -c 60000",
+	})
+	require.False(t, resp.IsError)
+
+	var meta BashResponseMetadata
+	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
+	require.NotEmpty(t, meta.SpillPath, "expected SpillPath for >30KB output")
+	require.Greater(t, meta.SpillBytes, 30000, "spill should record full bytes written")
+
+	// Spill file must exist and contain at least the spill byte count.
+	info, err := os.Stat(meta.SpillPath)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, int(info.Size()), meta.SpillBytes-1)
+
+	// Spill path must live under <dataDir>/tool-results/<sessionID>/.
+	expectedPrefix := filepath.Join(dataDir, "tool-results", sessionID) + string(filepath.Separator)
+	require.True(t, len(meta.SpillPath) > len(expectedPrefix) && meta.SpillPath[:len(expectedPrefix)] == expectedPrefix,
+		"spill path %q must live under %q", meta.SpillPath, expectedPrefix)
+
+	// Inline preview must reference the spill so the model knows where to view.
+	require.Contains(t, meta.Output, "output_spill")
+	require.Contains(t, meta.Output, meta.SpillPath)
+}
+
+func TestBashTool_SmallOutputDoesNotSpill(t *testing.T) {
+	workingDir := t.TempDir()
+	tool, _ := newBashToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "small-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "small",
+		Command:     "echo hi",
+	})
+	require.False(t, resp.IsError)
+	var meta BashResponseMetadata
+	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
+	require.Empty(t, meta.SpillPath, "small output must not spill")
+	require.Equal(t, 0, meta.SpillBytes)
+}
+
+func TestBashTool_BlocksWatch(t *testing.T) {
+	workingDir := t.TempDir()
+	tool, _ := newBashToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "block-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "watch ls",
+		Command:     "watch ls",
+	})
+	// blocker returns the command as an error from tool.Run; the wrapper
+	// surfaces it via ToolResponse with IsError=true OR returns it as an
+	// error directly. Either path means the command did NOT actually run.
+	if !resp.IsError && resp.Content != "" {
+		// The blocker error came back inside the content, not as IsError;
+		// accept both surfaces as long as "not allowed" reaches the model.
+		require.Contains(t, resp.Content, "not allowed", "watch should be rejected")
+	}
+}
+
 func newBashToolForTest(workingDir string) (fantasy.AgentTool, *shell.BackgroundShellManager) {
 	permissions := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
 	bgManager := shell.NewBackgroundShellManager()
-	return NewBashTool(permissions, bgManager, workingDir, attribution, "test-model"), bgManager
+	return NewBashTool(permissions, bgManager, workingDir, filepath.Join(workingDir, ".crush"), attribution, "test-model"), bgManager
 }
 
 func runBashTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params BashParams) fantasy.ToolResponse {

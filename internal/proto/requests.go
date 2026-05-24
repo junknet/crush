@@ -30,6 +30,12 @@ type ConfigCompactRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
+// SessionCreateRequest represents a request to create a session.
+type SessionCreateRequest struct {
+	Title string `json:"title"`
+	Mode  string `json:"mode"`
+}
+
 // APIKeyKind discriminates the kind of credential carried in a
 // ConfigProviderKeyRequest. JSON's `any` loses Go type information, so
 // the wire format names the kind explicitly and the server decodes

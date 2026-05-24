@@ -231,20 +231,29 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 
 	var newContent string
 
+	// Normalise quotes / desanitise sanitised provider tokens before
+	// matching so common LLM-vs-file typography mismatches don't trip the
+	// edit. Pass empty new_string because deletion edits have nothing
+	// downstream to fix up.
+	actualOld, _, _ := resolveOldString(oldContent, oldString, "")
+	if actualOld != oldString {
+		oldString = actualOld
+	}
+
 	if replaceAll {
 		newContent = strings.ReplaceAll(oldContent, oldString, "")
 		if newContent == oldContent {
-			return oldStringNotFoundErr, nil
+			return fantasy.NewTextErrorResponse(notFoundDiagnostic(oldContent, oldString, filePath)), nil
 		}
 	} else {
 		index := strings.Index(oldContent, oldString)
 		if index == -1 {
-			return oldStringNotFoundErr, nil
+			return fantasy.NewTextErrorResponse(notFoundDiagnostic(oldContent, oldString, filePath)), nil
 		}
 
 		lastIndex := strings.LastIndex(oldContent, oldString)
 		if index != lastIndex {
-			return fantasy.NewTextErrorResponse("old_string appears multiple times in the file. Please provide more context to ensure a unique match, or set replace_all to true"), nil
+			return fantasy.NewTextErrorResponse(multipleMatchesDiagnostic(oldContent, oldString)), nil
 		}
 
 		newContent = oldContent[:index] + oldContent[index+len(oldString):]
@@ -365,17 +374,34 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 
 	var newContent string
 
+	// Same normalisation as the delete branch, but also rewrite newString
+	// so the file's typography (curly quotes, expanded tokens) is
+	// preserved when matching went through a fallback path.
+	actualOld, newString, _ := resolveOldString(oldContent, oldString, newString)
+	if actualOld != oldString {
+		oldString = actualOld
+	}
+	// Strip trailing whitespace from new_string for non-markdown files —
+	// LLMs frequently emit them and they round-trip through diff tools as
+	// noise that hides real changes.
+	if shouldStripTrailingWhitespace(filePath) {
+		newString = stripTrailingWhitespace(newString)
+	}
+
 	if replaceAll {
 		newContent = strings.ReplaceAll(oldContent, oldString, newString)
+		if newContent == oldContent {
+			return fantasy.NewTextErrorResponse(notFoundDiagnostic(oldContent, oldString, filePath)), nil
+		}
 	} else {
 		index := strings.Index(oldContent, oldString)
 		if index == -1 {
-			return oldStringNotFoundErr, nil
+			return fantasy.NewTextErrorResponse(notFoundDiagnostic(oldContent, oldString, filePath)), nil
 		}
 
 		lastIndex := strings.LastIndex(oldContent, oldString)
 		if index != lastIndex {
-			return oldStringMultipleMatchesErr, nil
+			return fantasy.NewTextErrorResponse(multipleMatchesDiagnostic(oldContent, oldString)), nil
 		}
 
 		newContent = oldContent[:index] + newString + oldContent[index+len(oldString):]

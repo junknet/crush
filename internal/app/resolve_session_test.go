@@ -22,8 +22,8 @@ func (m *mockSessionService) Subscribe(context.Context) <-chan pubsub.Event[sess
 	return make(chan pubsub.Event[session.Session])
 }
 
-func (m *mockSessionService) Create(_ context.Context, title string) (session.Session, error) {
-	s := session.Session{ID: "new-session-id", Title: title}
+func (m *mockSessionService) Create(_ context.Context, title string, mode session.Mode) (session.Session, error) {
+	s := session.Session{ID: "new-session-id", Title: title, Mode: mode}
 	m.created = append(m.created, s)
 	return s, nil
 }
@@ -89,6 +89,14 @@ func (m *mockSessionService) IsAgentToolSession(sessionID string) bool {
 	return ok
 }
 
+func (m *mockSessionService) PrepareSpeculativeSession(ctx context.Context, sessionID, specID string) error {
+	return nil
+}
+
+func (m *mockSessionService) PromoteSpeculativeSession(ctx context.Context, sessionID string) error {
+	return nil
+}
+
 func newTestApp(sessions session.Service) *App {
 	return &App{Sessions: sessions}
 }
@@ -100,6 +108,7 @@ func TestResolveSession_NewSession(t *testing.T) {
 	sess, err := app.resolveSession(t.Context(), "", false)
 	require.NoError(t, err)
 	require.Equal(t, "new-session-id", sess.ID)
+	require.Equal(t, session.ModeExecute, sess.Mode)
 	require.Len(t, mock.created, 1)
 }
 

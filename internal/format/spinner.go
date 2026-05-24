@@ -36,7 +36,7 @@ type model struct {
 	style   lipgloss.Style
 }
 
-func (m model) Init() tea.Cmd  { return m.spinner.Tick }
+func (m model) Init() tea.Cmd { return m.spinner.Tick }
 func (m model) View() tea.View {
 	return tea.NewView(fmt.Sprintf("%s %s", m.spinner.View(), m.style.Render(m.label)))
 }

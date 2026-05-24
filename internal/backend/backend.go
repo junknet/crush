@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"runtime"
 	"sync/atomic"
-	"time"
 
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
@@ -43,6 +42,18 @@ type Backend struct {
 	cfg        *config.ConfigStore
 	ctx        context.Context
 	shutdownFn ShutdownFunc
+
+	// sessionPaths caches sessionID -> filesystem path so a session can be
+	// resolved to its per-path runtime without rescanning every project. This
+	// is the session-primary index; "workspace" is just the internal runtime
+	// pool keyed by path (see session_index.go).
+	sessionPaths *csync.Map[string, string]
+
+	// sessionDrivers counts how many "driver" clients (a TUI actively running a
+	// session) are attached to each sessionID. A session is "alive" while >0.
+	// When the last driver detaches (TUI exits) the session drops off the
+	// session-primary listing (it stays in the DB; it's just no longer live).
+	sessionDrivers *csync.Map[string, *atomic.Int64]
 }
 
 // Workspace represents a running [app.App] workspace with its
@@ -53,20 +64,17 @@ type Workspace struct {
 	Path string
 	Cfg  *config.ConfigStore
 	Env  []string
-
-	// clients counts how many event streams (TUI/mobile clients) are
-	// currently watching this workspace. When it drops to zero the
-	// workspace's in-flight work is reaped. See [Backend.ClientDisconnected].
-	clients atomic.Int64
 }
 
 // New creates a new [Backend].
 func New(ctx context.Context, cfg *config.ConfigStore, shutdownFn ShutdownFunc) *Backend {
 	return &Backend{
-		workspaces: csync.NewMap[string, *Workspace](),
-		cfg:        cfg,
-		ctx:        ctx,
-		shutdownFn: shutdownFn,
+		workspaces:     csync.NewMap[string, *Workspace](),
+		cfg:            cfg,
+		ctx:            ctx,
+		shutdownFn:     shutdownFn,
+		sessionPaths:   csync.NewMap[string, string](),
+		sessionDrivers: csync.NewMap[string, *atomic.Int64](),
 	}
 }
 
@@ -77,39 +85,6 @@ func (b *Backend) GetWorkspace(id string) (*Workspace, error) {
 		return nil, ErrWorkspaceNotFound
 	}
 	return ws, nil
-}
-
-// reapTimeout bounds how long ClientDisconnected waits for a workspace's
-// background jobs to exit while reaping after the last client leaves.
-const reapTimeout = 5 * time.Second
-
-// ClientConnected records that a client (an event-stream watcher) attached to
-// the workspace. Pairs with [Backend.ClientDisconnected]; the two bracket the
-// lifetime of one [controllerV1.handleGetWorkspaceEvents] stream.
-func (b *Backend) ClientConnected(workspaceID string) {
-	if ws, err := b.GetWorkspace(workspaceID); err == nil {
-		ws.clients.Add(1)
-	}
-}
-
-// ClientDisconnected records that a client detached from the workspace. When
-// the count reaches zero — no client is watching the workspace anymore — the
-// workspace's in-flight work is reaped: running agent turns are cancelled and
-// background jobs are killed (subtrees and all), freeing build locks and CPU
-// instead of orphaning. The workspace itself survives so a reconnecting client
-// resumes from persisted session state.
-func (b *Backend) ClientDisconnected(workspaceID string) {
-	ws, err := b.GetWorkspace(workspaceID)
-	if err != nil {
-		return
-	}
-	if ws.clients.Add(-1) > 0 {
-		return
-	}
-	slog.Debug("Last client disconnected; reaping workspace work", "workspace", workspaceID)
-	ctx, cancel := context.WithTimeout(context.Background(), reapTimeout)
-	defer cancel()
-	ws.ReapActiveWork(ctx)
 }
 
 // ListWorkspaces returns all running workspaces.
@@ -127,6 +102,17 @@ func (b *Backend) ListWorkspaces() []proto.Workspace {
 func (b *Backend) CreateWorkspace(args proto.Workspace) (*Workspace, proto.Workspace, error) {
 	if args.Path == "" {
 		return nil, proto.Workspace{}, ErrPathRequired
+	}
+
+	// One runtime per path: reuse the existing workspace for this directory
+	// instead of spinning up a duplicate engine (and a second DB handle) for
+	// the same path. A "workspace" is a per-path runtime pool, not a per-client
+	// instance — every TUI/phone working in the same directory shares it, so
+	// session-liveness events reach all of them.
+	for _, ws := range b.workspaces.Seq2() {
+		if ws.Path == args.Path {
+			return ws, workspaceToProto(ws), nil
+		}
 	}
 
 	id := uuid.New().String()

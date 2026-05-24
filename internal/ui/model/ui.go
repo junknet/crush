@@ -38,6 +38,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/relay"
 	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
@@ -63,6 +64,13 @@ import (
 // MouseScrollThreshold defines how many lines to scroll the chat when a mouse
 // wheel event occurs.
 const MouseScrollThreshold = 5
+
+// mouseAutoScrollInterval is the delay between drag-to-scroll ticks at the
+// top or bottom edge of the chat viewport.
+const mouseAutoScrollInterval = 50 * time.Millisecond
+
+// mouseAutoScrollStep defines how many lines each drag-to-scroll tick moves.
+const mouseAutoScrollStep = 1
 
 // Compact mode breakpoints.
 const (
@@ -114,6 +122,11 @@ const (
 
 type openEditorMsg struct {
 	Text string
+}
+
+type mouseAutoScrollMsg struct {
+	Token     int
+	Direction int
 }
 
 type (
@@ -259,6 +272,9 @@ type UI struct {
 	// forceCompactMode tracks whether compact mode is forced by user toggle
 	forceCompactMode bool
 
+	// pendingSessionMode is the mode used for the next brand-new session.
+	pendingSessionMode session.Mode
+
 	// isCompact tracks whether we're currently in compact layout mode (either
 	// by user toggle or auto-switch based on window size)
 	isCompact bool
@@ -283,6 +299,11 @@ type UI struct {
 
 	// mouse highlighting related state
 	lastClickTime time.Time
+	// mouseAutoScroll tracks drag-to-scroll state while the pointer is pinned
+	// to the top or bottom edge of the chat viewport.
+	mouseAutoScrollToken     int
+	mouseAutoScrollDirection int
+	mouseAutoScrollPending   bool
 
 	// hyperCredits is the remaining Hyper credits, updated after each prompt.
 	hyperCredits *int
@@ -293,6 +314,17 @@ type UI struct {
 		index    int
 		draft    string
 	}
+
+	// ghostText is the current autocomplete suggestion rendered after the
+	// cursor in dim style. Empty when no suggestion is active. Updated
+	// via [suggestionUpdatedMsg]; accepted with Tab/Right-arrow at
+	// end-of-buffer; dismissed by any other key.
+	ghostText string
+	// suggestionCtx is the lifecycle context owning the suggestion
+	// subscription goroutine; cancelled on UI shutdown.
+	suggestionCtx    context.Context
+	suggestionCancel context.CancelFunc
+	suggestionEvents <-chan workspace.AgentSuggestionEvent
 }
 
 // New creates a new instance of the [UI] model.
@@ -353,6 +385,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		todoSpinner:         todoSpinner,
 		lspStates:           make(map[string]app.LSPClientInfo),
 		mcpStates:           make(map[string]mcp.ClientInfo),
+		pendingSessionMode:  session.ModeExecute,
 		notifyBackend:       notification.NoopBackend{},
 		notifyWindowFocused: true,
 		initialSessionID:    initialSessionID,
@@ -413,6 +446,11 @@ func (m *UI) Init() tea.Cmd {
 	if m.com.IsHyper() {
 		cmds = append(cmds, m.fetchHyperCredits())
 	}
+	// Kick off the ghost-text suggestion subscription. The first call sets
+	// up the broker channel and returns immediately with a sentinel msg;
+	// Update() reschedules itself so we keep draining for the lifetime of
+	// the UI.
+	cmds = append(cmds, m.startSuggestionSubscription())
 	return tea.Batch(cmds...)
 }
 
@@ -483,6 +521,90 @@ func (m *UI) setState(state uiState, focus uiFocusState) {
 	m.focus = focus
 	// Changing the state may change layout, so update it.
 	m.updateLayoutAndSize()
+}
+
+// focusEditor moves keyboard focus back to the prompt editor.
+func (m *UI) focusEditor() tea.Cmd {
+	if m.focus == uiFocusEditor {
+		if m.textarea.Focused() {
+			return nil
+		}
+		m.textarea.Focus()
+		return nil
+	}
+
+	m.focus = uiFocusEditor
+	m.textarea.Focus()
+	if m.chat != nil {
+		m.chat.Blur()
+		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+			return cmd
+		}
+	}
+	return nil
+}
+
+// stopMouseAutoScroll cancels any pending drag-to-scroll tick.
+func (m *UI) stopMouseAutoScroll() {
+	m.mouseAutoScrollToken++
+	m.mouseAutoScrollDirection = 0
+	m.mouseAutoScrollPending = false
+}
+
+// scheduleMouseAutoScroll arms the next drag-to-scroll tick for the given
+// direction. It keeps only one pending timer at a time.
+func (m *UI) scheduleMouseAutoScroll(direction int) tea.Cmd {
+	if direction == 0 || m.chat == nil || !m.chat.mouseDown {
+		return nil
+	}
+	if m.mouseAutoScrollPending && m.mouseAutoScrollDirection == direction {
+		return nil
+	}
+	if m.mouseAutoScrollDirection != direction {
+		m.mouseAutoScrollToken++
+	}
+	m.mouseAutoScrollDirection = direction
+	m.mouseAutoScrollPending = true
+	token := m.mouseAutoScrollToken
+	return tea.Tick(mouseAutoScrollInterval, func(time.Time) tea.Msg {
+		return mouseAutoScrollMsg{
+			Token:     token,
+			Direction: direction,
+		}
+	})
+}
+
+// runMouseAutoScrollStep scrolls the chat one line in the given direction and
+// schedules the next tick if the drag is still pinned to the edge.
+func (m *UI) runMouseAutoScrollStep(direction int) []tea.Cmd {
+	if m.chat == nil || !m.chat.mouseDown || direction == 0 {
+		m.stopMouseAutoScroll()
+		return nil
+	}
+
+	lines := mouseAutoScrollStep
+	if direction < 0 {
+		lines = -lines
+	}
+
+	beforeStartIdx, beforeLineOffset := m.chat.list.ScrollOffset()
+	m.chat.ScrollBy(lines)
+	afterStartIdx, afterLineOffset := m.chat.list.ScrollOffset()
+	if beforeStartIdx == afterStartIdx && beforeLineOffset == afterLineOffset {
+		m.stopMouseAutoScroll()
+		return nil
+	}
+
+	var cmds []tea.Cmd
+	if cmd := m.chat.RestartPausedVisibleAnimations(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	m.chat.HandleMouseDrag(m.chat.mouseDragViewportX, m.chat.mouseDragViewportY)
+	if cmd := m.scheduleMouseAutoScroll(direction); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return cmds
 }
 
 // loadCustomCommands loads the custom commands asynchronously.
@@ -583,6 +705,13 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// scrolled up.
 		m.chat.ScrollToBottom()
 		cmds = append(cmds, m.sendMessage(msg.Content, msg.Attachments...))
+
+	case relay.RelayPromptMsg:
+		m.chat.ScrollToBottom()
+		cmds = append(cmds, m.sendMessage(msg.Text))
+
+	case relay.RelayModelUpdateMsg:
+		_ = m.com.Workspace.UpdateAgentModel(context.TODO())
 
 	case userCommandsLoadedMsg:
 		m.customCommands = msg.Commands
@@ -712,6 +841,17 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case pubsub.Event[permission.PermissionNotification]:
 		m.handlePermissionNotification(msg.Payload)
+	case suggestionUpdatedMsg:
+		// Only adopt the suggestion when it matches the current session;
+		// background generations for a session we've since switched away
+		// from would surface stale ghost text.
+		if m.session != nil && msg.sessionID == m.session.ID {
+			m.ghostText = msg.text
+		}
+		// Re-arm the subscription so we keep draining future events.
+		if cmd := m.waitForSuggestion(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case ctrlCTimerExpiredMsg:
 		m.ctrlCArmed = false
 		m.ctrlCArmedAt = time.Time{}
@@ -748,6 +888,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
+		m.stopMouseAutoScroll()
 		if cmd := m.handleClickFocus(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -777,33 +918,32 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch m.state {
 		case uiChat:
-			if msg.Y <= 0 {
-				if cmd := m.chat.ScrollByAndAnimate(-1); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-				if !m.chat.SelectedItemInView() {
-					m.chat.SelectPrev()
-					if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				}
-			} else if msg.Y >= m.chat.Height()-1 {
-				if cmd := m.chat.ScrollByAndAnimate(1); cmd != nil {
-					cmds = append(cmds, cmd)
-				}
-				if !m.chat.SelectedItemInView() {
-					m.chat.SelectNext()
-					if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				}
-			}
-
 			x, y := msg.X, msg.Y
 			// Adjust for chat area position
 			x -= m.layout.main.Min.X
 			y -= m.layout.main.Min.Y
-			m.chat.HandleMouseDrag(x, y)
+			height := m.chat.Height()
+
+			if m.chat.mouseDown && height > 0 {
+				switch {
+				case y <= 0:
+					m.chat.HandleMouseDrag(x, 0)
+					if stepCmds := m.runMouseAutoScrollStep(-1); len(stepCmds) > 0 {
+						cmds = append(cmds, stepCmds...)
+					}
+				case y >= height-1:
+					m.chat.HandleMouseDrag(x, height-1)
+					if stepCmds := m.runMouseAutoScrollStep(1); len(stepCmds) > 0 {
+						cmds = append(cmds, stepCmds...)
+					}
+				default:
+					m.stopMouseAutoScroll()
+					m.chat.HandleMouseDrag(x, y)
+				}
+			} else {
+				m.stopMouseAutoScroll()
+				m.chat.HandleMouseDrag(x, y)
+			}
 		}
 
 	case tea.MouseReleaseMsg:
@@ -815,6 +955,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch m.state {
 		case uiChat:
+			m.stopMouseAutoScroll()
 			x, y := msg.X, msg.Y
 			// Adjust for chat area position
 			x -= m.layout.main.Min.X
@@ -827,6 +968,19 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return nil
 				}))
 			}
+		}
+	case mouseAutoScrollMsg:
+		if m.state != uiChat || m.chat == nil {
+			m.stopMouseAutoScroll()
+			break
+		}
+		if msg.Token != m.mouseAutoScrollToken || !m.chat.mouseDown || m.mouseAutoScrollDirection != msg.Direction {
+			m.stopMouseAutoScroll()
+			break
+		}
+		m.mouseAutoScrollPending = false
+		if cmds := m.runMouseAutoScrollStep(msg.Direction); len(cmds) > 0 {
+			return m, tea.Batch(cmds...)
 		}
 	case tea.MouseWheelMsg:
 		// Pass mouse events to dialogs first if any are open.
@@ -925,18 +1079,6 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ttl = DefaultStatusTTL
 		}
 		cmds = append(cmds, clearInfoMsgCmd(ttl))
-	case app.UpdateAvailableMsg:
-		text := fmt.Sprintf("Crush update available: v%s → v%s.", msg.CurrentVersion, msg.LatestVersion)
-		if msg.IsDevelopment {
-			text = fmt.Sprintf("This is a development version of Crush. The latest version is v%s.", msg.LatestVersion)
-		}
-		ttl := 10 * time.Second
-		m.status.SetInfoMsg(util.InfoMsg{
-			Type: util.InfoTypeUpdate,
-			Msg:  text,
-			TTL:  ttl,
-		})
-		cmds = append(cmds, clearInfoMsgCmd(ttl))
 	case util.ClearStatusMsg:
 		m.status.ClearInfoMsg()
 	case completions.CompletionItemsLoadedMsg:
@@ -957,16 +1099,11 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// This logic gets triggered on any message type, but should it?
-	switch m.focus {
-	case uiFocusMain:
-	case uiFocusEditor:
-		// Textarea placeholder logic
-		if m.isAgentBusy() {
-			m.textarea.Placeholder = m.workingPlaceholder
-		} else {
-			m.textarea.Placeholder = m.readyPlaceholder
-		}
+	// Textarea placeholder logic
+	if m.isAgentBusy() {
+		m.textarea.Placeholder = m.workingPlaceholder
+	} else {
+		m.textarea.Placeholder = m.readyPlaceholder
 	}
 
 	// at this point this can only handle [message.Attachment] message, and we
@@ -1791,6 +1928,11 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 			return true
+		case key.Matches(msg, m.keyMap.PlanMode):
+			if cmd := m.toggleSessionMode(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return true
 		case key.Matches(msg, m.keyMap.Sessions):
 			if cmd := m.openSessionsDialog(); cmd != nil {
 				cmds = append(cmds, cmd)
@@ -1854,11 +1996,36 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	// Handle cancel key when agent is busy.
-	if key.Matches(msg, m.keyMap.Chat.Cancel) {
+	isEscapeKey := msg.String() == "esc" || msg.String() == "alt+esc"
+	if isEscapeKey || key.Matches(msg, m.keyMap.Chat.Cancel) {
 		if m.isAgentBusy() {
 			if cmd := m.cancelAgent(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+			return tea.Batch(cmds...)
+		}
+		if (m.state == uiChat || m.state == uiLanding) &&
+			(m.focus == uiFocusMain || m.mouseAutoScrollPending || (m.chat != nil && m.chat.mouseDown)) {
+			m.stopMouseAutoScroll()
+			if m.chat != nil {
+				m.chat.ClearMouse()
+			}
+			if m.focus == uiFocusMain {
+				if cmd := m.focusEditor(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+			return tea.Batch(cmds...)
+		}
+	}
+
+	// Any unmodified keyboard input should snap back to the editor so the
+	// prompt buffer always stays the primary interaction surface.
+	if (m.state == uiChat || m.state == uiLanding) && m.focus == uiFocusMain && msg.Mod&(tea.ModCtrl|tea.ModAlt) == 0 {
+		if cmd := m.focusEditor(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if key.Matches(msg, m.keyMap.Tab) {
 			return tea.Batch(cmds...)
 		}
 	}
@@ -1909,6 +2076,38 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 			if ok := m.attachments.Update(msg); ok {
 				return tea.Batch(cmds...)
+			}
+
+			// Ghost-text accept: Tab and Right-Arrow at end of buffer commit
+			// the active suggestion into the textarea. Enter on an empty
+			// buffer also accepts (mirrors free-code's UX). Must run before
+			// the regular Tab focus switch / SendMessage handlers below.
+			if m.ghostSuffix() != "" {
+				keyStr := msg.String()
+				switch keyStr {
+				case "tab":
+					m.acceptGhost("tab")
+					return tea.Batch(cmds...)
+				case "right":
+					if cursorAtEndOfBuffer(&m.textarea) {
+						m.acceptGhost("right")
+						return tea.Batch(cmds...)
+					}
+				case "enter":
+					if strings.TrimSpace(m.textarea.Value()) == "" {
+						m.acceptGhost("enter")
+						return tea.Batch(cmds...)
+					}
+				}
+				// Any non-navigation keypress dismisses the ghost so we
+				// don't render stale dim text on top of fresh input.
+				switch keyStr {
+				case "up", "down", "left", "home", "end", "pgup", "pgdown",
+					"ctrl+a", "ctrl+e", "ctrl+left", "ctrl+right":
+					// Navigation keeps the ghost.
+				default:
+					m.dismissGhost()
+				}
 			}
 
 			switch {
@@ -1970,6 +2169,10 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 				m.randomizePlaceholders()
 				m.historyReset()
+				// A new user turn invalidates any pending ghost from the
+				// previous turn; coordinator will publish a fresh one once
+				// the assistant replies.
+				m.ghostText = ""
 
 				return tea.Batch(m.sendMessage(value, attachments...), m.loadPromptHistory())
 			case key.Matches(msg, m.keyMap.Chat.NewSession):
@@ -2002,14 +2205,22 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				m.closeCompletions()
 				cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, prevHeight))
 			case key.Matches(msg, m.keyMap.Editor.HistoryPrev):
-				cmd := m.handleHistoryUp(msg)
-				if cmd != nil {
-					cmds = append(cmds, cmd)
+				if m.isAtEditorStart() {
+					cmd := m.handleHistoryUp(msg)
+					if cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+				} else {
+					cmds = append(cmds, m.updateTextarea(msg))
 				}
 			case key.Matches(msg, m.keyMap.Editor.HistoryNext):
-				cmd := m.handleHistoryDown(msg)
-				if cmd != nil {
-					cmds = append(cmds, cmd)
+				if m.isAtEditorEnd() {
+					cmd := m.handleHistoryDown(msg)
+					if cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+				} else {
+					cmds = append(cmds, m.updateTextarea(msg))
 				}
 			case key.Matches(msg, m.keyMap.Editor.Escape):
 				cmd := m.handleHistoryEscape(msg)
@@ -2020,6 +2231,13 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if cmd := m.openCommandsDialog(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
+			case key.Matches(msg, m.keyMap.Tab):
+				// Keep keyboard focus on the editor; Tab should not move the user
+				// into the chat list.
+				if cmd := m.focusEditor(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return tea.Batch(cmds...)
 			default:
 				if handleGlobalKeys(msg) {
 					// Handle global keys first before passing to textarea.
@@ -2082,9 +2300,9 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		case uiFocusMain:
 			switch {
 			case key.Matches(msg, m.keyMap.Tab):
-				m.focus = uiFocusEditor
-				cmds = append(cmds, m.textarea.Focus())
-				m.chat.Blur()
+				if cmd := m.focusEditor(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			case key.Matches(msg, m.keyMap.Chat.NewSession):
 				if !m.hasSession() {
 					break
@@ -2182,6 +2400,7 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 		scr,
 		area,
 		m.session,
+		m.currentSessionMode(),
 		m.isCompact,
 		m.detailsOpen,
 		area.Dx(),
@@ -2399,6 +2618,7 @@ func (m *UI) ShortHelp() []key.Binding {
 			tab,
 			commands,
 			k.Models,
+			k.PlanMode,
 		)
 
 		switch m.focus {
@@ -2428,6 +2648,7 @@ func (m *UI) ShortHelp() []key.Binding {
 			binds,
 			commands,
 			k.Models,
+			k.PlanMode,
 			k.Editor.Newline,
 		)
 	}
@@ -2483,6 +2704,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			tab,
 			commands,
 			k.Models,
+			k.PlanMode,
 			k.Sessions,
 		)
 		if hasSession {
@@ -2544,6 +2766,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 				[]key.Binding{
 					commands,
 					k.Models,
+					k.PlanMode,
 					k.Sessions,
 				},
 			)
@@ -3161,11 +3384,161 @@ func (m *UI) renderEditorView(width int) string {
 	if len(m.attachments.List()) > 0 {
 		attachmentsView = m.attachments.Render(width)
 	}
+	editorBody := m.textarea.View()
+	if g := m.ghostSuffix(); g != "" {
+		editorBody = appendGhostToEditor(editorBody, g)
+	}
 	return strings.Join([]string{
 		attachmentsView,
-		m.textarea.View(),
+		editorBody,
 		"", // margin at bottom of editor
 	}, "\n")
+}
+
+// ghostSuffix returns the ghost-text the editor should show appended to
+// the textarea content. Returns "" when no suggestion is active, the
+// textarea has content the user is overlapping with the suggestion, or
+// the user has scrolled the cursor off the end of the buffer.
+func (m *UI) ghostSuffix() string {
+	if m.ghostText == "" {
+		return ""
+	}
+	// Only show ghost when the focus is on the editor and the cursor sits
+	// at the very end of the buffer; otherwise the rendering would inject
+	// dim text into the middle of what the user is editing.
+	if !m.textarea.Focused() {
+		return ""
+	}
+	// If the user has already typed a prefix that matches the suggestion,
+	// hide that prefix from the ghost so accept-on-tab still produces the
+	// intended final string.
+	val := m.textarea.Value()
+	suggestion := m.ghostText
+	if val != "" && strings.HasPrefix(suggestion, val) {
+		return strings.TrimPrefix(suggestion, val)
+	}
+	// If the buffer doesn't start the suggestion verbatim, only show the
+	// ghost on an empty buffer — otherwise it's confusing to see dim
+	// content next to unrelated user input.
+	if val != "" {
+		return ""
+	}
+	return suggestion
+}
+
+// appendGhostToEditor splices the ghost string into the last visible line of
+// the rendered textarea. Bubble Tea textarea.View() returns a multi-line
+// string with trailing padding; we attach the ghost to the end of the line
+// the cursor lives on, which is the last non-empty line. The styling
+// applied here is intentionally minimal (faint dim) so it never competes
+// with the user's real input.
+func appendGhostToEditor(editorBody, ghost string) string {
+	style := lipgloss.NewStyle().Faint(true)
+	dim := style.Render(ghost)
+	lines := strings.Split(editorBody, "\n")
+	// Walk from the bottom to find the last non-empty line; that's where
+	// the cursor visually sits.
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			lines[i] = lines[i] + dim
+			return strings.Join(lines, "\n")
+		}
+	}
+	// All lines were blank (empty buffer). Drop the ghost on line 0.
+	if len(lines) == 0 {
+		return dim
+	}
+	lines[0] = lines[0] + dim
+	return strings.Join(lines, "\n")
+}
+
+// suggestionUpdatedMsg is the tea.Msg fired when the workspace suggestion
+// subscription delivers a new (possibly empty) ghost-text candidate.
+type suggestionUpdatedMsg struct {
+	sessionID string
+	text      string
+}
+
+// startSuggestionSubscription wires the workspace's suggestion service to
+// the tea program. It is safe to call when the workspace doesn't expose
+// suggestions (client mode or disabled) — in that case it returns a nil
+// command and ghostText stays empty for the whole session.
+func (m *UI) startSuggestionSubscription() tea.Cmd {
+	svc := m.com.Workspace.AgentSuggestion()
+	if svc == nil {
+		return nil
+	}
+	if m.suggestionCancel != nil {
+		// Already running (e.g. Init called twice during a test).
+		return m.waitForSuggestion()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.suggestionCtx = ctx
+	m.suggestionCancel = cancel
+	m.suggestionEvents = svc.Subscribe(ctx)
+	return m.waitForSuggestion()
+}
+
+// waitForSuggestion blocks (in a tea.Cmd goroutine) on the next event
+// from the suggestion channel and dispatches it back to Update. After the
+// msg is processed, Update re-calls this to keep draining.
+func (m *UI) waitForSuggestion() tea.Cmd {
+	ch := m.suggestionEvents
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return suggestionUpdatedMsg{sessionID: ev.SessionID, text: ev.Text}
+	}
+}
+
+// acceptGhost commits the current ghost suffix into the textarea buffer
+// and clears it. method is "tab" or "right" for telemetry.
+func (m *UI) acceptGhost(method string) tea.Cmd {
+	suffix := m.ghostSuffix()
+	if suffix == "" {
+		return nil
+	}
+	// Insert at the current position; the suffix is computed against the
+	// existing value so InsertString appends it correctly.
+	m.textarea.InsertString(suffix)
+	if svc := m.com.Workspace.AgentSuggestion(); svc != nil && m.session != nil {
+		svc.MarkAccepted(m.session.ID, method, len(suffix))
+	}
+	m.ghostText = ""
+	return nil
+}
+
+// cursorAtEndOfBuffer reports whether the textarea cursor is positioned
+// at the end of the input — the only state where consuming a Right-Arrow
+// keystroke as "accept ghost" is safe (otherwise we would silently break
+// in-line navigation). bubbles v2 textarea does not expose a public byte
+// cursor offset; we approximate by checking that the cursor sits on the
+// last line. Combined with the ghostSuffix() != "" guard at the call
+// site this is conservative enough for the prompt-style single-line use.
+func cursorAtEndOfBuffer(ta *textarea.Model) bool {
+	if ta == nil {
+		return false
+	}
+	return ta.Line() == ta.LineCount()-1
+}
+
+// dismissGhost discards the current ghost suggestion. Called when the
+// user types any character other than the accept keys, or when a new
+// turn starts.
+func (m *UI) dismissGhost() {
+	if m.ghostText == "" {
+		return
+	}
+	length := len(m.ghostText)
+	m.ghostText = ""
+	if svc := m.com.Workspace.AgentSuggestion(); svc != nil && m.session != nil {
+		svc.MarkRejected(m.session.ID, length)
+	}
 }
 
 // cacheSidebarLogo renders and caches the sidebar logo at the specified width.
@@ -3211,7 +3584,12 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 
 	var cmds []tea.Cmd
 	if !m.hasSession() {
-		newSession, err := m.com.Workspace.CreateSession(context.Background(), "New Session")
+		mode := m.currentSessionMode()
+		sessionTitle := "New Session"
+		if mode.IsPlan() {
+			sessionTitle = "Plan Session"
+		}
+		newSession, err := m.com.Workspace.CreateSession(context.Background(), sessionTitle, mode)
 		if err != nil {
 			return util.ReportError(err)
 		}
@@ -3220,6 +3598,7 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 		}
 		if newSession.ID != "" {
 			m.session = &newSession
+			m.setCurrentSessionMode(mode)
 			cmds = append(cmds, m.loadSession(newSession.ID))
 		}
 		m.setState(uiChat, m.focus)
@@ -3236,8 +3615,9 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 
 	// Capture session ID to avoid race with main goroutine updating m.session.
 	sessionID := m.session.ID
+	planMode := m.currentSessionMode().IsPlan()
 	cmds = append(cmds, func() tea.Msg {
-		err := m.com.Workspace.AgentRun(context.Background(), sessionID, content, attachments...)
+		err := m.com.Workspace.AgentRun(context.Background(), sessionID, content, planMode, attachments...)
 		if err != nil {
 			isCancelErr := errors.Is(err, context.Canceled)
 			if isCancelErr {
@@ -3536,6 +3916,7 @@ func (m *UI) newSession() tea.Cmd {
 		return nil
 	}
 
+	m.pendingSessionMode = m.currentSessionMode()
 	m.session = nil
 	m.sessionFiles = nil
 	m.sessionFileReads = nil

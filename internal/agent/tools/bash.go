@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"fmt"
 	"html/template"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -49,14 +50,33 @@ type BashResponseMetadata struct {
 	StderrBytes      int    `json:"stderr_bytes"`
 	Background       bool   `json:"background,omitempty"`
 	ShellID          string `json:"shell_id,omitempty"`
+	SpillPath        string `json:"spill_path,omitempty"`
+	SpillBytes       int    `json:"spill_bytes,omitempty"`
 }
 
 const (
 	BashToolName = "bash"
 
 	DefaultAutoBackgroundAfter = 60 // Commands taking longer automatically become background jobs
-	MaxOutputLength            = 30000
-	BashNoOutput               = "no output"
+	// BashPreviewBytes is what the model sees inline. Head bytes are the
+	// most informative slice of a long capture (banner, args, first error
+	// stack frame) — tails are usually repetitive noise. So we keep the
+	// head and route the full transcript to disk.
+	BashPreviewBytes = 8000
+	// BashSpillThreshold is the size at which we stop returning the full
+	// transcript inline and write it to disk instead. The number is held
+	// in sync with MaxOutputLength so the prompt-embedded byte budget
+	// stays stable across the spill rewrite.
+	BashSpillThreshold = 30000
+	// MaxOutputLength is kept as the legacy name for the inline truncation
+	// budget used by callers that do not spill (e.g. job_output snapshots).
+	MaxOutputLength = BashSpillThreshold
+	BashNoOutput    = "no output"
+
+	// spillGCMaxAge is how long a spilled bash transcript lingers before
+	// the lazy GC removes it. A week is enough for one work cycle of
+	// review and short enough that .crush/ doesn't accumulate forever.
+	spillGCMaxAge = 7 * 24 * time.Hour
 )
 
 //go:embed bash.md.tpl
@@ -202,10 +222,18 @@ func blockFuncs() []shell.BlockFunc {
 
 		// `go test -exec` can run arbitrary commands
 		shell.ArgumentsBlocker("go", []string{"test"}, []string{"-exec"}),
+
+		// Streaming/follow primitives that wedge the tool loop — the agent
+		// should use schedule_wakeup / monitor / job_output instead.
+		// (Plain `sleep` is left allowed; it is a legitimate shell
+		// primitive and existing tests pipeline it through `&&`.)
+		shell.CommandsBlocker([]string{"watch"}),
+		shell.ArgumentsBlocker("tail", nil, []string{"-f"}),
+		shell.ArgumentsBlocker("tail", nil, []string{"--follow"}),
 	}
 }
 
-func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShellManager, workingDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
+func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShellManager, workingDir, dataDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
@@ -281,7 +309,11 @@ func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShel
 					semantics := deriveCommandSemantics(params.Command, stdout, execErr)
 					stdoutBytes := len(stdout)
 					stderrBytes := len(stderr)
+					spillPath, spillBytes := maybeSpillOutput(dataDir, sessionID, call.ID, stdout, stderr)
 					stdout = formatOutput(stdout, stderr, execErr)
+					if spillPath != "" {
+						stdout += fmt.Sprintf("\n<output_spill bytes=\"%d\" path=\"%s\">Full transcript written to disk; use the view tool on this path for the complete output.</output_spill>", spillBytes, spillPath)
+					}
 					endTime := time.Now()
 
 					metadata := BashResponseMetadata{
@@ -292,6 +324,8 @@ func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShel
 						Description:      params.Description,
 						Background:       params.RunInBackground,
 						WorkingDirectory: bgShell.WorkingDir,
+						SpillPath:        spillPath,
+						SpillBytes:       spillBytes,
 						ExitCode:         semantics.ExitCode,
 						Outcome:          string(semantics.Outcome),
 						StdoutBytes:      stdoutBytes,
@@ -379,7 +413,11 @@ func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShel
 				semantics := deriveCommandSemantics(params.Command, stdout, execErr)
 				stdoutBytes := len(stdout)
 				stderrBytes := len(stderr)
+				spillPath, spillBytes := maybeSpillOutput(dataDir, sessionID, call.ID, stdout, stderr)
 				stdout = formatOutput(stdout, stderr, execErr)
+				if spillPath != "" {
+					stdout += fmt.Sprintf("\n<output_spill bytes=\"%d\" path=\"%s\">Full transcript written to disk; use the view tool on this path for the complete output.</output_spill>", spillBytes, spillPath)
+				}
 				endTime := time.Now()
 
 				metadata := BashResponseMetadata{
@@ -394,6 +432,8 @@ func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShel
 					Outcome:          string(semantics.Outcome),
 					StdoutBytes:      stdoutBytes,
 					StderrBytes:      stderrBytes,
+					SpillPath:        spillPath,
+					SpillBytes:       spillBytes,
 				}
 				appendBashCommandTrace(ctx, call.ID, params, metadata, stdout)
 				if stdout == "" {
@@ -461,21 +501,88 @@ func formatOutput(stdout, stderr string, execErr error) string {
 	return stdout
 }
 
+// TruncateOutput keeps the first MaxOutputLength bytes of content and drops
+// the tail. The head is where the load-bearing information lives (command
+// banner, argv echo, first error stack frame); the tail is usually
+// repetitive output the model can ignore. When callers need the full
+// transcript, they should spill to disk via spillBashOutput first and view
+// the resulting file directly.
 func TruncateOutput(content string) string {
 	if len(content) <= MaxOutputLength {
 		return content
 	}
-
-	halfLength := MaxOutputLength / 2
-	start := content[:halfLength]
-	end := content[len(content)-halfLength:]
-
-	truncatedLinesCount := countLines(content[halfLength : len(content)-halfLength])
-	return fmt.Sprintf("%s\n\n... [%d lines truncated] ...\n\n%s", start, truncatedLinesCount, end)
+	dropped := len(content) - MaxOutputLength
+	droppedLines := countLines(content[MaxOutputLength:])
+	return fmt.Sprintf("%s\n\n... [%d bytes / %d lines truncated from tail — view spill file for full output] ...\n", content[:MaxOutputLength], dropped, droppedLines)
 }
 
 func truncateOutput(content string) string {
 	return TruncateOutput(content)
+}
+
+// headPreview returns the first BashPreviewBytes of content, padded with a
+// truncation footer when the content was longer.
+func headPreview(content string) string {
+	if len(content) <= BashPreviewBytes {
+		return content
+	}
+	dropped := len(content) - BashPreviewBytes
+	return fmt.Sprintf("%s\n\n... [%d bytes truncated from tail — see <output_spill> for full output] ...\n", content[:BashPreviewBytes], dropped)
+}
+
+// maybeSpillOutput writes the full transcript to disk when combined output
+// exceeds BashSpillThreshold. Delegates to the package-shared [Spiller]
+// abstraction so view/grep/fetch can reuse the same pattern. Returns
+// ("", 0) on no-op or write failure — failure is treated as no-op so a
+// disk hiccup never loses the inline preview.
+func maybeSpillOutput(dataDir, sessionID, callID, stdout, stderr string) (string, int) {
+	spiller := NewSpiller(dataDir)
+	res, ok := spiller.MaybeSpill(sessionID, callID, "bash", BashSpillThreshold,
+		SpillPart{Content: stdout},
+		SpillPart{Name: "stderr", Content: stderr},
+	)
+	if !ok {
+		return "", 0
+	}
+	return res.Path, res.Bytes
+}
+
+func sanitizeCallID(id string) string {
+	if id == "" {
+		return "anon"
+	}
+	out := make([]rune, 0, len(id))
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			out = append(out, r)
+		default:
+			out = append(out, '_')
+		}
+	}
+	if len(out) == 0 {
+		return "anon"
+	}
+	if len(out) > 64 {
+		out = out[:64]
+	}
+	return string(out)
+}
+
+// gcSpillDir walks tool-results/* and unlinks files older than maxAge. Best
+// effort; errors are intentionally swallowed because GC failure must not
+// fail the current bash command.
+func gcSpillDir(root string, maxAge time.Duration) {
+	cutoff := time.Now().Add(-maxAge)
+	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(p)
+		}
+		return nil
+	})
 }
 
 func countLines(s string) int {

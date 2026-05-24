@@ -60,7 +60,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("simple test", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -79,7 +79,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("read a file", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 				res, err := agent.Run(t.Context(), SessionAgentCall{
 					Prompt:          "Read the go mod",
@@ -119,7 +119,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("update a file", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -171,7 +171,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("bash tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -215,7 +215,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("download tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -258,7 +258,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("fetch tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -297,7 +297,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("glob tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -337,7 +337,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("grep tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -377,7 +377,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("ls tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -418,7 +418,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("multiedit tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -462,7 +462,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("sourcegraph tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -501,7 +501,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("write tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -546,7 +546,7 @@ func TestWorkerAgent(t *testing.T) {
 			t.Run("parallel tool calls", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
-				session, err := env.sessions.Create(t.Context(), "New Session")
+				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
@@ -663,7 +663,7 @@ func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 	agent := sa.(*sessionAgent)
 
 	ctx := t.Context()
-	sess, err := env.sessions.Create(ctx, "test")
+	sess, err := env.sessions.Create(ctx, "test", session.ModeExecute)
 	require.NoError(t, err)
 
 	// User message with text, a text attachment, and an image attachment.
@@ -708,7 +708,7 @@ func TestPreparePrompt_DropsUserMessageAfterUnsupportedAttachmentFiltering(t *te
 	agent := sa.(*sessionAgent)
 
 	ctx := t.Context()
-	sess, err := env.sessions.Create(ctx, "test")
+	sess, err := env.sessions.Create(ctx, "test", session.ModeExecute)
 	require.NoError(t, err)
 
 	// User message with only an image attachment. When the model does not
@@ -737,7 +737,7 @@ func TestPreparePrompt_AddsAnthropicToolResultFallbackText(t *testing.T) {
 	agent := sa.(*sessionAgent)
 
 	ctx := t.Context()
-	sess, err := env.sessions.Create(ctx, "test")
+	sess, err := env.sessions.Create(ctx, "test", session.ModeExecute)
 	require.NoError(t, err)
 
 	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
@@ -792,7 +792,7 @@ func TestPreparePrompt_OrphanedToolUse(t *testing.T) {
 	agent := sa.(*sessionAgent)
 
 	ctx := t.Context()
-	sess, err := env.sessions.Create(ctx, "test")
+	sess, err := env.sessions.Create(ctx, "test", session.ModeExecute)
 	require.NoError(t, err)
 
 	// Create a user message.
@@ -859,7 +859,7 @@ func TestPreparePrompt_OrphanedToolUseMixed(t *testing.T) {
 	agent := sa.(*sessionAgent)
 
 	ctx := t.Context()
-	sess, err := env.sessions.Create(ctx, "test")
+	sess, err := env.sessions.Create(ctx, "test", session.ModeExecute)
 	require.NoError(t, err)
 
 	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{

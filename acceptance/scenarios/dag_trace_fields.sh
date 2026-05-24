@@ -6,7 +6,7 @@ source "$(dirname "$0")/../common.sh"
 need_tui
 need_waitai
 
-PROMPT="${PROMPT:-用一句话介绍 nim 这个语言}"
+PROMPT="${PROMPT:-Please use the 'agent' tool to delegate all parts of this task. You must not run bash commands directly in the brain agent. First, delegate to an explore agent (role='explore') to check if the file 'test_done.txt' exists in the repository. Second, delegate to a worker agent (role='worker') to write 'done' into a new file named 'test_done.txt' in the repository root. Third, delegate to an explore agent (role='explore') to view 'test_done.txt' and verify it contains 'done'. Fourth, delegate to a worker agent (role='worker') to delete the file 'test_done.txt'. You must use the agent tool for each step.}"
 
 log "starting crush against WaitAI"
 "$TUI" start "$SESS" 160 45 -- \

@@ -270,11 +270,13 @@ definitions:
   config.SelectedModelType:
     enum:
     - brain
+    - plan
     - worker
     - explore
     type: string
     x-enum-varnames:
     - SelectedModelTypeBrain
+    - SelectedModelTypePlan
     - SelectedModelTypeWorker
     - SelectedModelTypeExplore
   config.TUIOptions:
@@ -467,19 +469,10 @@ definitions:
       model_cfg:
         $ref: '#/definitions/config.SelectedModel'
     type: object
-  proto.AgentMessage:
-    properties:
-      attachments:
-        items:
-          $ref: '#/definitions/proto.Attachment'
-        type: array
-      prompt:
-        type: string
-      session_id:
-        type: string
-    type: object
   proto.AgentSession:
     properties:
+      alive:
+        type: boolean
       completion_tokens:
         type: integer
       cost:
@@ -492,7 +485,15 @@ definitions:
         type: boolean
       message_count:
         type: integer
+      mode:
+        type: string
       parent_session_id:
+        type: string
+      path:
+        description: |-
+          Path is the session's working directory; Alive reports whether a driver
+          (a TUI) is currently attached. These power the session-primary view that
+          replaces the workspace grouping on clients.
         type: string
       prompt_tokens:
         type: integer
@@ -506,19 +507,6 @@ definitions:
         type: array
       updated_at:
         type: integer
-    type: object
-  proto.Attachment:
-    properties:
-      content:
-        items:
-          type: integer
-        type: array
-      file_name:
-        type: string
-      file_path:
-        type: string
-      mime_type:
-        type: string
     type: object
   proto.ConfigCompactRequest:
     properties:
@@ -731,6 +719,8 @@ definitions:
     type: object
   proto.Session:
     properties:
+      alive:
+        type: boolean
       completion_tokens:
         type: integer
       cost:
@@ -741,7 +731,15 @@ definitions:
         type: string
       message_count:
         type: integer
+      mode:
+        type: string
       parent_session_id:
+        type: string
+      path:
+        description: |-
+          Path is the session's working directory; Alive reports whether a driver
+          (a TUI) is currently attached. These power the session-primary view that
+          replaces the workspace grouping on clients.
         type: string
       prompt_tokens:
         type: integer
@@ -755,6 +753,13 @@ definitions:
         type: array
       updated_at:
         type: integer
+    type: object
+  proto.SessionCreateRequest:
+    properties:
+      mode:
+        type: string
+      title:
+        type: string
     type: object
   proto.Todo:
     properties:
@@ -1063,39 +1068,6 @@ paths:
       summary: Get agent info
       tags:
       - agent
-    post:
-      consumes:
-      - application/json
-      parameters:
-      - description: Workspace ID
-        in: path
-        name: id
-        required: true
-        type: string
-      - description: Agent message
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/proto.AgentMessage'
-      responses:
-        "200":
-          description: OK
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/proto.Error'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/proto.Error'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/proto.Error'
-      summary: Send message to agent
-      tags:
-      - agent
   /workspaces/{id}/agent/default-explore-model:
     get:
       parameters:
@@ -1124,28 +1096,6 @@ paths:
           schema:
             $ref: '#/definitions/proto.Error'
       summary: Get default explore model
-      tags:
-      - agent
-  /workspaces/{id}/agent/init:
-    post:
-      parameters:
-      - description: Workspace ID
-        in: path
-        name: id
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/proto.Error'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/proto.Error'
-      summary: Initialize agent
       tags:
       - agent
   /workspaces/{id}/agent/sessions/{sid}:
@@ -1177,33 +1127,6 @@ paths:
           schema:
             $ref: '#/definitions/proto.Error'
       summary: Get agent session
-      tags:
-      - agent
-  /workspaces/{id}/agent/sessions/{sid}/cancel:
-    post:
-      parameters:
-      - description: Workspace ID
-        in: path
-        name: id
-        required: true
-        type: string
-      - description: Session ID
-        in: path
-        name: sid
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/proto.Error'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/proto.Error'
-      summary: Cancel agent session
       tags:
       - agent
   /workspaces/{id}/agent/sessions/{sid}/prompts/clear:
@@ -1322,28 +1245,6 @@ paths:
           schema:
             $ref: '#/definitions/proto.Error'
       summary: Summarize session
-      tags:
-      - agent
-  /workspaces/{id}/agent/update:
-    post:
-      parameters:
-      - description: Workspace ID
-        in: path
-        name: id
-        required: true
-        type: string
-      responses:
-        "200":
-          description: OK
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/proto.Error'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/proto.Error'
-      summary: Update agent
       tags:
       - agent
   /workspaces/{id}/config:
@@ -1602,30 +1503,6 @@ paths:
       summary: Set a config field
       tags:
       - config
-  /workspaces/{id}/events:
-    get:
-      parameters:
-      - description: Workspace ID
-        in: path
-        name: id
-        required: true
-        type: string
-      produces:
-      - text/event-stream
-      responses:
-        "200":
-          description: OK
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/proto.Error'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/proto.Error'
-      summary: Stream workspace events (SSE)
-      tags:
-      - workspaces
   /workspaces/{id}/filetracker/lastread:
     get:
       parameters:
@@ -2259,12 +2136,12 @@ paths:
         name: id
         required: true
         type: string
-      - description: Session creation params (title)
+      - description: Session creation params
         in: body
         name: request
         required: true
         schema:
-          $ref: '#/definitions/proto.Session'
+          $ref: '#/definitions/proto.SessionCreateRequest'
       produces:
       - application/json
       responses:

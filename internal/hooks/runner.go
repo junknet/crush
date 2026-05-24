@@ -33,21 +33,59 @@ type compiledHook struct {
 }
 
 // Runner executes hook commands and aggregates their results.
+//
+// A single Runner instance can serve every event slot — PreToolUse,
+// PostToolUse, Stop, Notification — because Run picks the per-event
+// hook slice via eventHooks. Legacy callers that hand-pick one event's
+// hooks via NewRunner keep working: those hooks are stored as the
+// PreToolUse slot and Run still uses the eventName arg as the lookup
+// key, falling back to the legacy slot when no per-event map is set.
 type Runner struct {
-	hooks      []compiledHook
+	// hooks is the legacy single-slot slice. Populated by [NewRunner]
+	// for backwards compatibility with the old "one runner per event"
+	// usage in tests and pre-event-router production wiring.
+	hooks []compiledHook
+
+	// eventHooks is the per-event router populated by [NewEventRunner].
+	// When non-nil, Run routes the call to eventHooks[eventName] and
+	// falls back to `hooks` only if the slot is missing entirely.
+	eventHooks map[string][]compiledHook
+
 	cwd        string
 	projectDir string
 }
 
-// NewRunner creates a Runner from the given hook configs. Each hook's
-// Matcher is compiled here so the Runner is self-sufficient; callers do
-// not have to pre-compile matchers on the config, and reloads or merges
-// that rebuild HookConfig values can't silently strip compiled state.
+// NewRunner creates a Runner from a single event's hook configs. Each
+// hook's Matcher is compiled here so the Runner is self-sufficient.
+// Hooks whose matcher fails to compile are skipped with a warning
+// rather than treated as match-everything.
 //
-// Hooks whose matcher fails to compile are skipped with a warning rather
-// than treated as match-everything. ValidateHooks is expected to have
-// caught syntax errors earlier, so this is defense in depth.
+// Prefer [NewEventRunner] for new wiring; this constructor only routes
+// the supplied hooks regardless of the eventName passed to Run.
 func NewRunner(hooks []config.HookConfig, cwd, projectDir string) *Runner {
+	return &Runner{
+		hooks:      compileHooks(hooks),
+		cwd:        cwd,
+		projectDir: projectDir,
+	}
+}
+
+// NewEventRunner creates a Runner that routes Run() to the per-event
+// hook slice. Pass the full cfg.Hooks map; events not present in the
+// map are no-ops. Each event's matchers are compiled at construction.
+func NewEventRunner(eventHooks map[string][]config.HookConfig, cwd, projectDir string) *Runner {
+	compiled := make(map[string][]compiledHook, len(eventHooks))
+	for evt, list := range eventHooks {
+		compiled[evt] = compileHooks(list)
+	}
+	return &Runner{
+		eventHooks: compiled,
+		cwd:        cwd,
+		projectDir: projectDir,
+	}
+}
+
+func compileHooks(hooks []config.HookConfig) []compiledHook {
 	compiled := make([]compiledHook, 0, len(hooks))
 	for _, h := range hooks {
 		ch := compiledHook{cfg: h}
@@ -66,21 +104,27 @@ func NewRunner(hooks []config.HookConfig, cwd, projectDir string) *Runner {
 		}
 		compiled = append(compiled, ch)
 	}
-	return &Runner{
-		hooks:      compiled,
-		cwd:        cwd,
-		projectDir: projectDir,
-	}
+	return compiled
 }
 
 // Hooks returns the hook configs the runner was created with, in config
-// order. Hooks whose matcher failed to compile at construction are
-// omitted. Intended for diagnostics; callers should not rely on ordering
-// or identity beyond that.
+// order. For an event-routed Runner this returns the flattened union
+// across all events; for a single-slot Runner it returns that slot.
+// Intended for diagnostics; callers should not rely on ordering or
+// identity beyond that.
 func (r *Runner) Hooks() []config.HookConfig {
-	out := make([]config.HookConfig, len(r.hooks))
-	for i, h := range r.hooks {
-		out[i] = h.cfg
+	if r.eventHooks == nil {
+		out := make([]config.HookConfig, len(r.hooks))
+		for i, h := range r.hooks {
+			out[i] = h.cfg
+		}
+		return out
+	}
+	var out []config.HookConfig
+	for _, slot := range r.eventHooks {
+		for _, h := range slot {
+			out = append(out, h.cfg)
+		}
 	}
 	return out
 }
@@ -88,7 +132,7 @@ func (r *Runner) Hooks() []config.HookConfig {
 // Run executes all matching hooks for the given event and tool, returning
 // an aggregated result.
 func (r *Runner) Run(ctx context.Context, eventName, sessionID, toolName, toolInputJSON string) (AggregateResult, error) {
-	matching := r.matchingHooks(toolName)
+	matching := r.matchingHooks(eventName, toolName)
 	if len(matching) == 0 {
 		return AggregateResult{Decision: DecisionNone}, nil
 	}
@@ -142,10 +186,17 @@ func (r *Runner) Run(ctx context.Context, eventName, sessionID, toolName, toolIn
 }
 
 // matchingHooks returns hooks whose matcher matches the tool name (or has
-// no matcher, which matches everything).
-func (r *Runner) matchingHooks(toolName string) []config.HookConfig {
+// no matcher, which matches everything). When the Runner was constructed
+// with NewEventRunner the slice is looked up via eventName; legacy
+// callers built with NewRunner reach the same logic via the single-slot
+// `hooks` field regardless of eventName.
+func (r *Runner) matchingHooks(eventName, toolName string) []config.HookConfig {
+	slot := r.hooks
+	if r.eventHooks != nil {
+		slot = r.eventHooks[eventName]
+	}
 	var matched []config.HookConfig
-	for _, h := range r.hooks {
+	for _, h := range slot {
 		if h.matcher == nil || h.matcher.MatchString(toolName) {
 			matched = append(matched, h.cfg)
 		}

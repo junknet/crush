@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent"
+	"github.com/charmbracelet/crush/internal/agent/suggestion"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/commands"
@@ -17,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/relay"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -39,8 +41,8 @@ func NewAppWorkspace(a *app.App, store *config.ConfigStore) *AppWorkspace {
 
 // -- Sessions --
 
-func (w *AppWorkspace) CreateSession(ctx context.Context, title string) (session.Session, error) {
-	return w.app.Sessions.Create(ctx, title)
+func (w *AppWorkspace) CreateSession(ctx context.Context, title string, mode session.Mode) (session.Session, error) {
+	return w.app.Sessions.Create(ctx, title, mode)
 }
 
 func (w *AppWorkspace) GetSession(ctx context.Context, sessionID string) (session.Session, error) {
@@ -89,11 +91,11 @@ func (w *AppWorkspace) ListAllUserMessages(ctx context.Context) ([]message.Messa
 
 // -- Agent --
 
-func (w *AppWorkspace) AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error {
+func (w *AppWorkspace) AgentRun(ctx context.Context, sessionID, prompt string, planMode bool, attachments ...message.Attachment) error {
 	if w.app.AgentCoordinator == nil {
 		return errors.New("agent coordinator not initialized")
 	}
-	_, err := w.app.AgentCoordinator.Run(ctx, sessionID, prompt, attachments...)
+	_, err := w.app.AgentCoordinator.Run(ctx, sessionID, prompt, planMode, attachments...)
 	return err
 }
 
@@ -150,6 +152,62 @@ func (w *AppWorkspace) AgentClearQueue(sessionID string) {
 	if w.app.AgentCoordinator != nil {
 		w.app.AgentCoordinator.ClearQueue(sessionID)
 	}
+}
+
+func (w *AppWorkspace) AgentSuggestion() AgentSuggestionService {
+	if w.app.AgentCoordinator == nil {
+		return nil
+	}
+	svc := w.app.AgentCoordinator.Suggestion()
+	if svc == nil {
+		return nil
+	}
+	return &appSuggestionService{
+		svc:   svc,
+		coord: w.app.AgentCoordinator,
+	}
+}
+
+// appSuggestionService adapts *suggestion.Service to the workspace-level
+// AgentSuggestionService interface so the TUI doesn't import the agent
+// package transitively.
+type appSuggestionService struct {
+	svc   *suggestion.Service
+	coord agent.Coordinator
+}
+
+func (a *appSuggestionService) Subscribe(ctx context.Context) <-chan AgentSuggestionEvent {
+	src := a.svc.Subscribe(ctx)
+	out := make(chan AgentSuggestionEvent, 16)
+	go func() {
+		defer close(out)
+		for ev := range src {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- AgentSuggestionEvent{
+				SessionID: ev.Payload.SessionID,
+				Text:      ev.Payload.Text,
+			}:
+			}
+		}
+	}()
+	return out
+}
+
+func (a *appSuggestionService) Latest(sessionID string) (string, bool) {
+	return a.svc.Latest(sessionID)
+}
+
+func (a *appSuggestionService) MarkAccepted(sessionID, method string, length int) {
+	a.svc.MarkAccepted(sessionID, method, length)
+	if a.coord != nil {
+		_ = a.coord.PromoteSpeculativeSession(context.Background(), sessionID)
+	}
+}
+
+func (a *appSuggestionService) MarkRejected(sessionID string, length int) {
+	a.svc.MarkRejected(sessionID, length)
 }
 
 func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID string) error {
@@ -365,7 +423,14 @@ func (w *AppWorkspace) DisableDockerMCP() error {
 
 // -- Lifecycle --
 
-func (w *AppWorkspace) Subscribe(program *tea.Program) {
+// Subscribe streams app events into the TUI program and, when a NATS relay is
+// configured (CRUSH_RELAY_NATS_URL), also mirrors this session to the relay so
+// a phone can observe it live. The agent still runs locally; the relay is an
+// optional, additive mirror.
+func (w *AppWorkspace) Subscribe(program *tea.Program, driverSessionID string) {
+	if cfg := relay.FromEnv(); cfg.NatsURL != "" && driverSessionID != "" {
+		go relay.Run(context.Background(), program, w.app, w.store, driverSessionID, cfg)
+	}
 	w.app.Subscribe(program)
 }
 

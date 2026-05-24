@@ -15,8 +15,9 @@ override `GOEXPERIMENT: null` so golangci-lint doesn't choke on the experiment.
 
 | Task | What it actually does |
 |------|-----------------------|
-| `task build` | Builds one binary (`-trimpath`, `-s -w`) into `$XDG_CACHE_HOME/crush-prod/crush` and installs **two launchers** to `$CRUSH_LOCAL_BIN_DIR` (default `~/.local/bin`): `crush` (normal) and `crush-dev` (forces `--debug` + `--trace-file` + `CRUSH_ANTHROPIC_DUMP`, logs to `$XDG_STATE_HOME/crush-dev/`). Both launchers exec the same binary; the difference is runtime flags only. If `race.log` exists at repo root, the build gets `-race`. (`Taskfile.yaml:51-76`) |
+| `task build` | Builds one binary (`-trimpath`, `-s -w`) into `$XDG_CACHE_HOME/crush-prod/crush` and installs **three launchers** to `$CRUSH_LOCAL_BIN_DIR` (default `~/.local/bin`): `crush` (normal), `crush-dev` (forces `--debug` + `--trace-file` + `CRUSH_ANTHROPIC_DUMP`, logs to `$XDG_STATE_HOME/crush-dev/`), and `crush-test` (rebuilds `main.go` from the current checkout on every launch). If `race.log` exists at repo root, the build gets `-race`. (`Taskfile.yaml:51-76`) |
 | `task run` | `build` then exec the launcher with `{{.CLI_ARGS}}`; pipes stderr to `race.log` if race mode active. |
+| `task test:latest` | `build` then exec `crush-test`, which rebuilds `main.go` from the current checkout on every launch and runs that fresh binary. Use this for local UI checks when you want the exact tree in your workspace, not the cached prod binary. |
 | `task run:catwalk` | Same as `run` with `CATWALK_URL=http://localhost:8080` for local Catwalk dev. |
 | `task run:onboarding` | Wipes `tmp/onboarding/` and runs against a scratch `CRUSH_GLOBAL_DATA`/`_CONFIG` so you can test first-run UX. |
 | `task test` | `go test -race -failfast ./... {{.CLI_ARGS}}` — note the `-failfast`; use `-- -run Foo` to scope. |

@@ -21,6 +21,7 @@ type ModelType int
 
 const (
 	ModelTypeBrain ModelType = iota
+	ModelTypePlan
 	ModelTypeWorker
 	ModelTypeExplore
 )
@@ -30,6 +31,8 @@ func (mt ModelType) String() string {
 	switch mt {
 	case ModelTypeBrain:
 		return "Brain"
+	case ModelTypePlan:
+		return "Plan"
 	case ModelTypeWorker:
 		return "Worker"
 	case ModelTypeExplore:
@@ -46,6 +49,8 @@ func (mt ModelType) Config() config.SelectedModelType {
 	switch mt {
 	case ModelTypeBrain:
 		return config.SelectedModelTypeBrain
+	case ModelTypePlan:
+		return config.SelectedModelTypePlan
 	case ModelTypeWorker:
 		return config.SelectedModelTypeWorker
 	case ModelTypeExplore:
@@ -60,6 +65,8 @@ func (mt ModelType) Placeholder() string {
 	switch mt {
 	case ModelTypeBrain:
 		return brainModelInputPlaceholder
+	case ModelTypePlan:
+		return planModelInputPlaceholder
 	case ModelTypeWorker:
 		return workerModelInputPlaceholder
 	case ModelTypeExplore:
@@ -72,6 +79,7 @@ func (mt ModelType) Placeholder() string {
 const (
 	onboardingModelInputPlaceholder = "Find your fave"
 	brainModelInputPlaceholder      = "Choose a model for the brain role"
+	planModelInputPlaceholder       = "Choose a model for the plan role"
 	workerModelInputPlaceholder     = "Choose a model for the worker role"
 	exploreModelInputPlaceholder    = "Choose a model for the explore role"
 )
@@ -223,14 +231,14 @@ func (m *Models) HandleMsg(msg tea.Msg) Action {
 			if m.isOnboarding {
 				break
 			}
-			// Cycle Brain → Worker → Explore → Brain. Shift+Tab reverses the
-			// cycle so the same key chord moves both directions through the
-			// three role slots.
+			// Cycle Brain → Plan → Worker → Explore → Brain. Shift+Tab reverses
+			// the cycle so the same key chord moves both directions through the
+			// four role slots.
 			dir := 1
 			if msg.String() == "shift+tab" {
 				dir = -1
 			}
-			m.modelType = ModelType((int(m.modelType) + dir + 3) % 3)
+			m.modelType = ModelType((int(m.modelType) + dir + 4) % 4)
 			if err := m.setProviderItems(); err != nil {
 				return util.ReportError(err)
 			}
@@ -253,7 +261,7 @@ func (m *Models) Cursor() *tea.Cursor {
 	return InputCursor(m.com.Styles, m.input.Cursor())
 }
 
-// modelTypeRadioView renders the Brain / Worker / Explore radio strip. The
+// modelTypeRadioView renders the Brain / Plan / Worker / Explore radio strip. The
 // currently-active tab gets the `On` style; tab cycles through them.
 func (m *Models) modelTypeRadioView() string {
 	t := m.com.Styles
@@ -264,8 +272,9 @@ func (m *Models) modelTypeRadioView() string {
 		}
 		return t.Radio.Off.Padding(0, 1).Render()
 	}
-	return fmt.Sprintf("%s%s  %s%s  %s%s",
+	return fmt.Sprintf("%s%s  %s%s  %s%s  %s%s",
 		radioFor(m.modelType == ModelTypeBrain), textStyle.Render(ModelTypeBrain.String()),
+		radioFor(m.modelType == ModelTypePlan), textStyle.Render(ModelTypePlan.String()),
 		radioFor(m.modelType == ModelTypeWorker), textStyle.Render(ModelTypeWorker.String()),
 		radioFor(m.modelType == ModelTypeExplore), textStyle.Render(ModelTypeExplore.String()))
 }

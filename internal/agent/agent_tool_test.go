@@ -32,6 +32,12 @@ func TestResolveAgentToolRole(t *testing.T) {
 			wantRole:    config.AgentExplore,
 		},
 		{
+			name:        "plan",
+			role:        "plan",
+			wantProfile: scheduler.ProfilePlanAgent,
+			wantRole:    config.AgentPlan,
+		},
+		{
 			name:        "worker",
 			role:        "worker",
 			wantProfile: scheduler.ProfileWorkerAgent,

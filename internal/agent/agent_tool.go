@@ -19,7 +19,7 @@ var agentToolDescription string
 
 type AgentParams struct {
 	Prompt string `json:"prompt" description:"The task for the agent to perform"`
-	Role   string `json:"role,omitempty" description:"Agent role to run: explore or worker. Defaults to explore. Use explore for read-only repository inspection and worker for implementation, refactors, fixes, docs, or verification."`
+	Role   string `json:"role,omitempty" description:"Agent role to run: explore, plan, or worker. Defaults to explore. Use explore for read-only repository inspection, plan for read-only implementation design, and worker for implementation, refactors, fixes, docs, or verification."`
 }
 
 const (
@@ -72,6 +72,8 @@ func resolveAgentToolRole(role string) (scheduler.WorkerProfile, string, error) 
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case "", config.AgentExplore:
 		return scheduler.ProfileExploreAgent, config.AgentExplore, nil
+	case config.AgentPlan:
+		return scheduler.ProfilePlanAgent, config.AgentPlan, nil
 	case config.AgentWorker:
 		return scheduler.ProfileWorkerAgent, config.AgentWorker, nil
 	default:
@@ -81,6 +83,8 @@ func resolveAgentToolRole(role string) (scheduler.WorkerProfile, string, error) 
 
 func agentSessionTitle(role string) string {
 	switch role {
+	case config.AgentPlan:
+		return "Plan Agent Session"
 	case config.AgentWorker:
 		return "Worker Agent Session"
 	default:

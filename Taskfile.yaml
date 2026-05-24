@@ -13,6 +13,7 @@ vars:
     sh: printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}"
   CRUSH_LAUNCHER: "{{.LOCAL_BIN_DIR}}/crush"
   CRUSH_DEV_LAUNCHER: "{{.LOCAL_BIN_DIR}}/crush-dev"
+  CRUSH_TEST_LAUNCHER: "{{.LOCAL_BIN_DIR}}/crush-test"
   CRUSH_BIN: "{{.CACHE_DIR}}/crush-prod/crush"
 
 env:
@@ -59,11 +60,13 @@ tasks:
       - mv "{{.CRUSH_BIN}}.tmp" "{{.CRUSH_BIN}}"
       - install -m 0755 scripts/launch_crush.sh "{{.CRUSH_LAUNCHER}}"
       - install -m 0755 scripts/launch_crush_dev.sh "{{.CRUSH_DEV_LAUNCHER}}"
+      - install -m 0755 scripts/launch_crush_test.sh "{{.CRUSH_TEST_LAUNCHER}}"
     sources:
       - ./**/*.go
       - go.mod
       - scripts/launch_crush.sh
       - scripts/launch_crush_dev.sh
+      - scripts/launch_crush_test.sh
       - internal/agent/**/*.md
       - internal/agent/**/*.md.tpl
       - internal/agent/hyper/provider.json
@@ -71,12 +74,19 @@ tasks:
       - "{{.CRUSH_BIN}}"
       - "{{.CRUSH_LAUNCHER}}"
       - "{{.CRUSH_DEV_LAUNCHER}}"
+      - "{{.CRUSH_TEST_LAUNCHER}}"
 
   run:
     desc: Run build
     cmds:
       - task: build
       - '"{{.CRUSH_LAUNCHER}}" {{.CLI_ARGS}} {{if .RACE}}2>race.log{{end}}'
+
+  test:latest:
+    desc: Rebuild the current checkout and run the freshly built Crush binary
+    cmds:
+      - task: build
+      - '"{{.CRUSH_TEST_LAUNCHER}}" {{.CLI_ARGS}}'
 
   run:catwalk:
     desc: Run build with local Catwalk

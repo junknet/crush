@@ -237,6 +237,7 @@ func testSessionAgent(env fakeEnv, primary, title fantasy.LanguageModel, systemP
 		Sessions:     env.sessions,
 		Messages:     env.messages,
 		Tools:        tools,
+		WorkingDir:   env.workingDir,
 	})
 	return agent
 }
@@ -293,7 +294,7 @@ func workerAgent(r *vcr.Recorder, env fakeEnv, primary, title fantasy.LanguageMo
 	}
 
 	allTools := []fantasy.AgentTool{
-		tools.NewBashTool(env.permissions, shell.NewBackgroundShellManager(), env.workingDir, cfg.Config().Options.Attribution, modelName),
+		tools.NewBashTool(env.permissions, shell.NewBackgroundShellManager(), env.workingDir, cfg.Config().Options.DataDirectory, cfg.Config().Options.Attribution, modelName),
 		tools.NewDownloadTool(env.permissions, env.workingDir, r.GetDefaultClient()),
 		tools.NewEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),

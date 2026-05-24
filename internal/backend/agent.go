@@ -7,22 +7,6 @@ import (
 	"github.com/charmbracelet/crush/internal/proto"
 )
 
-// SendMessage sends a prompt to the agent coordinator for the given
-// workspace and session.
-func (b *Backend) SendMessage(ctx context.Context, workspaceID string, msg proto.AgentMessage) error {
-	ws, err := b.GetWorkspace(workspaceID)
-	if err != nil {
-		return err
-	}
-
-	if ws.AgentCoordinator == nil {
-		return ErrAgentNotInitialized
-	}
-
-	_, err = ws.AgentCoordinator.Run(ctx, msg.SessionID, msg.Prompt)
-	return err
-}
-
 // GetAgentInfo returns the agent's model and busy status.
 func (b *Backend) GetAgentInfo(workspaceID string) (proto.AgentInfo, error) {
 	ws, err := b.GetWorkspace(workspaceID)
@@ -41,40 +25,6 @@ func (b *Backend) GetAgentInfo(workspaceID string) (proto.AgentInfo, error) {
 		}
 	}
 	return agentInfo, nil
-}
-
-// InitAgent initializes the worker agent for the workspace.
-func (b *Backend) InitAgent(ctx context.Context, workspaceID string) error {
-	ws, err := b.GetWorkspace(workspaceID)
-	if err != nil {
-		return err
-	}
-
-	return ws.InitBrainAgent(ctx)
-}
-
-// UpdateAgent reloads the agent model configuration.
-func (b *Backend) UpdateAgent(ctx context.Context, workspaceID string) error {
-	ws, err := b.GetWorkspace(workspaceID)
-	if err != nil {
-		return err
-	}
-
-	return ws.UpdateAgentModel(ctx)
-}
-
-// CancelSession cancels an ongoing agent operation for the given
-// session.
-func (b *Backend) CancelSession(workspaceID, sessionID string) error {
-	ws, err := b.GetWorkspace(workspaceID)
-	if err != nil {
-		return err
-	}
-
-	if ws.AgentCoordinator != nil {
-		ws.AgentCoordinator.Cancel(sessionID)
-	}
-	return nil
 }
 
 // SummarizeSession triggers a session summarization.

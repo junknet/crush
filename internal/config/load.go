@@ -298,7 +298,7 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 				prepared.ExtraParams["region"] = env.Get("AWS_DEFAULT_REGION")
 			}
 			for _, model := range p.Models {
-				if !strings.HasPrefix(model.ID, "anthropic.") {
+				if !strings.HasPrefix(model.ID, "anthropic.") && !strings.HasPrefix(model.ID, "us.anthropic.") {
 					return fmt.Errorf("bedrock provider only supports anthropic models for now, found: %s", model.ID)
 				}
 			}
@@ -607,10 +607,12 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 		return fmt.Errorf("failed to select default models: %w", err)
 	}
 	brainModelSelected, brainModelConfigured := c.Models[SelectedModelTypeBrain]
+	planModelSelected, planModelConfigured := c.Models[SelectedModelTypePlan]
 	workerModelSelected, workerModelConfigured := c.Models[SelectedModelTypeWorker]
 	exploreModelSelected, exploreModelConfigured := c.Models[SelectedModelTypeExplore]
 
 	brain, brainValid := normalizeSelectedModel(c, brainModelSelected, defaultBrain)
+	plan, planValid := normalizeSelectedModel(c, planModelSelected, defaultBrain)
 	explore, exploreValid := normalizeSelectedModel(c, exploreModelSelected, defaultExplore)
 
 	// When explore isn't explicitly configured and the provider isn't a
@@ -644,10 +646,18 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 				return fmt.Errorf("failed to update preferred explore model: %w", err)
 			}
 		}
+		if planModelConfigured && !planValid {
+			if err := store.UpdatePreferredModel(SelectedModelTypePlan, plan); err != nil {
+				return fmt.Errorf("failed to update preferred plan model: %w", err)
+			}
+		}
 	}
 
 	if !brainModelConfigured {
 		brain = defaultBrain
+	}
+	if !planModelConfigured {
+		plan = defaultBrain
 	}
 	if !workerModelConfigured {
 		worker = brain
@@ -657,6 +667,7 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 	}
 
 	c.Models[SelectedModelTypeBrain] = brain
+	c.Models[SelectedModelTypePlan] = plan
 	c.Models[SelectedModelTypeWorker] = worker
 	c.Models[SelectedModelTypeExplore] = explore
 	return nil
@@ -665,10 +676,10 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 func (c *Config) validateSelectedModelTypes() error {
 	for modelType := range c.Models {
 		switch modelType {
-		case SelectedModelTypeBrain, SelectedModelTypeWorker, SelectedModelTypeExplore:
+		case SelectedModelTypeBrain, SelectedModelTypePlan, SelectedModelTypeWorker, SelectedModelTypeExplore:
 			continue
 		default:
-			return fmt.Errorf("unsupported model type %q; use brain, worker, or explore", modelType)
+			return fmt.Errorf("unsupported model type %q; use brain, plan, worker, or explore", modelType)
 		}
 	}
 	return nil

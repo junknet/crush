@@ -129,12 +129,12 @@ func quickStyle(o quickStyleOpts) Styles {
 				// BlockSuffix: "\n",
 				Color: hex(o.fgSubtle),
 			},
-			// Margin: new(uint(defaultMargin)),
+			// Margin: ptr(uint(defaultMargin)),
 		},
 		BlockQuote: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{},
-			Indent:         new(uint(1)),
-			IndentToken:    new("│ "),
+			Indent:         ptr(uint(1)),
+			IndentToken:    ptr("│ "),
 		},
 		List: ansi.StyleList{
 			LevelIndent: defaultListIndent,
@@ -143,56 +143,56 @@ func quickStyle(o quickStyleOpts) Styles {
 			StylePrimitive: ansi.StylePrimitive{
 				BlockSuffix: "\n",
 				Color:       hex(o.info),
-				Bold:        new(true),
+				Bold:        ptr(true),
 			},
 		},
 		H1: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				BlockSuffix: "\n",
 				Color:       hex(o.info),
-				Bold:        new(true),
-				Underline:   new(true),
+				Bold:        ptr(true),
+				Underline:   ptr(true),
 			},
 		},
 		H2: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				BlockSuffix: "\n",
 				Color:       hex(o.info),
-				Bold:        new(true),
+				Bold:        ptr(true),
 			},
 		},
 		H3: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				Color: hex(o.info),
-				Bold:  new(true),
+				Bold:  ptr(true),
 			},
 		},
 		H4: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				Color: hex(o.infoMoreSubtle),
-				Bold:  new(true),
+				Bold:  ptr(true),
 			},
 		},
 		H5: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				Color: hex(o.fgBase),
-				Bold:  new(true),
+				Bold:  ptr(true),
 			},
 		},
 		H6: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				Color: hex(o.fgMoreSubtle),
-				Bold:  new(true),
+				Bold:  ptr(true),
 			},
 		},
 		Strikethrough: ansi.StylePrimitive{
-			CrossedOut: new(true),
+			CrossedOut: ptr(true),
 		},
 		Emph: ansi.StylePrimitive{
-			Italic: new(true),
+			Italic: ptr(true),
 		},
 		Strong: ansi.StylePrimitive{
-			Bold: new(true),
+			Bold: ptr(true),
 		},
 		HorizontalRule: ansi.StylePrimitive{
 			Color:  hex(o.separator),
@@ -211,16 +211,16 @@ func quickStyle(o quickStyleOpts) Styles {
 		},
 		Link: ansi.StylePrimitive{
 			Color:     hex(o.info),
-			Underline: new(true),
-			Bold:      new(true),
+			Underline: ptr(true),
+			Bold:      ptr(true),
 		},
 		LinkText: ansi.StylePrimitive{
 			Color:     hex(o.info),
-			Underline: new(true),
+			Underline: ptr(true),
 		},
 		Image: ansi.StylePrimitive{
 			Color:     hex(charmtone.Cheeky),
-			Underline: new(true),
+			Underline: ptr(true),
 		},
 		ImageText: ansi.StylePrimitive{
 			Color:  hex(o.fgMoreSubtle),
@@ -239,7 +239,7 @@ func quickStyle(o quickStyleOpts) Styles {
 				StylePrimitive: ansi.StylePrimitive{
 					Color: hex(o.bgLessVisible),
 				},
-				Margin: new(uint(defaultMargin)),
+				Margin: ptr(uint(defaultMargin)),
 			},
 			Chroma: &ansi.Chroma{
 				Text: ansi.StylePrimitive{
@@ -287,8 +287,8 @@ func quickStyle(o quickStyleOpts) Styles {
 				},
 				NameClass: ansi.StylePrimitive{
 					Color:     hex(charmtone.Salt),
-					Underline: new(true),
-					Bold:      new(true),
+					Underline: ptr(true),
+					Bold:      ptr(true),
 				},
 				NameDecorator: ansi.StylePrimitive{
 					Color: hex(charmtone.Citron),
@@ -309,13 +309,13 @@ func quickStyle(o quickStyleOpts) Styles {
 					Color: hex(o.destructive),
 				},
 				GenericEmph: ansi.StylePrimitive{
-					Italic: new(true),
+					Italic: ptr(true),
 				},
 				GenericInserted: ansi.StylePrimitive{
 					Color: hex(o.successMostSubtle),
 				},
 				GenericStrong: ansi.StylePrimitive{
-					Bold: new(true),
+					Bold: ptr(true),
 				},
 				GenericSubheading: ansi.StylePrimitive{
 					Color: hex(o.fgMoreSubtle),
@@ -350,8 +350,8 @@ func quickStyle(o quickStyleOpts) Styles {
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
-			Indent:      new(uint(1)),
-			IndentToken: new("│ "),
+			Indent:      ptr(uint(1)),
+			IndentToken: ptr("│ "),
 		},
 		List: ansi.StyleList{
 			LevelIndent: defaultListIndent,
@@ -359,7 +359,7 @@ func quickStyle(o quickStyleOpts) Styles {
 		Heading: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				BlockSuffix:     "\n",
-				Bold:            new(true),
+				Bold:            ptr(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
@@ -367,8 +367,8 @@ func quickStyle(o quickStyleOpts) Styles {
 		H1: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				BlockSuffix:     "\n",
-				Bold:            new(true),
-				Underline:       new(true),
+				Bold:            ptr(true),
+				Underline:       ptr(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
@@ -376,28 +376,28 @@ func quickStyle(o quickStyleOpts) Styles {
 		H2: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				BlockSuffix:     "\n",
-				Bold:            new(true),
+				Bold:            ptr(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
 		},
 		H3: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Bold:            new(true),
+				Bold:            ptr(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
 		},
 		H4: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Bold:            new(true),
+				Bold:            ptr(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
 		},
 		H5: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Bold:            new(true),
+				Bold:            ptr(true),
 				Color:           plainFg,
 				BackgroundColor: plainBg,
 			},
@@ -409,17 +409,17 @@ func quickStyle(o quickStyleOpts) Styles {
 			},
 		},
 		Strikethrough: ansi.StylePrimitive{
-			CrossedOut:      new(true),
+			CrossedOut:      ptr(true),
 			Color:           plainFg,
 			BackgroundColor: plainBg,
 		},
 		Emph: ansi.StylePrimitive{
-			Italic:          new(true),
+			Italic:          ptr(true),
 			Color:           plainFg,
 			BackgroundColor: plainBg,
 		},
 		Strong: ansi.StylePrimitive{
-			Bold:            new(true),
+			Bold:            ptr(true),
 			Color:           plainFg,
 			BackgroundColor: plainBg,
 		},
@@ -447,17 +447,17 @@ func quickStyle(o quickStyleOpts) Styles {
 			Unticked: "[ ] ",
 		},
 		Link: ansi.StylePrimitive{
-			Underline:       new(true),
+			Underline:       ptr(true),
 			Color:           plainFg,
 			BackgroundColor: plainBg,
 		},
 		LinkText: ansi.StylePrimitive{
-			Bold:            new(true),
+			Bold:            ptr(true),
 			Color:           plainFg,
 			BackgroundColor: plainBg,
 		},
 		Image: ansi.StylePrimitive{
-			Underline:       new(true),
+			Underline:       ptr(true),
 			Color:           plainFg,
 			BackgroundColor: plainBg,
 		},
@@ -480,7 +480,7 @@ func quickStyle(o quickStyleOpts) Styles {
 					Color:           plainFg,
 					BackgroundColor: plainBg,
 				},
-				Margin: new(uint(defaultMargin)),
+				Margin: ptr(uint(defaultMargin)),
 			},
 		},
 		Table: ansi.StyleTable{
@@ -786,6 +786,10 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Messages.AssistantBlurred = s.Messages.NoContent.PaddingLeft(2)
 	s.Messages.AssistantFocused = s.Messages.NoContent.PaddingLeft(1).BorderLeft(true).
 		BorderForeground(o.successMostSubtle).BorderStyle(messageFocussedBorder)
+	// A turn whose reasoning was boosted (the "思考" keyword) gets a left bar in
+	// the accent color so it stands apart as a temporary max-reasoning result.
+	s.Messages.AssistantBoosted = s.Messages.NoContent.PaddingLeft(1).BorderLeft(true).
+		BorderForeground(o.accent).BorderStyle(messageFocussedBorder)
 	s.Messages.Thinking = lipgloss.NewStyle().MaxHeight(10)
 	s.Messages.ErrorTag = lipgloss.NewStyle().Padding(0, 1).
 		Background(o.destructive).Foreground(o.onPrimary)

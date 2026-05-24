@@ -226,6 +226,7 @@ type Styles struct {
 		UserFocused      lipgloss.Style
 		AssistantBlurred lipgloss.Style
 		AssistantFocused lipgloss.Style
+		AssistantBoosted lipgloss.Style
 		NoContent        lipgloss.Style
 		Thinking         lipgloss.Style
 		ErrorTag         lipgloss.Style
@@ -573,6 +574,10 @@ func hex(c color.Color) *string {
 	r, g, b, _ := c.RGBA()
 	s := fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8)
 	return &s
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
 
 func chromaStyle(style ansi.StylePrimitive) string {

@@ -10,17 +10,23 @@ package agent
 import (
 	"cmp"
 	"context"
+	"crypto/sha1"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"log/slog"
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
@@ -36,9 +42,12 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/memdir"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/eventbus"
+	"github.com/charmbracelet/crush/internal/hooks"
 	crushlog "github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -76,6 +85,8 @@ var (
 type SessionAgentCall struct {
 	SessionID        string
 	Prompt           string
+	DynamicPrefix    string
+	BoostReasoning   bool
 	ProviderOptions  fantasy.ProviderOptions
 	Attachments      []message.Attachment
 	MaxOutputTokens  int64
@@ -98,6 +109,7 @@ type SessionAgent interface {
 	Run(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
 	SetModels(primary Model, title Model)
 	SetTools(tools []fantasy.AgentTool)
+	SetDeferredRegistry(reg *tools.DeferredRegistry)
 	SetSystemPrompt(systemPrompt string)
 	Cancel(sessionID string)
 	CancelAll()
@@ -124,12 +136,25 @@ type sessionAgent struct {
 	systemPromptPrefix *csync.Value[string]
 	systemPrompt       *csync.Value[string]
 	tools              *csync.Slice[fantasy.AgentTool]
+	// deferredRegistry holds the per-agent set of tools whose schemas are
+	// withheld from the model until tool_search activates them. nil for
+	// agents that don't use the deferred-loading path. atomic.Pointer keeps
+	// SetDeferredRegistry race-free without dragging in a separate mutex.
+	deferredRegistry atomic.Pointer[tools.DeferredRegistry]
+	// lastDeferredHash is the hash of deferredRegistry.DeferredNames() at
+	// the end of the previous PrepareStep. When the set changes (an MCP
+	// server finished connecting, tool_search just promoted entries, etc.)
+	// we inject a <system-reminder> so the model notices.
+	lastDeferredHash *csync.Value[string]
 
 	isSubAgent           bool
 	sessions             session.Service
 	messages             message.Service
 	disableAutoSummarize bool
 	notify               pubsub.Publisher[notify.Notification]
+	dataDir              string
+	workingDir           string
+	hookRunner           *hooks.Runner
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, context.CancelFunc]
@@ -152,6 +177,15 @@ type SessionAgentOptions struct {
 	Messages             message.Service
 	Tools                []fantasy.AgentTool
 	Notify               pubsub.Publisher[notify.Notification]
+	// DataDir is the per-workspace data directory (typically `.crush/`). It
+	// hosts spill files for microCompact and the tool-results subtree.
+	DataDir    string
+	WorkingDir string
+	// HookRunner, when non-nil, fires Stop hooks at the end of each turn.
+	// PreToolUse/PostToolUse hooks are wired separately through the tool
+	// wrappers; this field exists so the agent loop can drive turn-level
+	// events without re-creating a Runner on every step.
+	HookRunner *hooks.Runner
 }
 
 func NewSessionAgent(
@@ -167,7 +201,11 @@ func NewSessionAgent(
 		messages:             opts.Messages,
 		disableAutoSummarize: opts.DisableAutoSummarize,
 		tools:                csync.NewSliceFrom(opts.Tools),
+		lastDeferredHash:     csync.NewValue(""),
 		notify:               opts.Notify,
+		dataDir:              opts.DataDir,
+		workingDir:           opts.WorkingDir,
+		hookRunner:           opts.HookRunner,
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
 		activeRequests:       csync.NewMap[string, context.CancelFunc](),
 		cancelGen:            csync.NewMap[string, uint64](),
@@ -224,6 +262,21 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		agentTools[len(agentTools)-1].SetProviderOptions(a.getCacheControlOptions())
 	}
 
+	if strings.HasSuffix(call.SessionID, "-speculate") {
+		wrapped := make([]fantasy.AgentTool, len(agentTools))
+		for i, tool := range agentTools {
+			wrapped[i] = &speculativeToolWrapper{inner: tool}
+		}
+		agentTools = wrapped
+	} else if strings.HasSuffix(call.SessionID, "-mem-extract") {
+		memoryDir := filepath.Join(a.dataDir, "projects", memdir.WorkspaceSlug(a.workingDir), "memory")
+		wrapped := make([]fantasy.AgentTool, len(agentTools))
+		for i, tool := range agentTools {
+			wrapped[i] = &memExtractToolWrapper{inner: tool, memoryDir: memoryDir}
+		}
+		agentTools = wrapped
+	}
+
 	agent := fantasy.NewAgent(
 		primaryModel.Model,
 		fantasy.WithSystemPrompt(systemPrompt),
@@ -252,14 +305,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	}
 	defer wg.Wait()
 
-	// L2: If the previous brain turn was cancelled by the user, prepend an
-	// interrupt marker so brain.md.tpl's <interruption_handling> rule
-	// activates and brain re-evaluates the plan instead of silently
-	// resuming. Only applies at the top-level (non sub-agent) — sub-agents
-	// are invoked via tool calls, not user ESC.
-	if !a.isSubAgent && wasPreviousTurnCancelled(msgs) {
-		call.Prompt = interruptMarker + "\n\n" + call.Prompt
-	}
+	// Cancel-equals-discard semantics: when the previous brain turn was
+	// cancelled by the user (ESC), we treat that whole turn — the user
+	// prompt that triggered it AND the half-formed assistant reply — as
+	// if it never happened from the LLM's point of view. So:
+	//   1. Do NOT modify call.Prompt here; the new prompt goes into the
+	//      message DB as plain user text, which is what the up-arrow
+	//      history navigator surfaces (no "[Previous turn was interrupted
+	//      …]" prefix bleeding into the editor).
+	//   2. preparePrompt below skips the cancelled user/assistant pair
+	//      when building the fantasy.Message history sent to the LLM,
+	//      so the model never sees the cancelled turn.
+	// The interruptMarker constant is kept for the rare flow where a
+	// caller explicitly wants the legacy "re-evaluate" hint.
 
 	// Add the user message to the session.
 	_, err = a.createUserMessage(ctx, call)
@@ -281,6 +339,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	genCtx, cancel := context.WithCancel(ctx)
 	a.activeRequests.Set(call.SessionID, cancel)
+
+	if !call.NonInteractive && a.notify != nil {
+		a.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+			SessionID:    call.SessionID,
+			SessionTitle: currentSession.Title,
+			Type:         notify.TypeAgentStarted,
+		})
+	}
 
 	defer cancel()
 	defer a.activeRequests.Del(call.SessionID)
@@ -327,8 +393,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	if call.MaxOutputTokens > 0 {
 		maxOutputTokens = &call.MaxOutputTokens
 	}
+	promptWithDyn := call.Prompt
+	if call.DynamicPrefix != "" {
+		promptWithDyn = call.DynamicPrefix + "\n---\n" + promptWithDyn
+	}
 	result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
-		Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
+		Prompt:           message.PromptWithTextAttachments(promptWithDyn, call.Attachments),
 		Files:            files,
 		Messages:         history,
 		ProviderOptions:  call.ProviderOptions,
@@ -347,6 +417,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			// Use latest tools (updated by SetTools when MCP tools change).
 			prepared.Tools = a.tools.Copy()
 
+			// Merge in the deferred registry: activated tools' real
+			// schemas, plus proxy stubs for tools whose schemas the
+			// model has not asked to load yet. tool_search itself is
+			// already in prepared.Tools (registered up-front).
+			if reg := a.deferredRegistry.Load(); reg != nil {
+				prepared.Tools = mergeDeferredTools(prepared.Tools, reg)
+			}
+
 			queuedCalls, _ := a.messageQueue.Get(call.SessionID)
 			a.messageQueue.Del(call.SessionID)
 			for _, queued := range queuedCalls {
@@ -355,6 +433,26 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return callContext, prepared, createErr
 				}
 				prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
+			}
+
+			// Drain any externally-published events (background-job completions,
+			// monitor hits, fired cron tasks) for this session and fold them
+			// into the last user message as a <task-notification> block.
+			// This is in addition to the dedicated wake-up Runs the coordinator
+			// kicks off — events that arrive concurrently with an in-flight
+			// turn surface here on the next step so nothing is lost.
+			if pending := eventbus.Default.Drain(call.SessionID); len(pending) > 0 {
+				notification := renderTaskNotification(pending)
+				prepared.Messages = injectTaskNotification(prepared.Messages, notification)
+			}
+
+			// If the visible deferred-tool set changed since last step,
+			// surface a <system-reminder> so the model notices new
+			// schemas or now-connected MCP servers. The reminder rides
+			// on the latest user message; if there isn't one we append
+			// a synthetic user message carrying just the reminder.
+			if reg := a.deferredRegistry.Load(); reg != nil {
+				prepared.Messages = a.maybeInjectDeferredReminder(prepared.Messages, reg)
 			}
 
 			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, primaryModel.ProviderType)
@@ -393,6 +491,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, primaryModel.CatwalkCfg.SupportsImages)
 			callContext = context.WithValue(callContext, tools.ModelNameContextKey, primaryModel.CatwalkCfg.Name)
 			currentAssistant = &assistantMsg
+			currentAssistant.SetBoostedReasoning(call.BoostReasoning)
 			return callContext, prepared, err
 		},
 		OnReasoningStart: func(id string, reasoning fantasy.ReasoningContent) error {
@@ -532,7 +631,22 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				return sessionErr
 			}
 			currentSession = updatedSession
-			return a.messages.Update(genCtx, *currentAssistant)
+			if updateErr := a.messages.Update(genCtx, *currentAssistant); updateErr != nil {
+				return updateErr
+			}
+			// Free token budget without an LLM call by clearing aged-out,
+			// oversized tool results to local spill files. Errors inside
+			// microCompactStep are logged and swallowed; they must not
+			// abort an otherwise successful turn.
+			a.microCompactStep(genCtx, call.SessionID)
+			// G7 Stop hook: fire once per terminal step. EndTurn and
+			// MaxTokens are obvious turn boundaries; ToolUse is in-flight
+			// and skipped. Sub-agents inherit the parent's hookRunner only
+			// when wired; nil-receiver path is a no-op.
+			if a.hookRunner != nil && (finishReason == message.FinishReasonEndTurn || finishReason == message.FinishReasonMaxTokens) {
+				a.fireStopHook(genCtx, call.SessionID, finishReason, stepResult)
+			}
+			return nil
 		},
 		StopWhen: []fantasy.StopCondition{
 			func(_ []fantasy.StepResult) bool {
@@ -669,8 +783,8 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	if shouldSummarize {
 		a.activeRequests.Del(call.SessionID)
-		if summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions); summarizeErr != nil {
-			return nil, summarizeErr
+		if summarizeErr := a.summarizeSession(genCtx, call.SessionID, call.ProviderOptions, true); summarizeErr != nil {
+			slog.Warn("Automatic summarization failed", "session_id", call.SessionID, "error", summarizeErr)
 		}
 		// If the agent wasn't done...
 		if len(currentAssistant.ToolCalls()) > 0 {
@@ -730,6 +844,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 }
 
 func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions) error {
+	return a.summarizeSession(ctx, sessionID, opts, false)
+}
+
+func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, opts fantasy.ProviderOptions, bestEffort bool) error {
 	if a.IsSessionBusy(sessionID) {
 		return ErrSessionBusy
 	}
@@ -757,7 +875,32 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
-	aiMsgs, _ := a.preparePrompt(msgs, primaryModel.CatwalkCfg.SupportsImages, primaryModel.ProviderType)
+	summaryOutputTokens := summarizeOutputTokenBudget(primaryModel.CatwalkCfg)
+	summaryInputBudget := summarizeInputTokenBudget(primaryModel.CatwalkCfg)
+	summarySourceMessages, contextWasTrimmed, estimatedInputTokens := selectSummaryMessagesForBudget(
+		msgs,
+		primaryModel.CatwalkCfg.SupportsImages,
+		summaryInputBudget,
+	)
+	if contextWasTrimmed {
+		slog.Debug(
+			"Trimmed summary input to fit the model window",
+			"session_id", sessionID,
+			"original_messages", len(msgs),
+			"trimmed_messages", len(summarySourceMessages),
+			"estimated_input_tokens", estimatedInputTokens,
+			"input_budget_tokens", summaryInputBudget,
+			"output_budget_tokens", summaryOutputTokens,
+		)
+		// G5 sessionMemoryCompact: messages that fell outside the summary
+		// input budget will never re-enter the LLM's view. Spill them to
+		// memory/sessions/ so the operator (or a future session) can
+		// recover the original content. Failure path swallowed inside
+		// backupDiscardedMessages — summarize must not block on disk.
+		if discardCount := len(msgs) - len(summarySourceMessages); discardCount > 0 {
+			a.backupDiscardedMessages(ctx, sessionID, msgs[:discardCount], a.workingDir)
+		}
+	}
 
 	genCtx, cancel := context.WithCancel(ctx)
 	a.activeRequests.Set(sessionID, cancel)
@@ -784,57 +927,90 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return err
 	}
 
-	summaryPromptText := buildSummaryPrompt(currentSession.Todos)
+	summaryPromptText := buildSummaryPromptWithPartialContext(currentSession.Todos, contextWasTrimmed)
 
-	resp, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
-		Prompt:          summaryPromptText,
-		Messages:        aiMsgs,
-		ProviderOptions: opts,
-		PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
-			prepared.Messages = options.Messages
-			if systemPromptPrefix != "" {
-				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
-			}
-			return callContext, prepared, nil
-		},
-		OnReasoningDelta: func(id string, text string) error {
-			summaryMessage.AppendReasoningContent(text)
-			return a.messages.Update(genCtx, summaryMessage)
-		},
-		OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
-			// Handle anthropic signature.
-			if anthropicData, ok := reasoning.ProviderMetadata["anthropic"]; ok {
-				if signature, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok && signature.Signature != "" {
-					summaryMessage.AppendReasoningSignature(signature.Signature)
+	summaryMessages := summarySourceMessages
+	var resp *fantasy.AgentResult
+	for attempt := 0; attempt < summaryRetryLimit; attempt++ {
+		summaryMessage.Parts = nil
+		if updateErr := a.messages.Update(ctx, summaryMessage); updateErr != nil {
+			return updateErr
+		}
+
+		aiMsgs, _ := a.preparePrompt(summaryMessages, primaryModel.CatwalkCfg.SupportsImages, primaryModel.ProviderType)
+		resp, err = agent.Stream(genCtx, fantasy.AgentStreamCall{
+			Prompt:          summaryPromptText,
+			Messages:        aiMsgs,
+			ProviderOptions: opts,
+			MaxOutputTokens: &summaryOutputTokens,
+			PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+				prepared.Messages = options.Messages
+				if systemPromptPrefix != "" {
+					prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
 				}
+				return callContext, prepared, nil
+			},
+			OnReasoningDelta: func(id string, text string) error {
+				summaryMessage.AppendReasoningContent(text)
+				return a.messages.Update(genCtx, summaryMessage)
+			},
+			OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
+				// Handle anthropic signature.
+				if anthropicData, ok := reasoning.ProviderMetadata["anthropic"]; ok {
+					if signature, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok && signature.Signature != "" {
+						summaryMessage.AppendReasoningSignature(signature.Signature)
+					}
+				}
+				summaryMessage.FinishThinking()
+				return a.messages.Update(genCtx, summaryMessage)
+			},
+			OnTextDelta: func(id, text string) error {
+				summaryMessage.AppendContent(text)
+				return a.messages.Update(genCtx, summaryMessage)
+			},
+		})
+		if err == nil {
+			summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
+			err = a.messages.Update(genCtx, summaryMessage)
+			if err != nil {
+				return err
 			}
-			summaryMessage.FinishThinking()
-			return a.messages.Update(genCtx, summaryMessage)
-		},
-		OnTextDelta: func(id, text string) error {
-			summaryMessage.AppendContent(text)
-			return a.messages.Update(genCtx, summaryMessage)
-		},
-	})
-	if err != nil {
-		isCancelErr := errors.Is(err, context.Canceled)
-		if isCancelErr {
+			break
+		}
+
+		if errors.Is(err, context.Canceled) {
 			// User cancelled summarize we need to remove the summary message.
 			deleteErr := a.messages.Delete(ctx, summaryMessage.ID)
 			return deleteErr
 		}
+
+		if !isSummaryContextTooLargeError(err) || len(summaryMessages) <= 1 {
+			break
+		}
+
+		dropCount := summaryRetryDropCount(len(summaryMessages))
+		slog.Debug(
+			"Summary input still exceeded the model window; retrying with fewer messages",
+			"session_id", sessionID,
+			"attempt", attempt+1,
+			"dropped_messages", dropCount,
+			"remaining_messages", len(summaryMessages)-dropCount,
+		)
+		summaryMessages = summaryMessages[dropCount:]
+		summaryPromptText = buildSummaryPromptWithPartialContext(currentSession.Todos, true)
+	}
+	if err != nil {
 		// Mark the summary message as finished with an error so the UI
 		// stops spinning.
 		summaryMessage.AddFinish(message.FinishReasonError, "Summarization Error", err.Error())
 		if updateErr := a.messages.Update(ctx, summaryMessage); updateErr != nil {
 			return updateErr
 		}
-		return err
-	}
-
-	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
-	err = a.messages.Update(genCtx, summaryMessage)
-	if err != nil {
+		if bestEffort {
+			if deleteErr := a.messages.Delete(ctx, summaryMessage.ID); deleteErr != nil {
+				return deleteErr
+			}
+		}
 		return err
 	}
 
@@ -946,15 +1122,48 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			),
 		))
 	}
+	// Cancel-equals-discard: a cancelled assistant message AND the user
+	// message that triggered it are both excluded from the LLM history.
+	// This makes ESC behave like "undo this turn" instead of "interrupt
+	// then re-evaluate". Tool messages whose tool_use_id points back into
+	// the cancelled assistant become orphans and are handled by the
+	// existing filterOrphanedToolResults below.
+	skipUserIdx := make(map[int]struct{})
+	skipAssistantIdx := make(map[int]struct{})
+	for i, m := range msgs {
+		if m.Role != message.Assistant || m.FinishReason() != message.FinishReasonCanceled {
+			continue
+		}
+		skipAssistantIdx[i] = struct{}{}
+		// Walk backwards to the nearest user message that drove this
+		// cancelled turn; tool messages in between are also part of the
+		// cancelled turn but are naturally filtered later by orphan
+		// detection once their assistant disappears.
+		for j := i - 1; j >= 0; j-- {
+			if msgs[j].Role == message.User {
+				skipUserIdx[j] = struct{}{}
+				break
+			}
+			if msgs[j].Role == message.Assistant {
+				break
+			}
+		}
+	}
+
 	// Collect all tool call IDs present in assistant messages and all tool
 	// result IDs present in tool messages. This lets us detect both orphaned
 	// tool results (result without a call) and orphaned tool calls (call
-	// without a result).
+	// without a result). Cancelled assistant messages are excluded so that
+	// any tool_use ids they declared are treated as missing — their tool
+	// results will be dropped as orphans below.
 	knownToolCallIDs := make(map[string]struct{})
 	knownToolResultIDs := make(map[string]struct{})
-	for _, m := range msgs {
+	for i, m := range msgs {
 		switch m.Role {
 		case message.Assistant:
+			if _, skip := skipAssistantIdx[i]; skip {
+				continue
+			}
 			for _, tc := range m.ToolCalls() {
 				knownToolCallIDs[tc.ID] = struct{}{}
 			}
@@ -965,8 +1174,16 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		}
 	}
 
-	for _, m := range msgs {
+	for i, m := range msgs {
 		if len(m.Parts) == 0 {
+			continue
+		}
+		// Cancel-equals-discard: skip the cancelled assistant and its
+		// triggering user message entirely.
+		if _, skip := skipAssistantIdx[i]; skip {
+			continue
+		}
+		if _, skip := skipUserIdx[i]; skip {
 			continue
 		}
 		// Assistant message without content or tool calls (cancelled before it returned anything).
@@ -1397,8 +1614,111 @@ func (a *sessionAgent) SetModels(primary Model, title Model) {
 	a.titleModel.Set(title)
 }
 
-func (a *sessionAgent) SetTools(tools []fantasy.AgentTool) {
-	a.tools.SetSlice(tools)
+func (a *sessionAgent) SetTools(toolList []fantasy.AgentTool) {
+	a.tools.SetSlice(toolList)
+}
+
+func (a *sessionAgent) SetDeferredRegistry(reg *tools.DeferredRegistry) {
+	a.deferredRegistry.Store(reg)
+	a.lastDeferredHash.Set("")
+}
+
+// mergeDeferredTools combines an explicitly registered tool list with the
+// deferred registry. Activated tools' real schemas are merged in; tools
+// still deferred surface as proxy stubs. If a tool name already appears
+// in `base` (e.g. someone wired it directly), the existing entry wins.
+func mergeDeferredTools(base []fantasy.AgentTool, reg *tools.DeferredRegistry) []fantasy.AgentTool {
+	seen := make(map[string]struct{}, len(base))
+	for _, t := range base {
+		seen[t.Info().Name] = struct{}{}
+	}
+	out := append([]fantasy.AgentTool{}, base...)
+	for _, t := range reg.ActivatedTools() {
+		name := t.Info().Name
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, t)
+	}
+	for _, stub := range reg.SnapshotStubs() {
+		name := stub.Info().Name
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, stub)
+	}
+	return out
+}
+
+// maybeInjectDeferredReminder appends a <system-reminder> to the last user
+// message in `messages` (creating one if necessary) whenever the set of
+// deferred tools changed since the previous step. This is how the model
+// gets notified that:
+//
+//   - new MCP servers just finished connecting and surfaced extra tools, or
+//   - a previous tool_search call promoted entries out of the deferred set
+//
+// without paying the full schema cost up front.
+func (a *sessionAgent) maybeInjectDeferredReminder(messages []fantasy.Message, reg *tools.DeferredRegistry) []fantasy.Message {
+	hash := reg.DeferredHash()
+	prev := a.lastDeferredHash.Get()
+	a.lastDeferredHash.Set(hash)
+	if hash == prev {
+		return messages
+	}
+	deferred := reg.DeferredNames()
+	pending := pendingMCPServersForReminder()
+	if len(deferred) == 0 && len(pending) == 0 {
+		return messages
+	}
+	var sb strings.Builder
+	sb.WriteString("<system-reminder>\n")
+	if len(deferred) > 0 {
+		sb.WriteString("The following deferred tools are now available via tool_search. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use tool_search with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\n")
+		for _, n := range deferred {
+			sb.WriteString("  - ")
+			sb.WriteString(n)
+			sb.WriteString("\n")
+		}
+	}
+	if len(pending) > 0 {
+		sb.WriteString("\nThe following MCP servers are still connecting; their tools will appear in a later turn:\n")
+		for _, n := range pending {
+			sb.WriteString("  - ")
+			sb.WriteString(n)
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("</system-reminder>")
+	reminder := sb.String()
+
+	// Attach reminder to the last user message; if there is none (e.g.
+	// the conversation just kicked off with an assistant continuation),
+	// append a fresh user message.
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == fantasy.MessageRoleUser {
+			messages[i].Content = append(messages[i].Content, fantasy.TextPart{Text: reminder})
+			return messages
+		}
+	}
+	return append(messages, fantasy.NewUserMessage(reminder))
+}
+
+// pendingMCPServersForReminder mirrors the helper in the tools package so
+// the agent doesn't need to round-trip through tool_search to learn which
+// MCP servers haven't finished connecting.
+func pendingMCPServersForReminder() []string {
+	var out []string
+	for name, info := range mcp.GetStates() {
+		if info.State == mcp.StateConnected || info.State == mcp.StateDisabled {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (a *sessionAgent) SetSystemPrompt(systemPrompt string) {
@@ -1407,6 +1727,13 @@ func (a *sessionAgent) SetSystemPrompt(systemPrompt string) {
 
 func (a *sessionAgent) Model() Model {
 	return a.primaryModel.Get()
+}
+
+// TitleModel returns the small/utility model paired with this agent. Used
+// for non-conversational background work like title generation and
+// ghost-text suggestions where the primary model is overkill.
+func (a *sessionAgent) TitleModel() Model {
+	return a.titleModel.Get()
 }
 
 // convertToToolResult converts a fantasy tool result to a message tool result.
@@ -1569,8 +1896,21 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 
 // buildSummaryPrompt constructs the prompt text for session summarization.
 func buildSummaryPrompt(todos []session.Todo) string {
+	return buildSummaryPromptWithPartialContext(todos, false)
+}
+
+// buildSummaryPromptWithPartialContext constructs the summary prompt text and
+// optionally tells the model that the oldest context was trimmed to fit the
+// available window.
+func buildSummaryPromptWithPartialContext(todos []session.Todo, contextWasTrimmed bool) string {
 	var sb strings.Builder
-	sb.WriteString("Provide a detailed summary of our conversation above.")
+	sb.WriteString("Compress the conversation into durable memory for the next agent.")
+	sb.WriteString("\nPreserve the minimum state needed to resume without rereading the whole transcript: goal, chosen approach, decision boundaries, files touched or to touch, commands run, verification results, and open risks.")
+	sb.WriteString("\nKeep confirmed facts, decisions, constraints, file paths, commands run, verification results, unresolved questions, and todo statuses.")
+	sb.WriteString("\nSeparate durable memory from session-local execution state: keep the plan, what was tried, and what remains; drop greetings, repetition, and step-by-step narration unless it changes the outcome.")
+	if contextWasTrimmed {
+		sb.WriteString("\n\nNote: the oldest messages were trimmed to fit the model window. Focus on the retained tail and call out any uncertainty about earlier context.")
+	}
 	if len(todos) > 0 {
 		sb.WriteString("\n\n## Current Todo List\n\n")
 		for _, t := range todos {
@@ -1597,4 +1937,184 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []a
 		fields = append(fields, "message", err.Message)
 	}
 	return fields
+}
+
+var safeSpeculativeTools = map[string]bool{
+	"glob":                  true,
+	"grep":                  true,
+	"view":                  true,
+	"todos":                 true,
+	"crush_info":            true,
+	"diagnostics":           true,
+	"references":            true,
+	"nim_macro_expand":      true,
+	"nim_safe_to_delete":    true,
+	"nim_project_maps":      true,
+	"nim_definition":        true,
+	"nim_hover":             true,
+	"nim_document_symbols":  true,
+	"nim_workspace_symbols": true,
+	"nim_check_file":        true,
+	"nim_call_hierarchy":    true,
+	"read_mcp_resource":     true,
+	"list_mcp_resources":    true,
+}
+
+type speculativeToolWrapper struct {
+	inner fantasy.AgentTool
+}
+
+func (s *speculativeToolWrapper) Info() fantasy.ToolInfo {
+	return s.inner.Info()
+}
+
+func (s *speculativeToolWrapper) ProviderOptions() fantasy.ProviderOptions {
+	return s.inner.ProviderOptions()
+}
+
+func (s *speculativeToolWrapper) SetProviderOptions(opts fantasy.ProviderOptions) {
+	s.inner.SetProviderOptions(opts)
+}
+
+func (s *speculativeToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	if !safeSpeculativeTools[call.Name] {
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is not allowed during speculative execution.", call.Name))
+		resp.StopTurn = true
+		return resp, nil
+	}
+	return s.inner.Run(ctx, call)
+}
+
+type memExtractToolWrapper struct {
+	inner     fantasy.AgentTool
+	memoryDir string
+}
+
+func (m *memExtractToolWrapper) Info() fantasy.ToolInfo {
+	return m.inner.Info()
+}
+
+func (m *memExtractToolWrapper) ProviderOptions() fantasy.ProviderOptions {
+	return m.inner.ProviderOptions()
+}
+
+func (m *memExtractToolWrapper) SetProviderOptions(opts fantasy.ProviderOptions) {
+	m.inner.SetProviderOptions(opts)
+}
+
+func (m *memExtractToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	name := call.Name
+	if name == "view" || name == "glob" || name == "grep" || name == "todos" {
+		return m.inner.Run(ctx, call)
+	}
+
+	if name == "write" || name == "edit" {
+		var input struct {
+			FilePath string `json:"file_path"`
+			Path     string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(call.Input), &input); err == nil {
+			fp := input.FilePath
+			if fp == "" {
+				fp = input.Path
+			}
+			if fp != "" {
+				cleanPath := filepath.Clean(fp)
+				cleanMemDir := filepath.Clean(m.memoryDir)
+				if strings.HasPrefix(cleanPath, cleanMemDir) {
+					return m.inner.Run(ctx, call)
+				}
+			}
+		}
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is restricted to the memory directory during extraction.", name))
+		resp.StopTurn = true
+		return resp, nil
+	}
+
+	resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is not allowed during memory extraction.", name))
+	resp.StopTurn = true
+	return resp, nil
+}
+
+// fireStopHook publishes a turn-end event to the configured Stop hooks.
+// Decision values are ignored — the turn is already over, so there is
+// nothing to allow, deny, or halt; only Context is honoured, surfaced
+// as a debug log so a hook author can see whether its message landed.
+// Failures are swallowed so a misbehaving hook never aborts a turn.
+func (a *sessionAgent) fireStopHook(ctx context.Context, sessionID string, finishReason message.FinishReason, stepResult fantasy.StepResult) {
+	payload := map[string]any{
+		"finish_reason": string(finishReason),
+		"last_text":     stepResult.Content.Text(),
+		"tool_calls":    len(stepResult.Content.ToolCalls()),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		slog.Debug("Stop hook payload marshal failed", "session", sessionID, "error", err)
+		return
+	}
+	// Empty toolName: Stop is a turn-level event, not bound to one tool.
+	result, err := a.hookRunner.Run(ctx, hooks.EventStop, sessionID, "", string(raw))
+	if err != nil {
+		slog.Debug("Stop hook execution error", "session", sessionID, "error", err)
+		return
+	}
+	if result.HookCount > 0 && result.Context != "" {
+		slog.Debug("Stop hook context", "session", sessionID, "context", result.Context)
+	}
+}
+
+// backupDiscardedMessages persists messages that auto-summarize is about
+// to drop so the content survives the LLM context view boundary. Writes a
+// single markdown archive under memory/sessions/ and appends one
+// MEMORY.md index line so future sessions can find it via the same auto-
+// memory injection path. Failures are logged but never bubble up — the
+// caller's summarize must not be blocked by disk hiccups.
+func (a *sessionAgent) backupDiscardedMessages(ctx context.Context, sessionID string, discarded []message.Message, workspacePath string) {
+	if len(discarded) == 0 || a.dataDir == "" {
+		return
+	}
+	_ = ctx // reserved for future cancellation; AppendEntry is sync today
+	if err := memdir.EnsureWorkspace(a.dataDir, workspacePath); err != nil {
+		slog.Debug("Session backup: ensure workspace failed", "session", sessionID, "error", err)
+		return
+	}
+	sum := sha1.Sum([]byte(sessionID))
+	shortSID := hex.EncodeToString(sum[:6])
+	ts := time.Now()
+	fileName := fmt.Sprintf("session-%s-%d.md", shortSID, ts.UnixNano())
+	dir := filepath.Join(a.dataDir, "projects", memdir.WorkspaceSlug(workspacePath), "memory", "sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Debug("Session backup: mkdir failed", "session", sessionID, "error", err)
+		return
+	}
+	path := filepath.Join(dir, fileName)
+
+	fm := memdir.Frontmatter{
+		Name:        fmt.Sprintf("session-backup-%s", shortSID),
+		Description: fmt.Sprintf("Auto-summarize backup of %d discarded messages from session %s", len(discarded), shortSID),
+		Type:        memdir.MemoryProject,
+	}
+	var b strings.Builder
+	b.WriteString(memdir.EncodeFrontmatter(fm))
+	fmt.Fprintf(&b, "# Session Backup\n\nSession ID: %s\nTimestamp: %s\nMessages: %d\n\n",
+		sessionID, ts.Format(time.RFC3339), len(discarded))
+	for i, m := range discarded {
+		body := m.Content().Text
+		if len(body) > 2048 {
+			body = body[:2048] + "\n\n... [truncated]"
+		}
+		fmt.Fprintf(&b, "## Message %d — %s\n\n%s\n\n---\n\n", i+1, m.Role, body)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		slog.Debug("Session backup: write failed", "session", sessionID, "error", err)
+		return
+	}
+	relPath := filepath.ToSlash(filepath.Join("sessions", fileName))
+	title := fmt.Sprintf("Session backup %s", shortSID)
+	hook := fmt.Sprintf("Auto-summarize spill %s — %d msgs", ts.Format("2006-01-02 15:04"), len(discarded))
+	if err := memdir.AppendEntry(a.dataDir, workspacePath, title, relPath, hook); err != nil {
+		slog.Debug("Session backup: index append failed", "session", sessionID, "error", err)
+		return
+	}
+	slog.Info("Session backup written", "session", sessionID, "path", path, "messages", len(discarded))
 }

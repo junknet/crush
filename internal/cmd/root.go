@@ -7,33 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	fang "charm.land/fang/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/crush/internal/app"
-	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
 	crushlog "github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/projects"
-	"github.com/charmbracelet/crush/internal/proto"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
-	"github.com/charmbracelet/crush/internal/server"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	ui "github.com/charmbracelet/crush/internal/ui/model"
@@ -47,14 +36,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var clientHost string
-
 func init() {
 	rootCmd.PersistentFlags().StringP("cwd", "C", "", "Current working directory")
 	rootCmd.PersistentFlags().StringP("data-dir", "D", "", "Custom crush data directory")
 	rootCmd.PersistentFlags().BoolP("debug", "d", false, "Debug")
 	rootCmd.PersistentFlags().String("trace-file", "", "Write runtime trace entries to this JSONL file")
-	rootCmd.PersistentFlags().StringVarP(&clientHost, "host", "H", server.DefaultHost(), "Connect to a specific crush server host (for advanced users)")
 	rootCmd.Flags().BoolP("help", "h", false, "Help")
 	rootCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
 	rootCmd.Flags().BoolP("continue", "c", false, "Continue the most recent session")
@@ -116,6 +102,17 @@ crush --continue
 				return err
 			}
 			sessionID = sess.ID
+		} else {
+			if continueLast {
+				if sessions, err := ws.ListSessions(cmd.Context()); err == nil && len(sessions) > 0 {
+					sessionID = sessions[0].ID
+				}
+			}
+			if sessionID == "" {
+				if sess, err := ws.CreateSession(cmd.Context(), "", session.ModeExecute); err == nil {
+					sessionID = sess.ID
+				}
+			}
 		}
 
 		event.AppInitialized()
@@ -130,7 +127,7 @@ crush --continue
 			tea.WithContext(cmd.Context()),
 			tea.WithFilter(ui.MouseEventFilter),
 		)
-		go ws.Subscribe(program)
+		go ws.Subscribe(program, sessionID)
 
 		if _, err := program.Run(); err != nil {
 			event.Error(err)
@@ -169,13 +166,6 @@ func Execute() {
 	// warnings/diagnostics instead of logging them as a side effect.
 	slog.SetDefault(slog.New(slog.DiscardHandler))
 
-	// NOTE: very hacky: we create a colorprofile writer with STDOUT, then make
-	// it forward to a bytes.Buffer, write the colored heartbit to it, and then
-	// finally prepend it in the version template.
-	// Unfortunately cobra doesn't give us a way to set a function to handle
-	// printing the version, and PreRunE runs after the version is already
-	// handled, so that doesn't work either.
-	// This is the only way I could find that works relatively well.
 	if term.IsTerminal(os.Stdout.Fd()) {
 		var b bytes.Buffer
 		w := colorprofile.NewWriter(os.Stdout, os.Environ())
@@ -205,22 +195,15 @@ func supportsProgressBar() bool {
 	return isWindowsTerminal || xstrings.ContainsAnyOf(strings.ToLower(termProg), "ghostty", "iterm2", "rio")
 }
 
-// useClientServer returns true when the client/server architecture is
-// enabled via the CRUSH_CLIENT_SERVER environment variable.
-func useClientServer() bool {
-	v, _ := strconv.ParseBool(os.Getenv("CRUSH_CLIENT_SERVER"))
-	return v
-}
-
 // setupWorkspaceWithProgressBar wraps setupWorkspace with an optional
 // terminal progress bar shown during initialization.
-func setupWorkspaceWithProgressBar(cmd *cobra.Command) (workspace.Workspace, func(), error) {
+func setupWorkspaceWithProgressBar(cmd *cobra.Command) (*workspace.AppWorkspace, func(), error) {
 	showProgress := supportsProgressBar()
 	if showProgress {
 		_, _ = fmt.Fprintf(os.Stderr, ansi.SetIndeterminateProgressBar)
 	}
 
-	ws, cleanup, err := setupWorkspace(cmd)
+	ws, cleanup, err := setupAppWorkspace(cmd)
 
 	if showProgress {
 		_, _ = fmt.Fprintf(os.Stderr, ansi.ResetProgressBar)
@@ -229,20 +212,9 @@ func setupWorkspaceWithProgressBar(cmd *cobra.Command) (workspace.Workspace, fun
 	return ws, cleanup, err
 }
 
-// setupWorkspace returns a Workspace and cleanup function. When
-// CRUSH_CLIENT_SERVER=1, it connects to a server process and returns a
-// ClientWorkspace. Otherwise it creates an in-process app.App and
-// returns an AppWorkspace.
-func setupWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error) {
-	if useClientServer() {
-		return setupClientServerWorkspace(cmd)
-	}
-	return setupLocalWorkspace(cmd)
-}
-
-// setupLocalWorkspace creates an in-process app.App and wraps it in an
-// AppWorkspace.
-func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error) {
+// setupAppWorkspace creates an in-process app.App and wraps it in an
+// AppWorkspace. The agent runs in-process; there is no remote server.
+func setupAppWorkspace(cmd *cobra.Command) (*workspace.AppWorkspace, func(), error) {
 	debug, _ := cmd.Flags().GetBool("debug")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 	ctx := cmd.Context()
@@ -321,401 +293,11 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 	return ws, cleanup, nil
 }
 
-// setupClientServerWorkspace connects to a server process and wraps the
-// result in a ClientWorkspace.
-func setupClientServerWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error) {
-	c, protoWs, cleanupServer, err := connectToServer(cmd)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	clientWs := workspace.NewClientWorkspace(c, *protoWs)
-
-	if protoWs.Config.IsConfigured() {
-		if err := clientWs.InitBrainAgent(cmd.Context()); err != nil {
-			slog.Error("Failed to initialize brain agent", "error", err)
-		}
-	}
-
-	return clientWs, cleanupServer, nil
-}
-
-// connectToServer ensures the server is running, creates a client and
-// workspace, and returns a cleanup function that deletes the workspace.
-func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func(), error) {
-	hostURL, err := server.ParseHostURL(clientHost)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("invalid host URL: %v", err)
-	}
-
-	if err := ensureServer(cmd, hostURL); err != nil {
-		return nil, nil, nil, err
-	}
-
-	debug, _ := cmd.Flags().GetBool("debug")
-	dataDir, _ := cmd.Flags().GetString("data-dir")
-	ctx := cmd.Context()
-
-	cwd, err := ResolveCwd(cmd)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	c, err := client.NewClient(cwd, hostURL.Scheme, hostURL.Host)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	wsReq := proto.Workspace{
-		Path:    cwd,
-		DataDir: dataDir,
-		Debug:   debug,
-		Version: version.Version,
-		Env:     os.Environ(),
-	}
-
-	ws, err := c.CreateWorkspace(ctx, wsReq)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create workspace: %v", err)
-	}
-
-	if shouldEnableMetrics(ws.Config) {
-		event.Init()
-	}
-
-	if ws.Config != nil {
-		logFile := filepath.Join(ws.Config.Options.DataDirectory, "logs", "crush.log")
-		crushlog.Setup(logFile, debug)
-	}
-
-	cleanup := func() { _ = c.DeleteWorkspace(context.Background(), ws.ID) }
-	return c, ws, cleanup, nil
-}
-
-// ensureServer auto-starts a detached server if the socket file does not
-// exist. When the socket exists, it verifies that the running server
-// version matches the client; on mismatch it shuts down the old server
-// and starts a fresh one.
-func ensureServer(cmd *cobra.Command, hostURL *url.URL) error {
-	switch hostURL.Scheme {
-	case "unix", "npipe":
-		needsStart := false
-		_, statErr := os.Stat(hostURL.Host)
-		switch {
-		case statErr == nil:
-			restarted, err := restartIfStale(cmd, hostURL)
-			if err != nil {
-				slog.Warn("Failed to check server version", "error", err)
-			}
-			needsStart = restarted || err != nil
-		case errors.Is(statErr, fs.ErrNotExist):
-			needsStart = true
-		default:
-			slog.Warn("Unexpected error stat'ing server socket, attempting cleanup",
-				"path", hostURL.Host, "error", statErr)
-			if err := os.Remove(hostURL.Host); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return fmt.Errorf("failed to remove stale server socket %q: %v", hostURL.Host, err)
-			}
-			needsStart = true
-		}
-
-		if needsStart {
-			if err := spawnAndWaitReady(cmd, hostURL); err != nil {
-				return fmt.Errorf("failed to initialize crush server: %v", err)
-			}
-			return nil
-		}
-
-		if err := waitForServerReady(cmd.Context(), hostURL); err != nil {
-			return fmt.Errorf("failed to initialize crush server: %v", err)
-		}
-	}
-
-	return nil
-}
-
-// spawnAndWaitReady serializes the spawn-and-wait-for-readiness sequence
-// across concurrent clients via an exclusive flock on
-// $XDG_CACHE_HOME/crush/server-<safeHost>/start.lock.
-//
-// After acquiring the lock it re-probes readiness so that a client that
-// blocked while another client was spawning can skip its own spawn and
-// just use the now-running server. The lock is held only for the
-// duration of "spawn + readiness probe" and released before the caller
-// resumes its normal lifetime.
-func spawnAndWaitReady(cmd *cobra.Command, hostURL *url.URL) error {
-	chDir, err := perHostServerDir(hostURL)
-	if err != nil {
-		return err
-	}
-	release, err := acquireSpawnLock(filepath.Join(chDir, "start.lock"))
-	if err != nil {
-		// If the lock itself is unavailable, fall back to the
-		// unsynchronized path rather than blocking the user.
-		slog.Warn("Failed to acquire spawn lock, proceeding without single-flight", "error", err)
-		if err := startDetachedServer(cmd, hostURL); err != nil {
-			return err
-		}
-		return waitForServerReady(cmd.Context(), hostURL)
-	}
-	defer release()
-
-	// Another client may have just finished spawning while we were
-	// waiting on the lock; if the server is already responsive, skip
-	// the spawn entirely.
-	probeCtx, cancel := context.WithTimeout(cmd.Context(), 200*time.Millisecond)
-	probeErr := quickHealthProbe(probeCtx, hostURL)
-	cancel()
-	if probeErr == nil {
-		return nil
-	}
-
-	if err := startDetachedServer(cmd, hostURL); err != nil {
-		return err
-	}
-	return waitForServerReady(cmd.Context(), hostURL)
-}
-
-// quickHealthProbe issues a single readiness request with the caller's
-// context and returns nil iff the server is responsive right now.
-func quickHealthProbe(ctx context.Context, hostURL *url.URL) error {
-	httpClient, reqURL, err := readinessHTTPClient(hostURL)
-	if err != nil {
-		return err
-	}
-	return probeHealth(ctx, httpClient, reqURL, hostURL)
-}
-
-// perHostServerDir returns (and creates) the cache directory used for
-// per-host server state (logs, start.lock, etc.). The path is derived
-// from the parsed host URL rather than the global flag so the same key
-// is computed regardless of where the host came from.
-func perHostServerDir(hostURL *url.URL) (string, error) {
-	chDir := filepath.Join(config.GlobalCacheDir(), "server-"+safeHostName(hostURL))
-	if err := os.MkdirAll(chDir, 0o700); err != nil {
-		return "", fmt.Errorf("failed to create server working directory: %v", err)
-	}
-	return chDir, nil
-}
-
-// safeHostName returns a filesystem-safe identifier for hostURL,
-// suitable for use as a directory name. It mirrors the input shape of
-// the --host flag so client and server compute the same key.
-func safeHostName(hostURL *url.URL) string {
-	return safeNameRegexp.ReplaceAllString(
-		hostURL.Scheme+"://"+hostURL.Host+hostURL.Path, "_",
-	)
-}
-
-// serverReadyTimeout returns the total budget for the readiness probe.
-// Overridable via CRUSH_SERVER_READY_TIMEOUT (parsed as a Go duration).
-func serverReadyTimeout() time.Duration {
-	const def = 10 * time.Second
-	v := os.Getenv("CRUSH_SERVER_READY_TIMEOUT")
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
-		return def
-	}
-	return d
-}
-
-// waitForServerReady polls GET /v1/health until the server responds with
-// any 2xx status or the total timeout elapses. Each attempt uses a short
-// per-attempt timeout so a hung listener doesn't burn the whole budget.
-//
-// The HTTP transport is built to mirror how *client.Client dials so the
-// same unix socket / npipe / tcp setups all work uniformly here.
-func waitForServerReady(ctx context.Context, hostURL *url.URL) error {
-	httpClient, reqURL, err := readinessHTTPClient(hostURL)
-	if err != nil {
-		return err
-	}
-
-	const perAttempt = 100 * time.Millisecond
-	deadline := time.Now().Add(serverReadyTimeout())
-
-	var lastErr error
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if time.Now().After(deadline) {
-			if lastErr != nil {
-				return lastErr
-			}
-			return fmt.Errorf("timed out waiting for server readiness")
-		}
-
-		attemptCtx, cancel := context.WithTimeout(ctx, perAttempt)
-		err := probeHealth(attemptCtx, httpClient, reqURL, hostURL)
-		cancel()
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(perAttempt):
-		}
-	}
-}
-
-// readinessHTTPClient builds an *http.Client whose transport dials the
-// server using the same scheme-aware logic as *client.Client (unix
-// socket, named pipe, or tcp).
-func readinessHTTPClient(hostURL *url.URL) (*http.Client, string, error) {
-	c, err := client.NewClient("", hostURL.Scheme, hostURL.Host)
-	if err != nil {
-		return nil, "", err
-	}
-
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return c.Dial(ctx, network, addr)
-	}
-	if hostURL.Scheme == "unix" || hostURL.Scheme == "npipe" {
-		tr.DisableCompression = true
-	}
-
-	httpClient := &http.Client{Transport: tr}
-
-	// For unix sockets / named pipes we still need a syntactically valid
-	// HTTP URL; the actual address is resolved by the dialer.
-	host := hostURL.Host
-	if hostURL.Scheme == "unix" || hostURL.Scheme == "npipe" {
-		host = client.DummyHost
-	}
-	reqURL := (&url.URL{Scheme: "http", Host: host, Path: "/v1/health"}).String()
-	return httpClient, reqURL, nil
-}
-
-// probeHealth issues a single GET to the readiness endpoint and treats
-// any 2xx response as success.
-func probeHealth(ctx context.Context, h *http.Client, reqURL string, hostURL *url.URL) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return err
-	}
-	if hostURL.Scheme == "unix" || hostURL.Scheme == "npipe" {
-		req.Host = client.DummyHost
-	}
-	rsp, err := h.Do(req)
-	if err != nil {
-		return err
-	}
-	defer rsp.Body.Close()
-	_, _ = io.Copy(io.Discard, rsp.Body)
-	if rsp.StatusCode < 200 || rsp.StatusCode >= 300 {
-		return fmt.Errorf("server health check failed: %s", rsp.Status)
-	}
-	return nil
-}
-
-// restartIfStale checks whether the running server matches the current
-// client version. When they differ, it sends a shutdown command and
-// removes the stale socket so the caller can start a fresh server.
-//
-// It returns restarted=true when it has shut down a stale server and the
-// caller must spawn a new one. When the server matches the client version
-// (or the check itself fails), restarted is false.
-func restartIfStale(cmd *cobra.Command, hostURL *url.URL) (restarted bool, err error) {
-	c, err := client.NewClient("", hostURL.Scheme, hostURL.Host)
-	if err != nil {
-		return false, err
-	}
-	vi, err := c.VersionInfo(cmd.Context())
-	if err != nil {
-		return false, err
-	}
-	if vi.Version == version.Version && vi.BuildID == version.BuildID {
-		return false, nil
-	}
-	slog.Info(
-		"Server version mismatch, restarting",
-		"server_version", vi.Version,
-		"client_version", version.Version,
-		"server_build_id", vi.BuildID,
-		"client_build_id", version.BuildID,
-	)
-	_ = c.ShutdownServer(cmd.Context())
-	// Give the old process a moment to release the socket.
-	for range 20 {
-		if _, err := os.Stat(hostURL.Host); errors.Is(err, fs.ErrNotExist) {
-			break
-		}
-		select {
-		case <-cmd.Context().Done():
-			return true, cmd.Context().Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	// Force-remove if the socket is still lingering.
-	_ = os.Remove(hostURL.Host)
-	return true, nil
-}
-
-var safeNameRegexp = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
-
-func startDetachedServer(cmd *cobra.Command, hostURL *url.URL) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to get executable path: %v", err)
-	}
-
-	chDir, err := perHostServerDir(hostURL)
-	if err != nil {
-		return err
-	}
-
-	cmdArgs := []string{"server"}
-	if clientHost != server.DefaultHost() {
-		cmdArgs = append(cmdArgs, "--host", clientHost)
-	}
-
-	// Use context.Background() so the parent's context cancellation does not
-	// kill the spawned server. detachProcess (Setsid on !windows,
-	// DETACHED_PROCESS on windows) is what truly detaches the child from
-	// this process's lifetime.
-	c := exec.CommandContext(context.Background(), exe, cmdArgs...)
-	stdoutPath := filepath.Join(chDir, "stdout.log")
-	stderrPath := filepath.Join(chDir, "stderr.log")
-	detachProcess(c)
-
-	stdout, err := os.Create(stdoutPath)
-	if err != nil {
-		return fmt.Errorf("failed to create stdout log file: %v", err)
-	}
-	defer stdout.Close()
-	c.Stdout = stdout
-
-	stderr, err := os.Create(stderrPath)
-	if err != nil {
-		return fmt.Errorf("failed to create stderr log file: %v", err)
-	}
-	defer stderr.Close()
-	c.Stderr = stderr
-
-	if err := c.Start(); err != nil {
-		return fmt.Errorf("failed to start crush server: %v", err)
-	}
-
-	if err := c.Process.Release(); err != nil {
-		return fmt.Errorf("failed to detach crush server process: %v", err)
-	}
-
-	return nil
-}
-
 func shouldEnableMetrics(cfg *config.Config) bool {
-	if v, _ := strconv.ParseBool(os.Getenv("CRUSH_DISABLE_METRICS")); v {
+	if v, _ := os.LookupEnv("CRUSH_DISABLE_METRICS"); v == "1" || strings.EqualFold(v, "true") {
 		return false
 	}
-	if v, _ := strconv.ParseBool(os.Getenv("DO_NOT_TRACK")); v {
+	if v, _ := os.LookupEnv("DO_NOT_TRACK"); v == "1" || strings.EqualFold(v, "true") {
 		return false
 	}
 	if cfg.Options.DisableMetrics {
@@ -744,9 +326,7 @@ func MaybePrependStdin(prompt string) (string, error) {
 }
 
 // resolveWorkspaceSessionID resolves a session ID that may be a full
-// UUID, full hash, or hash prefix. Works against the Workspace
-// interface so both local and client/server paths get hash prefix
-// support.
+// UUID, full hash, or hash prefix.
 func resolveWorkspaceSessionID(ctx context.Context, ws workspace.Workspace, id string) (session.Session, error) {
 	if sess, err := ws.GetSession(ctx, id); err == nil {
 		return sess, nil

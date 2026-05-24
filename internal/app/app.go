@@ -37,19 +37,10 @@ import (
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/ui/styles"
-	"github.com/charmbracelet/crush/internal/update"
-	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/charmtone"
 	"github.com/charmbracelet/x/term"
 )
-
-// UpdateAvailableMsg is sent when a new version is available.
-type UpdateAvailableMsg struct {
-	CurrentVersion string
-	LatestVersion  string
-	IsDevelopment  bool
-}
 
 type App struct {
 	Sessions    session.Service
@@ -112,9 +103,6 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	}
 
 	app.setupEvents()
-
-	// Check for updates in the background.
-	go app.checkForUpdates(ctx)
 
 	go mcp.Initialize(ctx, app.Permissions, store)
 
@@ -220,7 +208,7 @@ func (app *App) resolveSession(ctx context.Context, continueSessionID string, us
 		return sess, nil
 
 	default:
-		return app.Sessions.Create(ctx, agent.DefaultSessionName)
+		return app.Sessions.Create(ctx, agent.DefaultSessionName, session.ModeExecute)
 	}
 }
 
@@ -316,7 +304,7 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 	done := make(chan response, 1)
 
 	go func(ctx context.Context, sessionID, prompt string) {
-		result, err := app.AgentCoordinator.Run(ctx, sess.ID, prompt)
+		result, err := app.AgentCoordinator.Run(ctx, sess.ID, prompt, false)
 		if err != nil {
 			done <- response{
 				err: fmt.Errorf("failed to start agent processing stream: %w", err),
@@ -653,20 +641,4 @@ func (app *App) Shutdown() {
 		}
 	}
 	wg.Wait()
-}
-
-// checkForUpdates checks for available updates.
-func (app *App) checkForUpdates(ctx context.Context) {
-	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	info, err := update.Check(checkCtx, version.Version, update.Default)
-	if err != nil || !info.Available() {
-		return
-	}
-	app.events.Publish(pubsub.UpdatedEvent, UpdateAvailableMsg{
-		CurrentVersion: info.Current,
-		LatestVersion:  info.Latest,
-		IsDevelopment:  info.IsDevelopment(),
-	})
 }

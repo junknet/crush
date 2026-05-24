@@ -38,12 +38,14 @@ func (s SelectedModelType) String() string {
 
 const (
 	SelectedModelTypeBrain   SelectedModelType = "brain"
+	SelectedModelTypePlan    SelectedModelType = "plan"
 	SelectedModelTypeWorker  SelectedModelType = "worker"
 	SelectedModelTypeExplore SelectedModelType = "explore"
 )
 
 const (
 	AgentBrain   string = "brain"
+	AgentPlan    string = "plan"
 	AgentWorker  string = "worker"
 	AgentExplore string = "explore"
 )
@@ -283,6 +285,7 @@ type Options struct {
 	Progress                  *bool        `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
+	DisableSuggestion         bool         `json:"disable_suggestion,omitempty" jsonschema:"description=Disable ghost-text autocomplete suggestions in the prompt input,default=false"`
 }
 
 type MCPs map[string]MCPConfig
@@ -502,7 +505,7 @@ type Agent struct {
 	// This is the id of the system prompt used by the agent
 	Disabled bool `json:"disabled,omitempty"`
 
-	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=brain,enum=worker,enum=explore,default=brain"`
+	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=brain,enum=plan,enum=worker,enum=explore,default=brain"`
 
 	// The available tools for the agent
 	//  if this is nil, all tools are available
@@ -643,6 +646,11 @@ func (c *Config) BrainModel() *catwalk.Model {
 	return c.getModelByTypeWithFallbacks(SelectedModelTypeBrain)
 }
 
+// PlanModel returns the configured model for the plan role.
+func (c *Config) PlanModel() *catwalk.Model {
+	return c.getModelByTypeWithFallbacks(SelectedModelTypePlan, SelectedModelTypeBrain)
+}
+
 // WorkerModel returns the configured model for the worker role.
 func (c *Config) WorkerModel() *catwalk.Model {
 	return c.getModelByTypeWithFallbacks(SelectedModelTypeWorker, SelectedModelTypeBrain)
@@ -673,6 +681,13 @@ func (c *Config) SelectedModelForType(modelType SelectedModelType) (SelectedMode
 	}
 	switch modelType {
 	case SelectedModelTypeBrain:
+		if model, ok := c.Models[SelectedModelTypeBrain]; ok {
+			return model, true
+		}
+	case SelectedModelTypePlan:
+		if model, ok := c.Models[SelectedModelTypePlan]; ok {
+			return model, true
+		}
 		if model, ok := c.Models[SelectedModelTypeBrain]; ok {
 			return model, true
 		}
@@ -790,6 +805,15 @@ func (c *Config) SetupAgents() {
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: allowedTools,
 		},
+		AgentPlan: {
+			ID:           AgentPlan,
+			Name:         "Plan",
+			Description:  "A read-only planning agent for design-only exploration and implementation plans.",
+			Model:        SelectedModelTypePlan,
+			ContextPaths: c.Options.ContextPaths,
+			AllowedTools: resolveExploreTools(allowedTools),
+			AllowedMCP:   map[string][]string{},
+		},
 		AgentWorker: {
 			ID:           AgentWorker,
 			Name:         "Worker",
@@ -817,7 +841,7 @@ func (c *Config) SetupAgents() {
 
 	for name, agent := range c.Agents {
 		if agent.Disabled {
-			if name == AgentBrain || name == AgentWorker || name == AgentExplore {
+			if name == AgentBrain || name == AgentPlan || name == AgentWorker || name == AgentExplore {
 				continue
 			}
 			delete(agents, name)
@@ -866,6 +890,8 @@ func defaultAgentModelType(agentName string) SelectedModelType {
 	switch agentName {
 	case AgentBrain:
 		return SelectedModelTypeBrain
+	case AgentPlan:
+		return SelectedModelTypePlan
 	case AgentWorker:
 		return SelectedModelTypeWorker
 	case AgentExplore:

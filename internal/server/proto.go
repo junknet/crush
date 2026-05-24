@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/charmbracelet/crush/internal/backend"
@@ -186,61 +185,6 @@ func (c *controllerV1) handleGetWorkspaceProviders(w http.ResponseWriter, r *htt
 	jsonEncode(w, providers)
 }
 
-// handleGetWorkspaceEvents streams workspace events as Server-Sent Events.
-//
-//	@Summary		Stream workspace events (SSE)
-//	@Tags			workspaces
-//	@Produce		text/event-stream
-//	@Param			id	path	string	true	"Workspace ID"
-//	@Success		200
-//	@Failure		404	{object}	proto.Error
-//	@Failure		500	{object}	proto.Error
-//	@Router			/workspaces/{id}/events [get]
-func (c *controllerV1) handleGetWorkspaceEvents(w http.ResponseWriter, r *http.Request) {
-	flusher := http.NewResponseController(w)
-	id := r.PathValue("id")
-	events, err := c.backend.SubscribeEvents(r.Context(), id)
-	if err != nil {
-		c.handleError(w, r, err)
-		return
-	}
-
-	// Bracket this stream's lifetime as one connected client. When the last
-	// client of a workspace disconnects, the backend reaps that workspace's
-	// in-flight agent runs and background jobs (see Backend.ClientDisconnected)
-	// so nothing orphans after the TUI/mobile client goes away.
-	c.backend.ClientConnected(id)
-	defer c.backend.ClientDisconnected(id)
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	for {
-		select {
-		case <-r.Context().Done():
-			c.server.logDebug(r, "Stopping event stream")
-			return
-		case ev, ok := <-events:
-			if !ok {
-				return
-			}
-			wrapped := wrapEvent(ev.Payload)
-			if wrapped == nil {
-				continue
-			}
-			data, err := json.Marshal(wrapped)
-			if err != nil {
-				c.server.logError(r, "Failed to marshal event", "error", err)
-				continue
-			}
-
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
-		}
-	}
-}
-
 // handleGetWorkspaceLSPs lists LSP clients for a workspace.
 //
 //	@Summary		List LSP clients
@@ -313,6 +257,7 @@ func (c *controllerV1) handleGetWorkspaceSessions(w http.ResponseWriter, r *http
 	result := make([]proto.Session, len(sessions))
 	for i, s := range sessions {
 		result[i] = sessionToProto(s)
+		result[i].Alive = c.backend.IsSessionAlive(s.ID)
 	}
 	jsonEncode(w, result)
 }
@@ -324,7 +269,7 @@ func (c *controllerV1) handleGetWorkspaceSessions(w http.ResponseWriter, r *http
 //	@Accept			json
 //	@Produce		json
 //	@Param			id		path		string			true	"Workspace ID"
-//	@Param			request	body		proto.Session	true	"Session creation params (title)"
+//	@Param			request	body		proto.SessionCreateRequest	true	"Session creation params"
 //	@Success		200		{object}	proto.Session
 //	@Failure		400		{object}	proto.Error
 //	@Failure		404		{object}	proto.Error
@@ -333,14 +278,14 @@ func (c *controllerV1) handleGetWorkspaceSessions(w http.ResponseWriter, r *http
 func (c *controllerV1) handlePostWorkspaceSessions(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	var args session.Session
+	var args proto.SessionCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
 		c.server.logError(r, "Failed to decode request", "error", err)
 		jsonError(w, http.StatusBadRequest, "failed to decode request")
 		return
 	}
 
-	sess, err := c.backend.CreateSession(r.Context(), id, args.Title)
+	sess, err := c.backend.CreateSession(r.Context(), id, args.Title, session.Mode(args.Mode))
 	if err != nil {
 		c.handleError(w, r, err)
 		return
@@ -651,71 +596,6 @@ func (c *controllerV1) handleGetWorkspaceAgent(w http.ResponseWriter, r *http.Re
 	jsonEncode(w, info)
 }
 
-// handlePostWorkspaceAgent sends a message to the agent.
-//
-//	@Summary		Send message to agent
-//	@Tags			agent
-//	@Accept			json
-//	@Param			id		path	string				true	"Workspace ID"
-//	@Param			request	body	proto.AgentMessage	true	"Agent message"
-//	@Success		200
-//	@Failure		400	{object}	proto.Error
-//	@Failure		404	{object}	proto.Error
-//	@Failure		500	{object}	proto.Error
-//	@Router			/workspaces/{id}/agent [post]
-func (c *controllerV1) handlePostWorkspaceAgent(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-
-	var msg proto.AgentMessage
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		c.server.logError(r, "Failed to decode request", "error", err)
-		jsonError(w, http.StatusBadRequest, "failed to decode request")
-		return
-	}
-
-	if err := c.backend.SendMessage(r.Context(), id, msg); err != nil {
-		c.handleError(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-// handlePostWorkspaceAgentInit initializes the agent for a workspace.
-//
-//	@Summary		Initialize agent
-//	@Tags			agent
-//	@Param			id	path	string	true	"Workspace ID"
-//	@Success		200
-//	@Failure		404	{object}	proto.Error
-//	@Failure		500	{object}	proto.Error
-//	@Router			/workspaces/{id}/agent/init [post]
-func (c *controllerV1) handlePostWorkspaceAgentInit(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := c.backend.InitAgent(r.Context(), id); err != nil {
-		c.handleError(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-// handlePostWorkspaceAgentUpdate updates the agent for a workspace.
-//
-//	@Summary		Update agent
-//	@Tags			agent
-//	@Param			id	path	string	true	"Workspace ID"
-//	@Success		200
-//	@Failure		404	{object}	proto.Error
-//	@Failure		500	{object}	proto.Error
-//	@Router			/workspaces/{id}/agent/update [post]
-func (c *controllerV1) handlePostWorkspaceAgentUpdate(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := c.backend.UpdateAgent(r.Context(), id); err != nil {
-		c.handleError(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
 // handleGetWorkspaceAgentSession returns a specific agent session.
 //
 //	@Summary		Get agent session
@@ -736,26 +616,6 @@ func (c *controllerV1) handleGetWorkspaceAgentSession(w http.ResponseWriter, r *
 		return
 	}
 	jsonEncode(w, agentSession)
-}
-
-// handlePostWorkspaceAgentSessionCancel cancels a running agent session.
-//
-//	@Summary		Cancel agent session
-//	@Tags			agent
-//	@Param			id	path	string	true	"Workspace ID"
-//	@Param			sid	path	string	true	"Session ID"
-//	@Success		200
-//	@Failure		404	{object}	proto.Error
-//	@Failure		500	{object}	proto.Error
-//	@Router			/workspaces/{id}/agent/sessions/{sid}/cancel [post]
-func (c *controllerV1) handlePostWorkspaceAgentSessionCancel(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sid := r.PathValue("sid")
-	if err := c.backend.CancelSession(id, sid); err != nil {
-		c.handleError(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
 }
 
 // handleGetWorkspaceAgentSessionPromptQueued returns whether a queued prompt exists.

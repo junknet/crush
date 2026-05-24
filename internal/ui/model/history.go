@@ -5,8 +5,6 @@ import (
 	"log/slog"
 
 	tea "charm.land/bubbletea/v2"
-
-	"github.com/charmbracelet/crush/internal/message"
 )
 
 // promptHistoryLoadedMsg is sent when prompt history is loaded.
@@ -18,23 +16,20 @@ type promptHistoryLoadedMsg struct {
 func (m *UI) loadPromptHistory() tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		var messages []message.Message
-		var err error
-
-		if m.session != nil {
-			messages, err = m.com.Workspace.ListUserMessages(ctx, m.session.ID)
-		} else {
-			messages, err = m.com.Workspace.ListAllUserMessages(ctx)
-		}
+		messages, err := m.com.Workspace.ListAllUserMessages(ctx)
 		if err != nil {
 			slog.Error("Failed to load prompt history", "error", err)
 			return promptHistoryLoadedMsg{messages: nil}
 		}
 
 		texts := make([]string, 0, len(messages))
+		seen := make(map[string]bool)
 		for _, msg := range messages {
 			if text := msg.Content().Text; text != "" {
-				texts = append(texts, text)
+				if !seen[text] {
+					seen[text] = true
+					texts = append(texts, text)
+				}
 			}
 		}
 		return promptHistoryLoadedMsg{messages: texts}
@@ -44,38 +39,56 @@ func (m *UI) loadPromptHistory() tea.Cmd {
 // handleHistoryUp handles up arrow for history navigation.
 func (m *UI) handleHistoryUp(msg tea.Msg) tea.Cmd {
 	prevHeight := m.textarea.Height()
+	var cmds []tea.Cmd
+	if cmd := m.focusEditor(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	if m.historyPrev() {
 		// we send this so that the textarea moves the view to the correct position
 		// without this the cursor will show up in the wrong place.
-		return m.updateTextareaWithPrevHeight(nil, prevHeight)
+		cmds = append(cmds, m.updateTextareaWithPrevHeight(nil, prevHeight))
+		return tea.Batch(cmds...)
 	}
-	return m.updateTextarea(msg)
+	cmds = append(cmds, m.updateTextarea(msg))
+	return tea.Batch(cmds...)
 }
 
 // handleHistoryDown handles down arrow for history navigation.
 func (m *UI) handleHistoryDown(msg tea.Msg) tea.Cmd {
 	prevHeight := m.textarea.Height()
+	var cmds []tea.Cmd
+	if cmd := m.focusEditor(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	if m.historyNext() {
 		// we send this so that the textarea moves the view to the correct position
 		// without this the cursor will show up in the wrong place.
-		return m.updateTextareaWithPrevHeight(nil, prevHeight)
+		cmds = append(cmds, m.updateTextareaWithPrevHeight(nil, prevHeight))
+		return tea.Batch(cmds...)
 	}
-	return m.updateTextarea(msg)
+	cmds = append(cmds, m.updateTextarea(msg))
+	return tea.Batch(cmds...)
 }
 
 // handleHistoryEscape handles escape for exiting history navigation.
 func (m *UI) handleHistoryEscape(msg tea.Msg) tea.Cmd {
 	prevHeight := m.textarea.Height()
+	var cmds []tea.Cmd
+	if cmd := m.focusEditor(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	// Return to current draft when browsing history.
 	if m.promptHistory.index >= 0 {
 		m.promptHistory.index = -1
 		m.textarea.Reset()
 		m.textarea.InsertString(m.promptHistory.draft)
-		return m.updateTextareaWithPrevHeight(nil, prevHeight)
+		cmds = append(cmds, m.updateTextareaWithPrevHeight(nil, prevHeight))
+		return tea.Batch(cmds...)
 	}
 
 	// Let textarea handle escape normally.
-	return m.updateTextarea(msg)
+	cmds = append(cmds, m.updateTextarea(msg))
+	return tea.Batch(cmds...)
 }
 
 // updateHistoryDraft updates history state when text is modified.
@@ -133,20 +146,16 @@ func (m *UI) historyReset() {
 	m.promptHistory.draft = ""
 }
 
-// isAtEditorStart returns true if we are at the 0 line and 0 col in the textarea.
+// isAtEditorStart returns true if we are at the first line in the textarea.
 func (m *UI) isAtEditorStart() bool {
-	return m.textarea.Line() == 0 && m.textarea.LineInfo().ColumnOffset == 0
+	return m.textarea.Line() == 0
 }
 
-// isAtEditorEnd returns true if we are in the last line and the last column in the textarea.
+// isAtEditorEnd returns true if we are on the last line in the textarea.
 func (m *UI) isAtEditorEnd() bool {
 	lineCount := m.textarea.LineCount()
 	if lineCount == 0 {
 		return true
 	}
-	if m.textarea.Line() != lineCount-1 {
-		return false
-	}
-	info := m.textarea.LineInfo()
-	return info.CharOffset >= info.CharWidth-1 || info.CharWidth == 0
+	return m.textarea.Line() == lineCount-1
 }

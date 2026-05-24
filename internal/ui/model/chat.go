@@ -42,13 +42,17 @@ type Chat struct {
 	pausedAnimations map[string]struct{}
 
 	// Mouse state
-	mouseDown     bool
-	mouseDownItem int // Item index where mouse was pressed
-	mouseDownX    int // X position in item content (character offset)
-	mouseDownY    int // Y position in item (line offset)
-	mouseDragItem int // Current item index being dragged over
-	mouseDragX    int // Current X in item content
-	mouseDragY    int // Current Y in item
+	mouseDown          bool
+	mouseDownItem      int // Item index where mouse was pressed.
+	mouseDownX         int // X position in item content (character offset).
+	mouseDownY         int // Y position in item (line offset).
+	mouseDownViewportX int // X position in the viewport where the mouse was pressed.
+	mouseDownViewportY int // Y position in the viewport where the mouse was pressed.
+	mouseDragItem      int // Current item index being dragged over.
+	mouseDragX         int // Current X in item content.
+	mouseDragY         int // Current Y in item.
+	mouseDragViewportX int // Current X in the viewport while dragging.
+	mouseDragViewportY int // Current Y in the viewport while dragging.
 
 	// Click tracking for double/triple clicks
 	lastClickTime time.Time
@@ -669,9 +673,13 @@ func (m *Chat) HandleMouseDown(x, y int) (bool, tea.Cmd) {
 		m.mouseDownItem = itemIdx
 		m.mouseDownX = x
 		m.mouseDownY = itemY
+		m.mouseDownViewportX = x
+		m.mouseDownViewportY = y
 		m.mouseDragItem = itemIdx
 		m.mouseDragX = x
 		m.mouseDragY = itemY
+		m.mouseDragViewportX = x
+		m.mouseDragViewportY = y
 
 		// Schedule delayed click action (e.g., expansion) after a short delay.
 		// If a double-click occurs, the clickID will be invalidated.
@@ -745,6 +753,8 @@ func (m *Chat) HandleMouseUp(x, y int) bool {
 
 // HandleMouseDrag handles mouse drag events for the chat component.
 func (m *Chat) HandleMouseDrag(x, y int) bool {
+	m.mouseDragViewportX = x
+	m.mouseDragViewportY = y
 	if !m.mouseDown {
 		return false
 	}
@@ -811,6 +821,10 @@ func (m *Chat) ClearMouse() {
 	m.mouseDown = false
 	m.mouseDownItem = -1
 	m.mouseDragItem = -1
+	m.mouseDownViewportX = 0
+	m.mouseDownViewportY = 0
+	m.mouseDragViewportX = 0
+	m.mouseDragViewportY = 0
 	m.lastClickTime = time.Time{}
 	m.lastClickX = 0
 	m.lastClickY = 0

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,6 +37,7 @@ func (e *testEnv) createSession(t *testing.T, sessionID string) {
 	_, err := e.q.CreateSession(e.ctx, db.CreateSessionParams{
 		ID:    sessionID,
 		Title: "Test Session",
+		Mode:  string(session.ModeExecute),
 	})
 	require.NoError(t, err)
 }

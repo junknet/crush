@@ -3,24 +3,10 @@ package backend
 import (
 	"context"
 
-	tea "charm.land/bubbletea/v2"
-
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/pubsub"
 )
-
-// SubscribeEvents returns a per-caller event channel for a workspace.
-// Each caller receives all events; multiple callers do not compete.
-func (b *Backend) SubscribeEvents(ctx context.Context, workspaceID string) (<-chan pubsub.Event[tea.Msg], error) {
-	ws, err := b.GetWorkspace(workspaceID)
-	if err != nil {
-		return nil, err
-	}
-
-	return ws.Events(ctx), nil
-}
 
 // GetLSPStates returns the state of all LSP clients.
 func (b *Backend) GetLSPStates(workspaceID string) (map[string]app.LSPClientInfo, error) {

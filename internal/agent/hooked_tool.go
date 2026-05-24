@@ -83,9 +83,29 @@ func (h *hookedTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.To
 		ctx = permission.WithHookApproval(ctx, call.ID)
 	}
 
-	resp, err := h.inner.Run(ctx, call)
-	if err != nil {
-		return resp, err
+	resp, runErr := h.inner.Run(ctx, call)
+
+	// PostToolUse fires for every executed tool call regardless of error:
+	// hooks can use the failure signal to skip work or surface diagnostics.
+	// A PostToolUse hook cannot un-run the tool, but Halt promotes to a
+	// turn-ending StopTurn and Context appends to the tool response so the
+	// model sees the hook's commentary in its next step.
+	postResult := h.runPostToolUse(ctx, sessionID, call, resp, runErr)
+	if postResult.HookCount > 0 {
+		if postResult.Halt {
+			resp.StopTurn = true
+		}
+		if postResult.Context != "" {
+			if resp.Content != "" {
+				resp.Content += "\n"
+			}
+			resp.Content += postResult.Context
+		}
+	}
+
+	if runErr != nil {
+		resp.Metadata = mergePostHookMetadata(resp.Metadata, result, postResult)
+		return resp, runErr
 	}
 
 	if result.Context != "" {
@@ -95,8 +115,71 @@ func (h *hookedTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.To
 		resp.Content += result.Context
 	}
 
-	resp.Metadata = mergeHookMetadata(resp.Metadata, result)
+	resp.Metadata = mergePostHookMetadata(resp.Metadata, result, postResult)
 	return resp, nil
+}
+
+// runPostToolUse builds the PostToolUse payload (tool_input + tool_response
+// snapshot + Go error string) and runs the configured hooks. Errors are
+// logged and swallowed — the tool already executed; a hook failure must
+// never escalate to a tool failure.
+func (h *hookedTool) runPostToolUse(ctx context.Context, sessionID string, call fantasy.ToolCall, resp fantasy.ToolResponse, runErr error) hooks.AggregateResult {
+	errStr := ""
+	if runErr != nil {
+		errStr = runErr.Error()
+	}
+	payload := map[string]any{
+		"tool_input": json.RawMessage(call.Input),
+		"tool_response": map[string]any{
+			"content":   resp.Content,
+			"is_error":  resp.IsError,
+			"stop_turn": resp.StopTurn,
+			"metadata":  json.RawMessage(orEmptyJSON(resp.Metadata)),
+		},
+		"error": errStr,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		slog.Warn("PostToolUse payload marshal failed", "tool", call.Name, "error", err)
+		return hooks.AggregateResult{}
+	}
+	result, err := h.runner.Run(ctx, hooks.EventPostToolUse, sessionID, call.Name, string(raw))
+	if err != nil {
+		slog.Warn("PostToolUse hook execution error",
+			"tool", call.Name, "error", err)
+	}
+	return result
+}
+
+// orEmptyJSON guarantees a JSON parser can decode the value — used when
+// embedding an opaque tool metadata string into a parent JSON document.
+func orEmptyJSON(s string) string {
+	if s == "" {
+		return "{}"
+	}
+	return s
+}
+
+// mergePostHookMetadata writes the pre-hook aggregate into `hook` and any
+// post-hook aggregate into `hook.post` so the two never trample each other.
+func mergePostHookMetadata(existing string, pre, post hooks.AggregateResult) string {
+	out := mergeHookMetadata(existing, pre)
+	if post.HookCount == 0 {
+		return out
+	}
+	meta := buildHookMetadata(post)
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return out
+	}
+	if out == "" {
+		out = "{}"
+	}
+	merged, err := sjson.SetRaw(out, "hook.post", string(data))
+	if err != nil {
+		return out
+	}
+	return merged
 }
 
 // buildHookMetadata creates a HookMetadata from an AggregateResult.

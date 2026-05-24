@@ -11,6 +11,7 @@ type TaskKind string
 
 const (
 	TaskExplore   TaskKind = "explore"
+	TaskPlan      TaskKind = "plan"
 	TaskEdit      TaskKind = "edit"
 	TaskVerify    TaskKind = "verify"
 	TaskSummarize TaskKind = "summarize"
@@ -32,6 +33,7 @@ type WorkerProfile string
 
 const (
 	ProfileBrainAgent   WorkerProfile = "brain_agent"
+	ProfilePlanAgent    WorkerProfile = "plan_agent"
 	ProfileWorkerAgent  WorkerProfile = "worker_agent"
 	ProfileExploreAgent WorkerProfile = "explore_agent"
 )
@@ -192,6 +194,8 @@ func (n *TaskNode) ToRequestIntent() provider.RequestIntent {
 
 func purposeForTaskKind(kind TaskKind) provider.RequestPurpose {
 	switch kind {
+	case TaskPlan:
+		return provider.PurposePlan
 	case TaskEdit:
 		return provider.PurposeEdit
 	case TaskVerify:

@@ -237,12 +237,21 @@ func (a *AssistantMessageItem) Render(width int) string {
 	}
 	focused := a.sty.Messages.AssistantFocused.Render()
 	blurred := a.sty.Messages.AssistantBlurred.Render()
+	// A boosted-reasoning turn keeps its distinct left bar in both focus states
+	// so it reads as a temporary max-reasoning result at a glance.
+	boostedPrefix := ""
+	if a.message.IsBoosted() {
+		boostedPrefix = a.sty.Messages.AssistantBoosted.Render()
+	}
 	rendered := a.RawRender(width)
 	lines := strings.Split(rendered, "\n")
 	for i, line := range lines {
-		if a.focused {
+		switch {
+		case boostedPrefix != "":
+			lines[i] = boostedPrefix + line
+		case a.focused:
 			lines[i] = focused + line
-		} else {
+		default:
 			lines[i] = blurred + line
 		}
 	}
@@ -282,6 +291,9 @@ func (a *AssistantMessageItem) prefixCacheKey(cappedWidth int) uint64 {
 	writeU64(errSrc)
 	writeU64(errExtra)
 	writeU64(a.compositionKey())
+	if a.message.IsBoosted() {
+		writeU64(1)
+	}
 	fingerprint := h.Sum64()
 	var focusBit uint64
 	if a.focused {
@@ -454,7 +466,13 @@ func (a *AssistantMessageItem) renderThinking(thinking string, width int) string
 
 	switch a.thinkingViewMode {
 	case thinkingCollapsed:
-		if totalLines > maxCollapsedThinkingHeight {
+		// Do not collapse the thinking process block while the assistant is
+		// actively in the reasoning phase (thinking is non-empty and FinishedAt
+		// is 0). This allows the user to view the full streaming output in
+		// real-time. Collapse to maxCollapsedThinkingHeight only once the
+		// reasoning phase is completed.
+		isThinkingActive := a.message.ReasoningContent().Thinking != "" && a.message.ReasoningContent().FinishedAt == 0
+		if !isThinkingActive && totalLines > maxCollapsedThinkingHeight {
 			lines = lines[totalLines-maxCollapsedThinkingHeight:]
 			hint := a.sty.Messages.ThinkingTruncationHint.Render(
 				fmt.Sprintf(assistantMessageTruncateFormat, totalLines-maxCollapsedThinkingHeight),

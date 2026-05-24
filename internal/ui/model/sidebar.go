@@ -54,6 +54,9 @@ func (m *UI) modelInfo(width int) string {
 		modelName = model.CatwalkCfg.Name
 	}
 	info := common.ModelInfo(m.com.Styles, modelName, providerName, reasoningInfo, modelContext, width, m.hyperCredits)
+	if m.currentSessionMode().IsPlan() {
+		info = lipgloss.JoinVertical(lipgloss.Left, info, m.com.Styles.ModelInfo.Reasoning.Render("Plan mode"))
+	}
 	if m.pendingModelSwitch != nil {
 		pendingLine := m.com.Styles.ModelInfo.Reasoning.Render(
 			fmt.Sprintf("→ %s (pending)", m.pendingModelSwitch.Model.Model))

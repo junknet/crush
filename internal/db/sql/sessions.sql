@@ -3,6 +3,7 @@ INSERT INTO sessions (
     id,
     parent_session_id,
     title,
+    mode,
     message_count,
     prompt_tokens,
     completion_tokens,
@@ -18,24 +19,25 @@ INSERT INTO sessions (
     ?,
     ?,
     ?,
+    ?,
     null,
     strftime('%s', 'now'),
     strftime('%s', 'now')
-) RETURNING *;
+) RETURNING id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos;
 
 -- name: GetSessionByID :one
-SELECT *
+SELECT id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
 FROM sessions
 WHERE id = ? LIMIT 1;
 
 -- name: GetLastSession :one
-SELECT *
+SELECT id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
 FROM sessions
 ORDER BY updated_at DESC
 LIMIT 1;
 
 -- name: ListSessions :many
-SELECT *
+SELECT id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
 FROM sessions
 WHERE parent_session_id is NULL
 ORDER BY updated_at DESC;
@@ -44,13 +46,14 @@ ORDER BY updated_at DESC;
 UPDATE sessions
 SET
     title = ?,
+    mode = ?,
     prompt_tokens = ?,
     completion_tokens = ?,
     summary_message_id = ?,
     cost = ?,
     todos = ?
 WHERE id = ?
-RETURNING *;
+RETURNING id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos;
 
 -- name: UpdateSessionTitleAndUsage :exec
 UPDATE sessions

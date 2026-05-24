@@ -51,7 +51,7 @@ var serverCmd = &cobra.Command{
 			return fmt.Errorf("invalid server host: %v", err)
 		}
 
-		logFile := filepath.Join(config.GlobalCacheDir(), "server-"+safeHostName(hostURL), "crush.log")
+		logFile := filepath.Join(config.GlobalCacheDir(), "server", "crush.log")
 
 		if term.IsTerminal(os.Stderr.Fd()) {
 			crushlog.Setup(logFile, debug, os.Stderr)

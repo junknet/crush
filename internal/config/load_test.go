@@ -1615,6 +1615,12 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 					Think:     true,
 					MaxTokens: 16000,
 				},
+				SelectedModelTypePlan: {
+					Provider:  "waitai-anthropic",
+					Model:     "claude-opus-4-7",
+					Think:     true,
+					MaxTokens: 16000,
+				},
 				SelectedModelTypeWorker: {
 					Provider:  "waitai-anthropic",
 					Model:     "claude-sonnet-4-6",
@@ -1638,9 +1644,11 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypeBrain].Model)
+		require.Equal(t, "claude-opus-4-7", cfg.Models[SelectedModelTypePlan].Model)
 		require.Equal(t, "claude-sonnet-4-6", cfg.Models[SelectedModelTypeWorker].Model)
 		require.Equal(t, "claude-haiku-4-5-20251001", cfg.Models[SelectedModelTypeExplore].Model)
 		require.True(t, cfg.Models[SelectedModelTypeBrain].Think)
+		require.True(t, cfg.Models[SelectedModelTypePlan].Think)
 		require.True(t, cfg.Models[SelectedModelTypeWorker].Think)
 		require.False(t, cfg.Models[SelectedModelTypeExplore].Think)
 	})
@@ -1749,10 +1757,14 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 		err = configureSelectedModels(testStore(cfg), knownProviders, true)
 		require.NoError(t, err)
 		brain := cfg.Models[SelectedModelTypeBrain]
+		plan := cfg.Models[SelectedModelTypePlan]
 		explore := cfg.Models[SelectedModelTypeExplore]
 		require.Equal(t, "custom-brain-model", brain.Model)
 		require.Equal(t, "openai", brain.Provider)
 		require.Equal(t, int64(2000), brain.MaxTokens)
+		require.Equal(t, "brain-model", plan.Model)
+		require.Equal(t, "openai", plan.Provider)
+		require.Equal(t, int64(1000), plan.MaxTokens)
 		require.Equal(t, "explore-model", explore.Model)
 		require.Equal(t, "openai", explore.Provider)
 		require.Equal(t, int64(500), explore.MaxTokens)

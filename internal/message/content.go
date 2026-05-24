@@ -130,6 +130,10 @@ type Finish struct {
 	Time    int64        `json:"time"`
 	Message string       `json:"message,omitempty"`
 	Details string       `json:"details,omitempty"`
+	// Boosted marks a turn that ran at the model's strongest reasoning effort
+	// because the user's prompt contained the boost keyword. The TUI renders
+	// such turns in a distinct color. Persisted in the Parts JSON (no migration).
+	Boosted bool `json:"boosted,omitempty"`
 }
 
 func (Finish) isPart() {}
@@ -144,6 +148,26 @@ type Message struct {
 	CreatedAt        int64
 	UpdatedAt        int64
 	IsSummaryMessage bool
+
+	// boosted is an in-memory flag set for the current turn when reasoning was
+	// boosted; AddFinish stamps it onto the persisted Finish part. On reload it
+	// is read back from the Finish part via IsBoosted.
+	boosted bool
+}
+
+// SetBoostedReasoning marks this turn as running at boosted reasoning effort so
+// the next AddFinish persists it onto the Finish part.
+func (m *Message) SetBoostedReasoning(b bool) {
+	m.boosted = b
+}
+
+// IsBoosted reports whether this turn ran at boosted reasoning effort, read
+// from the persisted Finish part (falling back to the in-memory flag).
+func (m *Message) IsBoosted() bool {
+	if fp := m.FinishPart(); fp != nil && fp.Boosted {
+		return true
+	}
+	return m.boosted
 }
 
 func (m *Message) Content() TextContent {
@@ -232,7 +256,8 @@ func (m *Message) FinishReason() FinishReason {
 }
 
 func (m *Message) IsThinking() bool {
-	if m.ReasoningContent().Thinking != "" && m.Content().Text == "" && !m.IsFinished() {
+	reasoning := m.ReasoningContent()
+	if reasoning.Thinking != "" && reasoning.FinishedAt == 0 && !m.IsFinished() {
 		return true
 	}
 	return false
@@ -434,7 +459,7 @@ func (m *Message) AddFinish(reason FinishReason, message, details string) {
 			break
 		}
 	}
-	m.Parts = append(m.Parts, Finish{Reason: reason, Time: time.Now().Unix(), Message: message, Details: details})
+	m.Parts = append(m.Parts, Finish{Reason: reason, Time: time.Now().Unix(), Message: message, Details: details, Boosted: m.boosted})
 }
 
 func (m *Message) AddImageURL(url, detail string) {

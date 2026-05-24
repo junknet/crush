@@ -107,6 +107,7 @@ func writeModels(b *strings.Builder, cfg *config.ConfigStore) {
 	}
 	for _, typ := range []config.SelectedModelType{
 		config.SelectedModelTypeBrain,
+		config.SelectedModelTypePlan,
 		config.SelectedModelTypeWorker,
 		config.SelectedModelTypeExplore,
 	} {

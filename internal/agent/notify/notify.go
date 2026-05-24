@@ -7,6 +7,8 @@ package notify
 type Type string
 
 const (
+	// TypeAgentStarted indicates the agent has started its turn.
+	TypeAgentStarted Type = "agent_started"
 	// TypeAgentFinished indicates the agent has completed its turn.
 	TypeAgentFinished Type = "agent_finished"
 	// TypeReAuthenticate indicates the agent encountered an

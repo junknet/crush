@@ -21,6 +21,12 @@ func TestConfig_AgentIDs(t *testing.T) {
 		assert.Equal(t, AgentBrain, brainAgent.ID, "Brain agent ID should be '%s'", AgentBrain)
 	})
 
+	t.Run("Plan agent should have correct ID", func(t *testing.T) {
+		planAgent, ok := cfg.Agents[AgentPlan]
+		require.True(t, ok)
+		assert.Equal(t, AgentPlan, planAgent.ID, "Plan agent ID should be '%s'", AgentPlan)
+	})
+
 	t.Run("Worker agent should have correct ID", func(t *testing.T) {
 		workerAgent, ok := cfg.Agents[AgentWorker]
 		require.True(t, ok)

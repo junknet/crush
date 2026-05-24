@@ -273,6 +273,8 @@ func subAgentRole(profile string) string {
 	switch scheduler.WorkerProfile(profile) {
 	case scheduler.ProfileBrainAgent:
 		return "brain"
+	case scheduler.ProfilePlanAgent:
+		return "plan"
 	case scheduler.ProfileExploreAgent:
 		return "explore"
 	case scheduler.ProfileWorkerAgent:

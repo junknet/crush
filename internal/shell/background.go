@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"strings"
@@ -38,6 +39,8 @@ const (
 	BackgroundKindMonitorEOF BackgroundEventKind = "monitor_eof"
 	// BackgroundKindMonitorTimeout — a monitor expired without matching.
 	BackgroundKindMonitorTimeout BackgroundEventKind = "monitor_timeout"
+	// BackgroundKindMonitorLine — a new line of stdout/stderr from a running job.
+	BackgroundKindMonitorLine BackgroundEventKind = "monitor_line"
 )
 
 // BackgroundJobEvent is the wake-up signal that lets the agent loop continue a
@@ -94,21 +97,21 @@ func (sb *syncBuffer) String() string {
 
 // BackgroundShell represents a shell running in the background.
 type BackgroundShell struct {
-	ID          string
-	Command     string
-	Description string
-	SessionID   string
-	Shell       *Shell
-	WorkingDir  string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	stdout      *syncBuffer
-	stderr      *syncBuffer
-	done        chan struct{}
-	exitErr     error
-	completedAt atomic.Int64 // Unix timestamp when job completed (0 if still running)
-	backgrounded atomic.Bool // true once handed back to the agent as a background job
-	notifyOnce   sync.Once   // guards single completion event publish
+	ID           string
+	Command      string
+	Description  string
+	SessionID    string
+	Shell        *Shell
+	WorkingDir   string
+	ctx          context.Context
+	cancel       context.CancelFunc
+	stdout       *syncBuffer
+	stderr       *syncBuffer
+	done         chan struct{}
+	exitErr      error
+	completedAt  atomic.Int64 // Unix timestamp when job completed (0 if still running)
+	backgrounded atomic.Bool  // true once handed back to the agent as a background job
+	notifyOnce   sync.Once    // guards single completion event publish
 }
 
 // BackgroundShellManager manages background shell instances.
@@ -168,7 +171,36 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 	go func() {
 		defer close(bgShell.done)
 
-		err := shell.ExecStream(shellCtx, command, bgShell.stdout, bgShell.stderr)
+		stdoutWriter := &linePublishWriter{
+			target: bgShell.stdout,
+			onLine: func(line string) {
+				backgroundBroker.Publish(pubsub.CreatedEvent, BackgroundJobEvent{
+					Kind:        BackgroundKindMonitorLine,
+					ID:          bgShell.ID,
+					SessionID:   bgShell.SessionID,
+					Command:     bgShell.Command,
+					Description: bgShell.Description,
+					MatchLine:   line,
+				})
+			},
+		}
+		stderrWriter := &linePublishWriter{
+			target: bgShell.stderr,
+			onLine: func(line string) {
+				backgroundBroker.Publish(pubsub.CreatedEvent, BackgroundJobEvent{
+					Kind:        BackgroundKindMonitorLine,
+					ID:          bgShell.ID,
+					SessionID:   bgShell.SessionID,
+					Command:     bgShell.Command,
+					Description: bgShell.Description,
+					MatchLine:   line,
+				})
+			},
+		}
+
+		err := shell.ExecStream(shellCtx, command, stdoutWriter, stderrWriter)
+		stdoutWriter.Flush()
+		stderrWriter.Flush()
 
 		bgShell.exitErr = err
 		bgShell.completedAt.Store(time.Now().Unix())
@@ -434,5 +466,41 @@ func (bs *BackgroundShell) WaitContext(ctx context.Context) bool {
 		return true
 	case <-ctx.Done():
 		return false
+	}
+}
+
+type linePublishWriter struct {
+	target io.Writer
+	mu     sync.Mutex
+	buf    []byte
+	onLine func(line string)
+}
+
+func (lp *linePublishWriter) Write(p []byte) (n int, err error) {
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+	n, err = lp.target.Write(p)
+	if err != nil {
+		return n, err
+	}
+	lp.buf = append(lp.buf, p...)
+	for {
+		idx := bytes.IndexByte(lp.buf, '\n')
+		if idx < 0 {
+			break
+		}
+		line := string(lp.buf[:idx])
+		lp.buf = lp.buf[idx+1:]
+		lp.onLine(line)
+	}
+	return n, nil
+}
+
+func (lp *linePublishWriter) Flush() {
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+	if len(lp.buf) > 0 {
+		lp.onLine(string(lp.buf))
+		lp.buf = nil
 	}
 }

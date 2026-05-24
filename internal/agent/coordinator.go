@@ -22,10 +22,12 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
-	"github.com/charmbracelet/crush/internal/agent/prompt"
+	agentprompt "github.com/charmbracelet/crush/internal/agent/prompt"
+	"github.com/charmbracelet/crush/internal/agent/suggestion"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/event"
+	"github.com/charmbracelet/crush/internal/eventbus"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/home"
@@ -35,6 +37,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/memdir"
 	"github.com/charmbracelet/crush/internal/provider"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
@@ -59,16 +62,25 @@ import (
 )
 
 // Coordinator errors.
+// reasoningBoostKeyword is the substring in a user prompt that escalates that
+// single request to the model's strongest reasoning effort (see getProviderOptions).
+const reasoningBoostKeyword = "思考"
+
 var (
 	errWorkerAgentNotConfigured          = errors.New("worker agent not configured")
+	errPlanAgentNotConfigured            = errors.New("plan agent not configured")
+	errBrainAgentNotConfigured           = errors.New("brain agent not configured")
 	errModelProviderNotConfigured        = errors.New("model provider not configured")
 	errBrainModelNotSelected             = errors.New("brain model not selected")
+	errPlanModelNotSelected              = errors.New("plan model not selected")
 	errWorkerModelNotSelected            = errors.New("worker model not selected")
 	errExploreModelNotSelected           = errors.New("explore model not selected")
 	errBrainModelProviderNotConfigured   = errors.New("brain model provider not configured")
+	errPlanModelProviderNotConfigured    = errors.New("plan model provider not configured")
 	errWorkerModelProviderNotConfigured  = errors.New("worker model provider not configured")
 	errExploreModelProviderNotConfigured = errors.New("explore model provider not configured")
 	errBrainModelNotFound                = errors.New("brain model not found in provider config")
+	errPlanModelNotFound                 = errors.New("plan model not found in provider config")
 	errWorkerModelNotFound               = errors.New("worker model not found in provider config")
 	errExploreModelNotFound              = errors.New("explore model not found in provider config")
 )
@@ -110,7 +122,7 @@ var copilotResponsesModels = map[string]bool{
 type Coordinator interface {
 	// INFO: (kujtim) this is not used yet we will use this when we have multiple agents
 	// SetMainAgent(string)
-	Run(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error)
+	Run(ctx context.Context, sessionID, prompt string, planMode bool, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 	Cancel(sessionID string)
 	CancelAll()
 	IsSessionBusy(sessionID string) bool
@@ -121,6 +133,10 @@ type Coordinator interface {
 	Summarize(context.Context, string) error
 	Model() Model
 	UpdateModels(ctx context.Context) error
+	// Suggestion returns the ghost-text suggestion service, or nil when
+	// disabled by config / not yet wired.
+	Suggestion() *suggestion.Service
+	PromoteSpeculativeSession(ctx context.Context, sessionID string) error
 }
 
 type coordinator struct {
@@ -146,7 +162,14 @@ type coordinator struct {
 	activeSkills []*skills.Skill // Post-filter: active skills only.
 	skillTracker *skills.Tracker
 
+	// Suggestion service for ghost-text autocomplete. Fed after each
+	// successful brain turn; nil when DisableSuggestion is true in config.
+	suggestion *suggestion.Service
+
 	readyWg errgroup.Group
+
+	speculativeMu      sync.Mutex
+	speculativeCancels map[string]context.CancelFunc
 }
 
 func NewCoordinator(
@@ -175,11 +198,12 @@ func NewCoordinator(
 		lspManager:   lspManager,
 		bgManager:    bgManager,
 		notify:       notify,
-		agents:       make(map[string]SessionAgent),
-		allSkills:    allSkills,
-		activeSkills: activeSkills,
-		skillTracker: skillTracker,
-		runtime:      agentruntime.NewSession(cfg.WorkingDir(), nil),
+		agents:             make(map[string]SessionAgent),
+		allSkills:          allSkills,
+		activeSkills:       activeSkills,
+		skillTracker:       skillTracker,
+		runtime:            agentruntime.NewSession(cfg.WorkingDir(), nil),
+		speculativeCancels: make(map[string]context.CancelFunc),
 	}
 
 	agentName := config.AgentBrain
@@ -192,7 +216,7 @@ func NewCoordinator(
 		return nil, errWorkerAgentNotConfigured
 	}
 
-	systemPrompt, err := promptForAgentRole(agentName, prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	systemPrompt, err := promptForAgentRole(agentName, agentprompt.WithWorkingDir(c.cfg.WorkingDir()))
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +230,7 @@ func NewCoordinator(
 	c.agents[config.AgentBrain] = agent
 
 	if workerCfg, ok := cfg.Config().Agents[config.AgentWorker]; ok {
-		workerSystemPrompt, err := promptForAgentRole(config.AgentWorker, prompt.WithWorkingDir(c.cfg.WorkingDir()))
+		workerSystemPrompt, err := promptForAgentRole(config.AgentWorker, agentprompt.WithWorkingDir(c.cfg.WorkingDir()))
 		if err != nil {
 			return nil, err
 		}
@@ -217,8 +241,20 @@ func NewCoordinator(
 		c.agents[config.AgentWorker] = workerAgent
 	}
 
+	if planCfg, ok := cfg.Config().Agents[config.AgentPlan]; ok {
+		planSystemPrompt, err := promptForAgentRole(config.AgentPlan, agentprompt.WithWorkingDir(c.cfg.WorkingDir()))
+		if err != nil {
+			return nil, err
+		}
+		planAgent, err := c.buildAgent(ctx, planSystemPrompt, planCfg, true)
+		if err != nil {
+			return nil, err
+		}
+		c.agents[config.AgentPlan] = planAgent
+	}
+
 	if exploreCfg, ok := cfg.Config().Agents[config.AgentExplore]; ok {
-		exploreSystemPrompt, err := promptForAgentRole(config.AgentExplore, prompt.WithWorkingDir(c.cfg.WorkingDir()))
+		exploreSystemPrompt, err := promptForAgentRole(config.AgentExplore, agentprompt.WithWorkingDir(c.cfg.WorkingDir()))
 		if err != nil {
 			return nil, err
 		}
@@ -229,6 +265,23 @@ func NewCoordinator(
 		c.agents[config.AgentExplore] = exploreAgent
 	}
 
+	// Wire suggestion service. Uses the brain agent's title (utility)
+	// model so ghost-text predictions don't burn the user's primary
+	// model budget. Disabled via Options.DisableSuggestion.
+	disableSugg := cfg.Config().Options != nil && cfg.Config().Options.DisableSuggestion
+	c.suggestion = suggestion.New(messages, func() fantasy.LanguageModel {
+		brain, ok := c.agents[config.AgentBrain]
+		if !ok || brain == nil {
+			return nil
+		}
+		sa, ok := brain.(*sessionAgent)
+		if !ok {
+			return nil
+		}
+		m := sa.TitleModel()
+		return m.Model
+	}, disableSugg)
+
 	// Drive event-driven re-wakeups: when a backgrounded shell job finishes or
 	// a monitor fires, automatically continue the session that launched it
 	// instead of leaving the agent idle waiting for the user to poll.
@@ -236,7 +289,64 @@ func NewCoordinator(
 	// Drive timer-based re-wakeups requested via the schedule_wakeup tool.
 	go c.watchScheduledWakeups(ctx)
 
+	// Optional Notification hook bridge. CRUSH_HOOK_NOTIFICATION=1 wires
+	// every eventbus event into the user's Notification hook command. Kept
+	// behind an env gate because a busy session can fire dozens of bus
+	// events per second and most users do not want a hook command spawned
+	// that often.
+	if os.Getenv("CRUSH_HOOK_NOTIFICATION") == "1" {
+		c.installNotificationHookBridge()
+	}
+
 	return c, nil
+}
+
+// installNotificationHookBridge wires eventbus events to the configured
+// Notification hooks. Builds an event-routed Runner from the global
+// hooks config so the user can match against ev.Kind from inside a hook
+// command. A nil hooks config silently disables the bridge.
+func (c *coordinator) installNotificationHookBridge() {
+	cfg := c.cfg.Config()
+	if cfg == nil || len(cfg.Hooks) == 0 {
+		return
+	}
+	anyConfigured := false
+	for _, list := range cfg.Hooks {
+		if len(list) > 0 {
+			anyConfigured = true
+			break
+		}
+	}
+	if !anyConfigured {
+		return
+	}
+	runner := hooks.NewEventRunner(cfg.Hooks, c.cfg.WorkingDir(), c.cfg.WorkingDir())
+	eventbus.InstallNotificationHandler(func(ev eventbus.Event) {
+		raw, err := json.Marshal(map[string]any{
+			"kind":       ev.Kind,
+			"session_id": ev.SessionID,
+			"payload":    ev.Payload,
+		})
+		if err != nil {
+			return
+		}
+		// Use the event kind as toolName so user hook matchers can filter
+		// (e.g. `monitor_match` only). Background-context: the hook fires
+		// far from any agent loop, so a fresh context is the right scope.
+		if _, err := runner.Run(context.Background(), hooks.EventNotification, ev.SessionID, ev.Kind, string(raw)); err != nil {
+			slog.Debug("Notification hook error", "kind", ev.Kind, "error", err)
+		}
+	})
+}
+
+// Suggestion exposes the ghost-text suggestion service so the TUI can
+// subscribe to fresh suggestions and acknowledge accept/reject events. May
+// return nil if suggestion is disabled or NewCoordinator failed early.
+func (c *coordinator) Suggestion() *suggestion.Service {
+	if c == nil {
+		return nil
+	}
+	return c.suggestion
 }
 
 // watchScheduledWakeups resumes a session when a schedule_wakeup timer fires,
@@ -262,7 +372,7 @@ func (c *coordinator) watchScheduledWakeups(ctx context.Context) {
 				req.Reason)
 			slog.DebugContext(ctx, "Scheduled wake-up fired", "session_id", req.SessionID)
 			go func() {
-				if _, err := c.Run(ctx, req.SessionID, prompt); err != nil {
+				if _, err := c.Run(ctx, req.SessionID, prompt, false); err != nil {
 					slog.Error("Scheduled wake-up run failed", "session_id", req.SessionID, "error", err)
 				}
 			}()
@@ -289,11 +399,21 @@ func (c *coordinator) watchBackgroundJobs(ctx context.Context) {
 			if job.SessionID == "" {
 				continue
 			}
+			// Mirror the wake-up onto the unified eventbus so PrepareStep can
+			// drain it as a <task-notification> system-reminder for the next
+			// turn, in addition to the c.Run continuation below.
+			publishBackgroundJobToEventBus(job)
+
+			// Do not wake the agent for streaming output lines
+			if job.Kind == shell.BackgroundKindMonitorLine {
+				continue
+			}
+
 			prompt := buildBackgroundWakePrompt(job)
 			slog.DebugContext(ctx, "Background job finished — waking session",
 				"job", job.ID, "session_id", job.SessionID, "exit_code", job.ExitCode)
 			go func() {
-				if _, err := c.Run(ctx, job.SessionID, prompt); err != nil {
+				if _, err := c.Run(ctx, job.SessionID, prompt, false); err != nil {
 					slog.Error("Background job wake-up run failed",
 						"job", job.ID, "session_id", job.SessionID, "error", err)
 				}
@@ -341,11 +461,79 @@ func buildBackgroundWakePrompt(job shell.BackgroundJobEvent) string {
 	}
 }
 
+// publishBackgroundJobToEventBus mirrors a background-job event onto the
+// unified eventbus. Kept side-by-side with the c.Run wake-up path so existing
+// behaviour is preserved while PrepareStep also sees the event as a
+// task-notification.
+func publishBackgroundJobToEventBus(job shell.BackgroundJobEvent) {
+	kind := "bash_done"
+	priority := eventbus.PriorityNext
+	switch job.Kind {
+	case shell.BackgroundKindMonitorHit:
+		kind = "monitor_match"
+		priority = eventbus.PriorityNow
+	case shell.BackgroundKindMonitorEOF:
+		kind = "monitor_eof"
+	case shell.BackgroundKindMonitorTimeout:
+		kind = "monitor_timeout"
+	case shell.BackgroundKindMonitorLine:
+		kind = "monitor_line"
+		priority = eventbus.PriorityLater
+	}
+	payload := map[string]any{
+		"shell_id":     job.ID,
+		"command":      job.Command,
+		"exit_code":    job.ExitCode,
+		"interrupted":  job.Interrupted,
+		"output_bytes": len(job.OutputTail),
+		"output_tail":  job.OutputTail,
+		"pattern":      job.Pattern,
+		"match_line":   job.MatchLine,
+	}
+	eventbus.Default.Publish(eventbus.Event{
+		Kind:      kind,
+		SessionID: job.SessionID,
+		Payload:   eventbus.MarshalJSONPayload(payload),
+		Priority:  priority,
+	})
+}
+
 // Run implements Coordinator.
-func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
+func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, planMode bool, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
+	c.speculativeMu.Lock()
+	if cancel, ok := c.speculativeCancels[sessionID]; ok {
+		cancel()
+		delete(c.speculativeCancels, sessionID)
+	}
+	c.speculativeMu.Unlock()
+
 	if err := c.readyWg.Wait(); err != nil {
 		return nil, err
 	}
+
+	rootProfile := scheduler.ProfileBrainAgent
+	rootAgentName := config.AgentBrain
+	if planMode {
+		rootProfile = scheduler.ProfilePlanAgent
+		rootAgentName = config.AgentPlan
+	}
+
+	rootAgent := c.agentForProfile(rootProfile)
+	if rootAgent == nil {
+		if planMode {
+			return nil, errPlanAgentNotConfigured
+		}
+		return nil, errBrainAgentNotConfigured
+	}
+
+	previousAgent := c.currentAgent
+	previousAgentName := c.currentAgentName
+	c.currentAgent = rootAgent
+	c.currentAgentName = rootAgentName
+	defer func() {
+		c.currentAgent = previousAgent
+		c.currentAgentName = previousAgentName
+	}()
 
 	// refresh models before each run
 	if err := c.UpdateModels(ctx); err != nil {
@@ -374,7 +562,15 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		return nil, errModelProviderNotConfigured
 	}
 
-	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(model, providerCfg)
+	// Keyword-triggered reasoning boost: when the user's prompt contains "思考"
+	// this single request runs at the model's strongest reasoning effort, and
+	// the resulting turn is flagged so the TUI can color it distinctly.
+	boost := strings.Contains(prompt, reasoningBoostKeyword)
+	if boost {
+		slog.Debug("Reasoning boost engaged for this turn", "session", sessionID, "keyword", reasoningBoostKeyword)
+	}
+
+	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(sessionID, model, providerCfg, boost)
 
 	if err := c.refreshTokenIfExpired(ctx, providerCfg); err != nil {
 		// NOTE(@andreynering): We don't return here because the event handling to ask the user to reauthenticate
@@ -386,7 +582,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		taskRuntime := c.newTaskRuntime(sessionID)
 		c.setLastRuntime(taskRuntime)
 		taskScheduler := scheduler.NewAgentScheduler(taskRuntime)
-		taskNode := c.ensureRootTask(taskScheduler, sessionID, prompt, maxTokens)
+		taskNode := c.ensureRootTask(taskScheduler, sessionID, prompt, maxTokens, rootProfile)
 		if taskNode == nil {
 			return nil, errors.New("failed to create root task")
 		}
@@ -399,6 +595,14 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 				callMaxTokens = int64(intent.MaxOutputTokens)
 			}
 			taskPrompt := c.composeTaskPrompt(taskRuntime, node, prompt)
+			// Only the brain (user-facing root task) carries the per-turn
+			// dynamic env prefix. Sub-agents (worker/explore/plan) stay
+			// pure so their static prefix hashes remain identical across
+			// dispatches, maximising prompt-cache reuse.
+			var dynPrefix string
+			if node.Profile == scheduler.ProfileBrainAgent {
+				dynPrefix = agentprompt.DynamicPrefix(taskCtx, c.cfg)
+			}
 			agent := c.agentForProfile(node.Profile)
 			if agent == nil {
 				return "", fmt.Errorf("agent not configured for profile %s", node.Profile)
@@ -410,9 +614,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			res, err := agent.Run(taskCtx, SessionAgentCall{
 				SessionID:        sessionID,
 				Prompt:           taskPrompt,
+				DynamicPrefix:    dynPrefix,
 				Attachments:      attachments,
 				MaxOutputTokens:  callMaxTokens,
 				ProviderOptions:  mergedOptions,
+				BoostReasoning:   boost,
 				Temperature:      temp,
 				TopP:             topP,
 				TopK:             topK,
@@ -435,7 +641,13 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 				return "", err
 			}
 			if res == nil {
-				return "", errors.New("agent returned no result")
+				// Run returns (nil, nil) when the session is busy and this call
+				// was queued behind an in-flight turn; that turn absorbs the
+				// prompt via the PrepareStep queue drain (see agent.go). It is
+				// not a failure — the queued prompt will be answered there.
+				slog.Debug("Task queued behind an in-flight turn; deferring to it",
+					"session", sessionID, "node", node.ID)
+				return "", nil
 			}
 			result = res
 			output := res.Response.Content.Text()
@@ -461,6 +673,30 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	}
 
 	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
+
+	// Kick off ghost-text suggestion generation for this session after a
+	// successful brain turn. Only the user-facing brain run fires it —
+	// plan/worker/explore sub-agents are internal so a suggestion off
+	// them would be confusing UX. Always non-blocking; uses context.Background
+	// so cancelling this Run doesn't abort the suggestion call (it has
+	// its own timeout via the suggestion service).
+	if originalErr == nil && result != nil && rootProfile == scheduler.ProfileBrainAgent {
+		sid := sessionID
+		go c.triggerMemoryExtraction(context.Background(), sid)
+
+		if c.suggestion != nil {
+			go func() {
+				prediction, err := c.suggestion.Generate(context.Background(), sid)
+				if err != nil {
+					slog.Debug("Suggestion generation failed", "session", sid, "error", err)
+					return
+				}
+				if prediction != "" {
+					c.StartSpeculativeRun(context.Background(), sid, prediction)
+				}
+			}()
+		}
+	}
 
 	return result, originalErr
 }
@@ -488,8 +724,30 @@ func (c *coordinator) setLastRuntime(runtime *agentruntime.RuntimeSession) {
 	c.traceMu.Unlock()
 }
 
-func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.ProviderOptions {
+// geminiThinkingLevel maps an OpenAI-style effort string onto a Gemini
+// thinking_level. Gemini has no "xhigh"; its strongest is "HIGH".
+func geminiThinkingLevel(effort string) string {
+	if strings.EqualFold(strings.TrimSpace(effort), "xhigh") {
+		return string(google.ThinkingLevelHigh)
+	}
+	return effort
+}
+
+// getProviderOptions builds the per-call provider options. When boost is true
+// (the user's prompt contained the "思考" keyword), the reasoning effort is
+// raised to the strongest the provider/SDK supports for this single request —
+// "xhigh" for OpenAI-shaped effort, max thinking budget for Anthropic, and the
+// top thinking_level for Gemini/Antigravity.
+func getProviderOptions(sessionID string, model Model, providerCfg config.ProviderConfig, boost bool) fantasy.ProviderOptions {
 	options := fantasy.ProviderOptions{}
+
+	// effort is the reasoning effort to apply for this call. Boost overrides the
+	// configured effort with the strongest value; per-provider branches clamp it
+	// where the SDK has a lower ceiling (e.g. Gemini → HIGH).
+	effort := model.ModelCfg.ReasoningEffort
+	if boost && model.CatwalkCfg.CanReason {
+		effort = string(openai.ReasoningEffortXHigh)
+	}
 
 	cfgOpts := []byte("{}")
 	providerCfgOpts := []byte("{}")
@@ -539,9 +797,13 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 	switch providerCfg.Type {
 	case openai.Name, azure.Name:
 		_, hasReasoningEffort := mergedOptions["reasoning_effort"]
-		if !hasReasoningEffort && model.ModelCfg.ReasoningEffort != "" && model.CatwalkCfg.CanReason {
-			mergedOptions["reasoning_effort"] = model.ModelCfg.ReasoningEffort
+		if !hasReasoningEffort && effort != "" && model.CatwalkCfg.CanReason {
+			mergedOptions["reasoning_effort"] = effort
 		}
+		// Pin this request to a per-session backend partition so OpenAI's
+		// automatic prefix cache hits across turns. Inert when sessionID is
+		// empty (e.g. unit tests) or the kill switch is set.
+		agentprompt.MaybeInjectPromptCacheKey(mergedOptions, sessionID, string(providerCfg.Type))
 		if openai.IsResponsesModel(model.CatwalkCfg.ID) {
 			if openai.IsResponsesReasoningModel(model.CatwalkCfg.ID) {
 				mergedOptions["reasoning_summary"] = "auto"
@@ -565,7 +827,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		if _, hasThink := mergedOptions["thinking"]; !hasThink && model.ModelCfg.Think && model.CatwalkCfg.CanReason {
 			budget := model.ModelCfg.ThinkingBudget
 			if budget <= 0 {
-				budget = anthropicBudgetForEffort(model.ModelCfg.ReasoningEffort)
+				budget = anthropicBudgetForEffort(effort)
 			}
 			mergedOptions["thinking"] = map[string]any{"budget_tokens": budget}
 		}
@@ -580,10 +842,10 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 
 	case openrouter.Name:
 		_, hasReasoning := mergedOptions["reasoning"]
-		if !hasReasoning && model.ModelCfg.ReasoningEffort != "" {
+		if !hasReasoning && effort != "" {
 			mergedOptions["reasoning"] = map[string]any{
 				"enabled": true,
-				"effort":  model.ModelCfg.ReasoningEffort,
+				"effort":  effort,
 			}
 		}
 		parsed, err := openrouter.ParseOptions(mergedOptions)
@@ -592,10 +854,10 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		}
 	case vercel.Name:
 		_, hasReasoning := mergedOptions["reasoning"]
-		if !hasReasoning && model.ModelCfg.ReasoningEffort != "" {
+		if !hasReasoning && effort != "" {
 			mergedOptions["reasoning"] = map[string]any{
 				"enabled": true,
-				"effort":  model.ModelCfg.ReasoningEffort,
+				"effort":  effort,
 			}
 		}
 		parsed, err := vercel.ParseOptions(mergedOptions)
@@ -612,7 +874,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 				}
 			} else {
 				mergedOptions["thinking_config"] = map[string]any{
-					"thinking_level":   model.ModelCfg.ReasoningEffort,
+					"thinking_level":   geminiThinkingLevel(effort),
 					"include_thoughts": true,
 				}
 			}
@@ -621,16 +883,25 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		if err == nil {
 			options[google.Name] = parsed
 		}
+	case antigravity.Name:
+		// Antigravity (Gemini via CodeAssist) keeps its default thinking config
+		// unless boosted. On boost, pin the strongest thinking level for this
+		// request. Project/SessionID are filled by the language model.
+		if boost {
+			options[antigravity.Name] = &antigravity.ProviderOptions{
+				Thinking: &antigravity.ThinkingConfig{ThinkingLevel: string(google.ThinkingLevelHigh)},
+			}
+		}
 	case openaicompat.Name, hyper.Name:
 		extraBody := make(map[string]any)
 
 		_, hasReasoningEffort := mergedOptions["reasoning_effort"]
-		if !hasReasoningEffort && model.ModelCfg.ReasoningEffort != "" && model.CatwalkCfg.CanReason {
+		if !hasReasoningEffort && effort != "" && model.CatwalkCfg.CanReason {
 			switch providerCfg.ID {
 			case string(catwalk.InferenceProviderIoNet):
-				extraBody["reasoning"] = map[string]string{"effort": model.ModelCfg.ReasoningEffort}
+				extraBody["reasoning"] = map[string]string{"effort": effort}
 			default:
-				mergedOptions["reasoning_effort"] = model.ModelCfg.ReasoningEffort
+				mergedOptions["reasoning_effort"] = effort
 			}
 		}
 
@@ -650,7 +921,7 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 				}
 			}
 		case string(catwalk.InferenceProviderZAI), string(catwalk.InferenceProviderDeepSeek):
-			if model.ModelCfg.Think || model.ModelCfg.ReasoningEffort != "" {
+			if model.ModelCfg.Think || effort != "" {
 				extraBody["thinking"] = map[string]any{
 					"type": "enabled",
 				}
@@ -676,8 +947,8 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 	return options
 }
 
-func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {
-	modelOptions := getProviderOptions(model, cfg)
+func mergeCallOptions(sessionID string, model Model, cfg config.ProviderConfig, boost bool) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {
+	modelOptions := getProviderOptions(sessionID, model, cfg, boost)
 	temp := cmp.Or(model.ModelCfg.Temperature, model.CatwalkCfg.Options.Temperature)
 	topP := cmp.Or(model.ModelCfg.TopP, model.CatwalkCfg.Options.TopP)
 	topK := cmp.Or(model.ModelCfg.TopK, model.CatwalkCfg.Options.TopK)
@@ -686,10 +957,24 @@ func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderO
 	return modelOptions, temp, topP, topK, freqPenalty, presPenalty
 }
 
-func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
+func (c *coordinator) buildAgent(ctx context.Context, prompt *agentprompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
 	primary, title, err := c.buildAgentModels(ctx, agent, isSubAgent)
 	if err != nil {
 		return nil, err
+	}
+
+	// Build the event-routed hook runner up front so the sessionAgent
+	// can fire Stop hooks at turn end (in addition to the PreToolUse /
+	// PostToolUse wraps applied to tool calls below). Sub-agents never
+	// fire hooks — keep parity with wrapToolsWithHooks's isSubAgent guard.
+	var hookRunner *hooks.Runner
+	if allHooks := c.cfg.Config().Hooks; len(allHooks) > 0 && !isSubAgent {
+		for _, list := range allHooks {
+			if len(list) > 0 {
+				hookRunner = hooks.NewEventRunner(allHooks, c.cfg.WorkingDir(), c.cfg.WorkingDir())
+				break
+			}
+		}
 	}
 
 	primaryProviderCfg, _ := c.cfg.Config().Providers.Get(primary.ModelCfg.Provider)
@@ -704,6 +989,9 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		Messages:             c.messages,
 		Tools:                nil,
 		Notify:               c.notify,
+		DataDir:              c.cfg.Config().Options.DataDirectory,
+		WorkingDir:           c.cfg.WorkingDir(),
+		HookRunner:           hookRunner,
 	})
 
 	systemPrompt, err := prompt.Build(ctx, primary.Model.Provider(), primary.Model.Model(), c.cfg)
@@ -712,16 +1000,19 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	}
 	result.SetSystemPrompt(systemPrompt)
 
-	tools, err := c.buildTools(ctx, agent, isSubAgent)
+	builtTools, deferredRegistry, err := c.buildTools(ctx, agent, isSubAgent)
 	if err != nil {
 		return nil, err
 	}
-	result.SetTools(tools)
+	result.SetTools(builtTools)
+	if deferredRegistry != nil {
+		result.SetDeferredRegistry(deferredRegistry)
+	}
 
 	return result, nil
 }
 
-func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubAgent bool) ([]fantasy.AgentTool, error) {
+func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubAgent bool) ([]fantasy.AgentTool, *tools.DeferredRegistry, error) {
 	var allTools []fantasy.AgentTool
 
 	// Recursion guard: sub-agents never get the delegation tools. Even if a
@@ -732,7 +1023,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		if slices.Contains(agent.AllowedTools, AgentToolName) {
 			agentTool, err := c.agentTool(ctx)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			allTools = append(allTools, agentTool)
 		}
@@ -740,7 +1031,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		if slices.Contains(agent.AllowedTools, tools.AgenticFetchToolName) {
 			agenticFetchTool, err := c.agenticFetchTool(ctx, nil)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			allTools = append(allTools, agenticFetchTool)
 		}
@@ -756,21 +1047,29 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	logFile := filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")
 
-	// Brain hook runner if PreToolUse hooks are configured.
+	// Hook runner for tool-call wrappers. Distinct from the one built in
+	// buildAgent (which feeds turn-level Stop hooks) because buildTools
+	// runs on a different control path; both share the same config so
+	// either-or is safe — the slot lookup is per-event anyway.
 	var hookRunner *hooks.Runner
-	if preToolHooks := c.cfg.Config().Hooks[hooks.EventPreToolUse]; len(preToolHooks) > 0 {
-		hookRunner = hooks.NewRunner(preToolHooks, c.cfg.WorkingDir(), c.cfg.WorkingDir())
+	if allHooks := c.cfg.Config().Hooks; len(allHooks) > 0 && !isSubAgent {
+		for _, list := range allHooks {
+			if len(list) > 0 {
+				hookRunner = hooks.NewEventRunner(allHooks, c.cfg.WorkingDir(), c.cfg.WorkingDir())
+				break
+			}
+		}
 	}
 
 	allTools = append(
 		allTools,
-		tools.NewBashTool(c.permissions, c.bgManager, c.cfg.WorkingDir(), c.cfg.Config().Options.Attribution, modelID),
+		tools.NewBashTool(c.permissions, c.bgManager, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID),
 		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
 		tools.NewJobOutputTool(c.bgManager),
 		tools.NewJobKillTool(c.bgManager),
 		tools.NewMonitorTool(c.bgManager),
-		tools.NewScheduleWakeupTool(),
+		tools.NewScheduleWakeupTool(c.cfg.Config().Options.DataDirectory),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -817,10 +1116,19 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		}
 	}
 
-	for _, tool := range tools.GetMCPTools(c.permissions, c.cfg, c.cfg.WorkingDir()) {
+	// MCP tools are *deferred*: the model sees a stub list (name +
+	// description only) and must call tool_search to load JSON schemas
+	// before invoking them. This keeps the initial tool-list footprint
+	// bounded even when many MCP servers expose hundreds of tools.
+	var deferredRegistry *tools.DeferredRegistry
+	mcpTools := tools.GetMCPTools(c.permissions, c.cfg, c.cfg.WorkingDir())
+	if len(mcpTools) > 0 || len(c.cfg.Config().MCP) > 0 {
+		deferredRegistry = tools.NewDeferredRegistry()
+	}
+	for _, tool := range mcpTools {
 		if agent.AllowedMCP == nil {
 			// No MCP restrictions
-			filteredTools = append(filteredTools, tool)
+			deferredRegistry.Register(tool, tool.MCP())
 			continue
 		}
 		if len(agent.AllowedMCP) == 0 {
@@ -829,17 +1137,25 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			break
 		}
 
-		for mcp, tools := range agent.AllowedMCP {
-			if mcp != tool.MCP() {
+		for mcpName, mcpTools := range agent.AllowedMCP {
+			if mcpName != tool.MCP() {
 				continue
 			}
-			if len(tools) == 0 || slices.Contains(tools, tool.MCPToolName()) {
-				filteredTools = append(filteredTools, tool)
+			if len(mcpTools) == 0 || slices.Contains(mcpTools, tool.MCPToolName()) {
+				deferredRegistry.Register(tool, tool.MCP())
 				break
 			}
 			slog.Debug("MCP not allowed", "tool", tool.Name(), "agent", agent.Name)
 		}
 	}
+
+	// If anything is deferred (now or once MCP servers finish
+	// connecting), surface tool_search so the model can promote
+	// schemas on demand.
+	if deferredRegistry != nil {
+		filteredTools = append(filteredTools, tools.NewToolSearchTool(deferredRegistry))
+	}
+
 	slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
 		return strings.Compare(a.Info().Name, b.Info().Name)
 	})
@@ -855,9 +1171,14 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		for _, tool := range filteredTools {
 			c.runtime.RegisterTool(tool.Info().Name)
 		}
+		if deferredRegistry != nil {
+			for _, name := range deferredRegistry.Names() {
+				c.runtime.RegisterTool(name)
+			}
+		}
 	}
 
-	return filteredTools, nil
+	return filteredTools, deferredRegistry, nil
 }
 
 func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, isSubAgent bool) (Model, Model, error) {
@@ -885,6 +1206,8 @@ func selectedModelTypeForAgent(agentID string) config.SelectedModelType {
 	switch agentID {
 	case config.AgentBrain:
 		return config.SelectedModelTypeBrain
+	case config.AgentPlan:
+		return config.SelectedModelTypePlan
 	case config.AgentWorker:
 		return config.SelectedModelTypeWorker
 	case config.AgentExplore:
@@ -900,6 +1223,8 @@ func (c *coordinator) buildModelForType(ctx context.Context, modelType config.Se
 		switch modelType {
 		case config.SelectedModelTypeBrain:
 			return Model{}, errBrainModelNotSelected
+		case config.SelectedModelTypePlan:
+			return Model{}, errPlanModelNotSelected
 		case config.SelectedModelTypeWorker:
 			return Model{}, errWorkerModelNotSelected
 		case config.SelectedModelTypeExplore:
@@ -914,6 +1239,8 @@ func (c *coordinator) buildModelForType(ctx context.Context, modelType config.Se
 		switch modelType {
 		case config.SelectedModelTypeBrain:
 			return Model{}, errBrainModelProviderNotConfigured
+		case config.SelectedModelTypePlan:
+			return Model{}, errPlanModelProviderNotConfigured
 		case config.SelectedModelTypeWorker:
 			return Model{}, errWorkerModelProviderNotConfigured
 		case config.SelectedModelTypeExplore:
@@ -1277,10 +1604,68 @@ func isExactoSupported(modelID string) bool {
 
 func (c *coordinator) Cancel(sessionID string) {
 	c.currentAgent.Cancel(sessionID)
+	c.speculativeMu.Lock()
+	if cancel, ok := c.speculativeCancels[sessionID]; ok {
+		cancel()
+		delete(c.speculativeCancels, sessionID)
+	}
+	c.speculativeMu.Unlock()
 }
 
 func (c *coordinator) CancelAll() {
 	c.currentAgent.CancelAll()
+	c.speculativeMu.Lock()
+	for _, cancel := range c.speculativeCancels {
+		cancel()
+	}
+	c.speculativeCancels = make(map[string]context.CancelFunc)
+	c.speculativeMu.Unlock()
+}
+
+func (c *coordinator) StartSpeculativeRun(ctx context.Context, sessionID string, prediction string) {
+	c.speculativeMu.Lock()
+	if cancel, ok := c.speculativeCancels[sessionID]; ok {
+		cancel()
+	}
+	specCtx, specCancel := context.WithCancel(ctx)
+	c.speculativeCancels[sessionID] = specCancel
+	c.speculativeMu.Unlock()
+
+	go func() {
+		defer func() {
+			c.speculativeMu.Lock()
+			delete(c.speculativeCancels, sessionID)
+			c.speculativeMu.Unlock()
+		}()
+
+		specID := sessionID + "-speculate"
+		if err := c.sessions.PrepareSpeculativeSession(specCtx, sessionID, specID); err != nil {
+			slog.Debug("Failed to prepare speculative session", "session", sessionID, "error", err)
+			return
+		}
+
+		slog.Debug("Starting background speculative run", "session", sessionID, "prediction", prediction)
+		if _, err := c.Run(specCtx, specID, prediction, false); err != nil {
+			slog.Debug("Speculative run failed or cancelled", "session", sessionID, "error", err)
+		} else {
+			slog.Debug("Speculative run completed successfully", "session", sessionID)
+		}
+	}()
+}
+
+func (c *coordinator) PromoteSpeculativeSession(ctx context.Context, sessionID string) error {
+	c.speculativeMu.Lock()
+	if cancel, ok := c.speculativeCancels[sessionID]; ok {
+		cancel()
+		delete(c.speculativeCancels, sessionID)
+	}
+	c.speculativeMu.Unlock()
+
+	if err := c.messages.FlushAll(ctx); err != nil {
+		slog.Error("Failed to flush messages during promotion", "session", sessionID, "error", err)
+	}
+
+	return c.sessions.PromoteSpeculativeSession(ctx, sessionID)
 }
 
 func (c *coordinator) ClearQueue(sessionID string) {
@@ -1304,6 +1689,10 @@ func (c *coordinator) agentForProfile(profile scheduler.WorkerProfile) SessionAg
 		return nil
 	}
 	switch profile {
+	case scheduler.ProfilePlanAgent:
+		if agent, ok := c.agents[config.AgentPlan]; ok {
+			return agent
+		}
 	case scheduler.ProfileWorkerAgent:
 		if agent, ok := c.agents[config.AgentWorker]; ok {
 			return agent
@@ -1317,11 +1706,11 @@ func (c *coordinator) agentForProfile(profile scheduler.WorkerProfile) SessionAg
 			return agent
 		}
 	}
-	return c.currentAgent
+	return nil
 }
 
 func (c *coordinator) UpdateModels(ctx context.Context) error {
-	for _, agentName := range []string{config.AgentBrain, config.AgentWorker, config.AgentExplore} {
+	for _, agentName := range []string{config.AgentBrain, config.AgentPlan, config.AgentWorker, config.AgentExplore} {
 		agent, ok := c.agents[agentName]
 		if !ok || agent == nil {
 			continue
@@ -1335,12 +1724,13 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 			return err
 		}
 		agent.SetModels(primary, title)
-		tools, err := c.buildTools(ctx, agentCfg, agentName != config.AgentBrain)
+		builtTools, deferredRegistry, err := c.buildTools(ctx, agentCfg, agentName != config.AgentBrain)
 		if err != nil {
 			return err
 		}
-		agent.SetTools(tools)
-		if agentName == config.AgentBrain {
+		agent.SetTools(builtTools)
+		agent.SetDeferredRegistry(deferredRegistry)
+		if agentName == c.currentAgentName {
 			c.currentAgent = agent
 		}
 	}
@@ -1366,7 +1756,7 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 	}
 
 	summarize := func() error {
-		return c.currentAgent.Summarize(ctx, sessionID, getProviderOptions(c.currentAgent.Model(), providerCfg))
+		return c.currentAgent.Summarize(ctx, sessionID, getProviderOptions(sessionID, c.currentAgent.Model(), providerCfg, false))
 	}
 
 	err := summarize()
@@ -1488,6 +1878,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	if taskNode == nil {
 		return fantasy.ToolResponse{}, errors.New("failed to create child task")
 	}
+	c.preBindTaskTreeModels(taskNode)
 
 	providerCfg, ok := c.cfg.Config().Providers.Get(model.ModelCfg.Provider)
 	if !ok {
@@ -1508,7 +1899,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 			SessionID:        session.ID,
 			Prompt:           taskPrompt,
 			MaxOutputTokens:  callMaxTokens,
-			ProviderOptions:  getProviderOptions(model, providerCfg),
+			ProviderOptions:  getProviderOptions(session.ID, model, providerCfg, false),
 			Temperature:      model.ModelCfg.Temperature,
 			TopP:             model.ModelCfg.TopP,
 			TopK:             model.ModelCfg.TopK,
@@ -1565,8 +1956,10 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 
 	if err := taskScheduler.Dispatch(ctx, taskNode, taskWorker); err != nil {
 		c.publishSubAgentEvent(notify.TypeSubAgentFailed, params, session.ID, err.Error())
+		c.propagateSubAgentTraces(taskRuntime)
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
 	}
+	c.propagateSubAgentTraces(taskRuntime)
 	if result == nil {
 		c.publishSubAgentEvent(notify.TypeSubAgentFailed, params, session.ID, "sub-agent returned no result")
 		return fantasy.ToolResponse{}, errors.New("sub-agent returned no result")
@@ -1580,6 +1973,25 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 
 	c.publishSubAgentEvent(notify.TypeSubAgentFinished, params, session.ID, "")
 	return fantasy.NewTextResponse(result.Response.Content.Text()), nil
+}
+
+// propagateSubAgentTraces copies all trace entries recorded by a sub-agent to
+// the parent session's runtime trace so that the final trace dump contains
+// them.
+func (c *coordinator) propagateSubAgentTraces(subRuntime *agentruntime.RuntimeSession) {
+	if subRuntime == nil {
+		return
+	}
+	c.traceMu.RLock()
+	parentRuntime := c.lastRuntime
+	c.traceMu.RUnlock()
+	if parentRuntime == nil {
+		return
+	}
+	for _, entry := range subRuntime.TraceEntries() {
+		entry.Sequence = 0
+		parentRuntime.AppendTrace(entry)
+	}
 }
 
 // publishSubAgentEvent fires a Started/Finished/Failed notification for the
@@ -1630,16 +2042,19 @@ func (c *coordinator) newTaskRuntime(sessionID string) *agentruntime.RuntimeSess
 	return c.runtime.CloneForRun(sessionID)
 }
 
-func (c *coordinator) ensureRootTask(taskScheduler *scheduler.AgentScheduler, sessionID, goal string, maxTokens int64) *scheduler.TaskNode {
+func (c *coordinator) ensureRootTask(taskScheduler *scheduler.AgentScheduler, sessionID, goal string, maxTokens int64, profile scheduler.WorkerProfile) *scheduler.TaskNode {
 	if c == nil || taskScheduler == nil {
 		return nil
 	}
-	node := taskScheduler.EnsureRoot(sessionID, goal, nil, scheduler.ProfileBrainAgent)
+	profile = normalizeSubAgentProfile(profile)
+	if profile == scheduler.ProfileWorkerAgent {
+		profile = scheduler.ProfileBrainAgent
+	}
+	node := taskScheduler.EnsureRoot(sessionID, goal, nil, profile)
 	if node == nil {
 		return nil
 	}
-	node.Kind = scheduler.TaskEdit
-	node.Mode = scheduler.TaskWrite
+	node.Kind, node.Mode = taskKindAndModeForProfile(profile)
 	node.MaxRetries = 0
 	node.Intent.BudgetTokens = int(maxTokens)
 	return node
@@ -1665,14 +2080,18 @@ func (c *coordinator) ensureChildTask(taskScheduler *scheduler.AgentScheduler, p
 }
 
 func normalizeSubAgentProfile(profile scheduler.WorkerProfile) scheduler.WorkerProfile {
-	if profile == scheduler.ProfileExploreAgent {
+	switch profile {
+	case scheduler.ProfileExploreAgent, scheduler.ProfilePlanAgent, scheduler.ProfileWorkerAgent:
 		return profile
+	default:
+		return scheduler.ProfileWorkerAgent
 	}
-	return scheduler.ProfileWorkerAgent
 }
 
 func taskKindAndModeForProfile(profile scheduler.WorkerProfile) (scheduler.TaskKind, scheduler.TaskMode) {
 	switch profile {
+	case scheduler.ProfilePlanAgent:
+		return scheduler.TaskPlan, scheduler.TaskReadOnly
 	case scheduler.ProfileExploreAgent:
 		return scheduler.TaskExplore, scheduler.TaskReadOnly
 	default:
@@ -1724,6 +2143,8 @@ func (c *coordinator) recordTaskOutcome(runtime *agentruntime.RuntimeSession, no
 	}
 
 	switch node.Kind {
+	case scheduler.TaskPlan:
+		runtime.SetFact("task.plan", output)
 	case scheduler.TaskResearch, scheduler.TaskExplore:
 		if node.Parent != nil && len(node.Parent.Children) > 1 && node.Parent.Children[0] == node {
 			runtime.SetFact("task.plan", output)
@@ -2013,4 +2434,93 @@ func logDiscoveryStats(
 		"prompt_tok_est", skills.ApproxTokenCount(xml),
 		"active_names", activeNames,
 	)
+}
+
+func (c *coordinator) triggerMemoryExtraction(ctx context.Context, sessionID string) {
+	exploreAgent := c.agentForProfile(scheduler.ProfileExploreAgent)
+	if exploreAgent == nil {
+		slog.Debug("Skipping memory extraction — explore agent not configured")
+		return
+	}
+
+	msgs, err := c.messages.List(ctx, sessionID)
+	if err != nil {
+		slog.Error("Failed to list messages for memory extraction", "session", sessionID, "error", err)
+		return
+	}
+
+	memoryDir := filepath.Join(c.cfg.Config().Options.DataDirectory, "projects", memdir.WorkspaceSlug(c.cfg.WorkingDir()), "memory")
+
+	if hasMemoryWrites(msgs, memoryDir) {
+		slog.Debug("Skipping memory extraction — turn already wrote memories", "session", sessionID)
+		return
+	}
+
+	specID := sessionID + "-mem-extract"
+	if err := c.sessions.PrepareSpeculativeSession(ctx, sessionID, specID); err != nil {
+		slog.Debug("Failed to prepare memory extraction session", "session", sessionID, "error", err)
+		return
+	}
+
+	extractionPrompt := `You are a background memory extraction agent. Your job is to extract durable learning and project-specific setup/preferences from the conversation and update the workspace memories under the memory/ folder.
+Identify:
+1. Build, test, and lint commands that were run or defined.
+2. Custom settings or developer preferences.
+3. Code patterns, conventions, or design decisions discussed or implemented.
+4. Open risks, key files to watch, or next steps.
+
+Use the ` + "`glob`" + `, ` + "`grep`" + `, ` + "`view`" + `, ` + "`write`" + `, and ` + "`edit`" + ` tools to inspect the memory directory and MEMORY.md and write or update the memories.
+Only write files under the memory directory. Do not make any edits or writes outside of the memory directory. Do not use bash tools to run mutating commands.
+If there are no new learnings, setup, or preferences to record, do not write any files and simply reply.`
+
+	slog.Debug("Starting background memory extraction", "session", sessionID)
+
+	runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	_, err = exploreAgent.Run(runCtx, SessionAgentCall{
+		SessionID: specID,
+		Prompt:    extractionPrompt,
+	})
+	if err != nil {
+		slog.Debug("Background memory extraction finished with error", "session", sessionID, "error", err)
+	} else {
+		slog.Debug("Background memory extraction finished successfully", "session", sessionID)
+	}
+
+	_ = c.sessions.Delete(runCtx, specID)
+}
+
+func hasMemoryWrites(msgs []message.Message, memoryDir string) bool {
+	cleanMemDir := filepath.Clean(memoryDir)
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Role == message.User {
+			break
+		}
+		if m.Role != message.Assistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls() {
+			if tc.Name == "write" || tc.Name == "edit" || tc.Name == "multiedit" {
+				var input struct {
+					FilePath string `json:"file_path"`
+					Path     string `json:"path"`
+				}
+				if err := json.Unmarshal([]byte(tc.Input), &input); err == nil {
+					fp := input.FilePath
+					if fp == "" {
+						fp = input.Path
+					}
+					if fp != "" {
+						cleanPath := filepath.Clean(fp)
+						if strings.HasPrefix(cleanPath, cleanMemDir) {
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
 }

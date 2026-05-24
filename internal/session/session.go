@@ -23,6 +23,17 @@ const (
 	TodoStatusCompleted  TodoStatus = "completed"
 )
 
+type Mode string
+
+const (
+	ModeExecute Mode = "execute"
+	ModePlan    Mode = "plan"
+)
+
+func (mode Mode) IsPlan() bool {
+	return mode == ModePlan
+}
+
 // HashID returns the XXH3 hash of a session ID (UUID) as a hex string.
 func HashID(id string) string {
 	h := xxh3.New()
@@ -50,6 +61,7 @@ type Session struct {
 	ID               string
 	ParentSessionID  string
 	Title            string
+	Mode             Mode
 	MessageCount     int64
 	PromptTokens     int64
 	CompletionTokens int64
@@ -62,7 +74,7 @@ type Session struct {
 
 type Service interface {
 	pubsub.Subscriber[Session]
-	Create(ctx context.Context, title string) (Session, error)
+	Create(ctx context.Context, title string, mode Mode) (Session, error)
 	CreateTitleSession(ctx context.Context, parentSessionID string) (Session, error)
 	CreateTaskSession(ctx context.Context, toolCallID, parentSessionID, title string) (Session, error)
 	Get(ctx context.Context, id string) (Session, error)
@@ -77,6 +89,9 @@ type Service interface {
 	CreateAgentToolSessionID(messageID, toolCallID string) string
 	ParseAgentToolSessionID(sessionID string) (messageID string, toolCallID string, ok bool)
 	IsAgentToolSession(sessionID string) bool
+
+	PrepareSpeculativeSession(ctx context.Context, sessionID, specID string) error
+	PromoteSpeculativeSession(ctx context.Context, sessionID string) error
 }
 
 type service struct {
@@ -85,10 +100,11 @@ type service struct {
 	q  *db.Queries
 }
 
-func (s *service) Create(ctx context.Context, title string) (Session, error) {
+func (s *service) Create(ctx context.Context, title string, mode Mode) (Session, error) {
 	dbSession, err := s.q.CreateSession(ctx, db.CreateSessionParams{
 		ID:    uuid.New().String(),
 		Title: title,
+		Mode:  string(mode),
 	})
 	if err != nil {
 		return Session{}, err
@@ -104,6 +120,7 @@ func (s *service) CreateTaskSession(ctx context.Context, toolCallID, parentSessi
 		ID:              toolCallID,
 		ParentSessionID: sql.NullString{String: parentSessionID, Valid: true},
 		Title:           title,
+		Mode:            string(ModeExecute),
 	})
 	if err != nil {
 		return Session{}, err
@@ -118,6 +135,7 @@ func (s *service) CreateTitleSession(ctx context.Context, parentSessionID string
 		ID:              "title-" + parentSessionID,
 		ParentSessionID: sql.NullString{String: parentSessionID, Valid: true},
 		Title:           "Generate a title",
+		Mode:            string(ModeExecute),
 	})
 	if err != nil {
 		return Session{}, err
@@ -184,6 +202,7 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	dbSession, err := s.q.UpdateSession(ctx, db.UpdateSessionParams{
 		ID:               session.ID,
 		Title:            session.Title,
+		Mode:             string(session.Mode),
 		PromptTokens:     session.PromptTokens,
 		CompletionTokens: session.CompletionTokens,
 		SummaryMessageID: sql.NullString{
@@ -246,6 +265,7 @@ func (s service) fromDBItem(item db.Session) Session {
 		ID:               item.ID,
 		ParentSessionID:  item.ParentSessionID.String,
 		Title:            item.Title,
+		Mode:             Mode(item.Mode),
 		MessageCount:     item.MessageCount,
 		PromptTokens:     item.PromptTokens,
 		CompletionTokens: item.CompletionTokens,
@@ -306,4 +326,87 @@ func (s *service) ParseAgentToolSessionID(sessionID string) (messageID string, t
 func (s *service) IsAgentToolSession(sessionID string) bool {
 	_, _, ok := s.ParseAgentToolSessionID(sessionID)
 	return ok
+}
+
+// PrepareSpeculativeSession creates a copy of the parent session and its messages for speculation/extraction.
+func (s *service) PrepareSpeculativeSession(ctx context.Context, sessionID, specID string) error {
+	// Delete speculative session if it already exists
+	_ = s.q.DeleteSessionMessages(ctx, specID)
+	_ = s.q.DeleteSession(ctx, specID)
+
+	// Fetch parent session
+	parent, err := s.q.GetSessionByID(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get parent session: %w", err)
+	}
+
+	// Create speculative session row
+	_, err = s.q.CreateSession(ctx, db.CreateSessionParams{
+		ID:              specID,
+		ParentSessionID: sql.NullString{String: sessionID, Valid: true},
+		Title:           "Speculative: " + parent.Title,
+		Mode:            parent.Mode,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create speculative session: %w", err)
+	}
+
+	// Copy messages to the speculative session
+	msgs, err := s.q.ListMessagesBySession(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to list messages for copy: %w", err)
+	}
+
+	for _, msg := range msgs {
+		_, err = s.q.CreateMessage(ctx, db.CreateMessageParams{
+			ID:               msg.ID + "-speculate", // Deterministic ID scheme
+			SessionID:        specID,
+			Role:             msg.Role,
+			Parts:            msg.Parts,
+			Model:            msg.Model,
+			Provider:         msg.Provider,
+			IsSummaryMessage: msg.IsSummaryMessage,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to copy message %s: %w", msg.ID, err)
+		}
+	}
+
+	return nil
+}
+
+// PromoteSpeculativeSession transfers newly generated speculative messages to the main session and deletes the branch.
+func (s *service) PromoteSpeculativeSession(ctx context.Context, sessionID string) error {
+	specID := sessionID + "-speculate"
+
+	// Check if speculative session exists
+	_, err := s.q.GetSessionByID(ctx, specID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil // Nothing to promote
+		}
+		return fmt.Errorf("failed to verify speculative session: %w", err)
+	}
+
+	// List messages in the speculative session
+	msgs, err := s.q.ListMessagesBySession(ctx, specID)
+	if err != nil {
+		return fmt.Errorf("failed to list speculative messages: %w", err)
+	}
+
+	// Move new messages (whose IDs do NOT end with "-speculate") to the main session.
+	for _, msg := range msgs {
+		if !strings.HasSuffix(msg.ID, "-speculate") {
+			_, err = s.db.ExecContext(ctx, "UPDATE messages SET session_id = ? WHERE id = ?", sessionID, msg.ID)
+			if err != nil {
+				return fmt.Errorf("failed to promote message %s: %w", msg.ID, err)
+			}
+		}
+	}
+
+	// Clean up speculative session
+	_ = s.q.DeleteSessionMessages(ctx, specID)
+	_ = s.q.DeleteSession(ctx, specID)
+
+	return nil
 }

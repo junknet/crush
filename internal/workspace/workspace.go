@@ -54,13 +54,36 @@ type AgentModel struct {
 	ModelCfg   config.SelectedModel
 }
 
+// AgentSuggestionEvent is delivered when a fresh ghost-text suggestion is
+// ready (Text empty = clear current ghost).
+type AgentSuggestionEvent struct {
+	SessionID string
+	Text      string
+}
+
+// AgentSuggestionService is the subset of the suggestion service exposed
+// to the TUI. Kept narrow so client-mode (remote workspace) implementations
+// can satisfy it with a stub or future RPC bridge.
+type AgentSuggestionService interface {
+	// Subscribe yields suggestion events for the lifetime of ctx.
+	Subscribe(ctx context.Context) <-chan AgentSuggestionEvent
+	// Latest returns the most recent suggestion for a session, if any.
+	Latest(sessionID string) (string, bool)
+	// MarkAccepted records that the user accepted the suggestion via the
+	// given method ("tab", "right", "enter"); also clears it.
+	MarkAccepted(sessionID, method string, length int)
+	// MarkRejected records that the user dismissed the suggestion; also
+	// clears it.
+	MarkRejected(sessionID string, length int)
+}
+
 // Workspace is the main abstraction consumed by the TUI and CLI. It
 // groups every operation a frontend needs to perform against a running
 // workspace, regardless of whether the workspace is in-process or
 // remote.
 type Workspace interface {
 	// Sessions
-	CreateSession(ctx context.Context, title string) (session.Session, error)
+	CreateSession(ctx context.Context, title string, mode session.Mode) (session.Session, error)
 	GetSession(ctx context.Context, sessionID string) (session.Session, error)
 	ListSessions(ctx context.Context) ([]session.Session, error)
 	SaveSession(ctx context.Context, sess session.Session) (session.Session, error)
@@ -74,7 +97,7 @@ type Workspace interface {
 	ListAllUserMessages(ctx context.Context) ([]message.Message, error)
 
 	// Agent
-	AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error
+	AgentRun(ctx context.Context, sessionID, prompt string, planMode bool, attachments ...message.Attachment) error
 	AgentCancel(sessionID string)
 	AgentIsBusy() bool
 	AgentIsSessionBusy(sessionID string) bool
@@ -87,6 +110,10 @@ type Workspace interface {
 	UpdateAgentModel(ctx context.Context) error
 	InitBrainAgent(ctx context.Context) error
 	GetDefaultExploreModel(providerID string) config.SelectedModel
+
+	// AgentSuggestion returns the ghost-text suggestion service, or nil
+	// when disabled / not wired (e.g. client mode without local agent).
+	AgentSuggestion() AgentSuggestionService
 
 	// Permissions
 	PermissionGrant(perm permission.PermissionRequest)
@@ -137,7 +164,10 @@ type Workspace interface {
 	DisableDockerMCP() error
 
 	// Events
-	Subscribe(program *tea.Program)
+	// Subscribe streams server events into the TUI program. driverSessionID,
+	// when non-empty, declares this client as the live "driver" of that session
+	// so the server drops it from the session-primary listing when the TUI exits.
+	Subscribe(program *tea.Program, driverSessionID string)
 	Shutdown()
 }
 
