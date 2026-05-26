@@ -1,6 +1,6 @@
 Jump to the definition of a Nim symbol via the language server (`textDocument/definition`).
 
-Use when you need to know *where* a symbol is declared — proc/template/macro body, type definition, variable declaration, imported module path. This is faster and more precise than grep because the LSP resolves overloads, generics, and re-exports.
+Use when you need to know *where* a symbol is declared — proc/template/macro body, type definition, variable declaration, imported module path. This is faster and more precise than text search because the LSP resolves overloads, generics, and re-exports.
 
 Input:
 - `file_path`: absolute or relative path to a Nim source file already in the workspace.

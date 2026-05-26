@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,13 +77,13 @@ func TestMemExtractToolWrapper(t *testing.T) {
 	memoryDir := "/workspace/project/memory"
 	wrapper := &memExtractToolWrapper{inner: dummy, memoryDir: memoryDir}
 
-	// 1. Run safe tool (e.g. search)
+	// 1. Run safe filename search tool.
 	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
-		Name:  "search",
+		Name:  "fd",
 		Input: "{}",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "search run", resp.Content)
+	assert.Equal(t, "fd run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
 	// 2. Run write tool targeting memory dir
@@ -102,4 +103,74 @@ func TestMemExtractToolWrapper(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, resp.Content, "restricted to the memory directory")
 	assert.True(t, resp.StopTurn)
+}
+
+func TestReadOnlyToolWrapper(t *testing.T) {
+	wrapper := &readOnlyToolWrapper{inner: &dummyTool{}}
+
+	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
+		Name:  tools.RgToolName,
+		Input: "{}",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "rg run", resp.Content)
+	assert.False(t, resp.StopTurn)
+
+	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
+		Name:  tools.WriteToolName,
+		Input: `{"file_path":"MEMORY.md","content":"x"}`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, resp.Content, "read-only")
+	assert.True(t, resp.StopTurn)
+
+	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
+		Name:  AgentToolName,
+		Input: `{"role":"explore","prompt":"inspect"}`,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "agent run", resp.Content)
+	assert.False(t, resp.StopTurn)
+
+	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
+		Name:  AgentToolName,
+		Input: `{"role":"worker","prompt":"edit"}`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, resp.Content, "blocked because this turn is read-only")
+	assert.True(t, resp.StopTurn)
+}
+
+func TestReadOnlyDagRunPolicy(t *testing.T) {
+	wrapper := &readOnlyToolWrapper{inner: &dummyTool{}}
+
+	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
+		Name: tools.DagRunToolName,
+		Input: `{"nodes":[
+			{"id":"files","tool":"fd","pattern":"*.go"},
+			{"id":"matches","tool":"rg","pattern":"ContextWindow","path":"internal"}
+		]}`,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "dag_run run", resp.Content)
+	assert.False(t, resp.StopTurn)
+
+	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
+		Name:  tools.DagRunToolName,
+		Input: `{"nodes":[{"id":"shell","tool":"shell","command":"date"}]}`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, resp.Content, "only allow fd, rg, and view")
+	assert.True(t, resp.StopTurn)
+}
+
+func TestPromptReadOnlyAndExplorePreflightDetection(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, promptRequestsReadOnly("只做评估，不修改文件。定位 LLVM IR bug"))
+	require.True(t, promptRequestsReadOnly("read-only: diagnose this repo"))
+	require.False(t, promptRequestsReadOnly("修理好去"))
+
+	require.True(t, promptNeedsExplorePreflight("/home/junknet/linege/nim-src 去这里分析bug 定位llvm IR问题设计 这个任务做评估"))
+	require.False(t, promptNeedsExplorePreflight("改 README 标题"))
 }

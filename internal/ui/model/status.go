@@ -98,7 +98,7 @@ func (s *Status) Draw(scr uv.Screen, area uv.Rectangle) {
 	if area.Dx() <= 0 || area.Dy() <= 0 {
 		return
 	}
-	if !s.hideHelp && s.line != "" {
+	if !s.hideHelp && s.line != "" && s.msg.IsEmpty() {
 		statusLine := ansi.Truncate(s.line, area.Dx(), "…")
 		if w := lipgloss.Width(statusLine); w < area.Dx() {
 			statusLine += strings.Repeat(" ", area.Dx()-w)
@@ -131,10 +131,22 @@ func (s *Status) Draw(scr uv.Screen, area uv.Rectangle) {
 		msgStyle = s.com.Styles.Status.SuccessMessage
 	}
 
+	runtimeLine := ""
+	runtimeWidth := 0
+	if !s.hideHelp && s.line != "" && area.Dx() >= 40 {
+		maxRuntimeWidth := max(12, area.Dx()*2/3)
+		runtimeLine = ansi.Truncate(s.line, maxRuntimeWidth, "…")
+		runtimeWidth = lipgloss.Width(runtimeLine)
+	}
+
 	ind := indStyle.String()
 	indWidth := lipgloss.Width(ind)
 	msgPad := msgStyle.GetPaddingLeft() + msgStyle.GetPaddingRight()
-	avail := max(0, area.Dx()-indWidth-msgPad)
+	separatorWidth := 0
+	if runtimeWidth > 0 {
+		separatorWidth = 2
+	}
+	avail := max(0, area.Dx()-runtimeWidth-separatorWidth-indWidth-msgPad)
 	msg := strings.Join(strings.Split(s.msg.Msg, "\n"), " ")
 	msg = ansi.Truncate(msg, avail, "…")
 	if w := lipgloss.Width(msg); w < avail {
@@ -144,6 +156,11 @@ func (s *Status) Draw(scr uv.Screen, area uv.Rectangle) {
 
 	// Draw the info message over the help view
 	uv.NewStyledString(ind+info).Draw(scr, area)
+	if runtimeWidth > 0 {
+		runtimeArea := area
+		runtimeArea.Min.X = max(area.Min.X, area.Max.X-runtimeWidth-2)
+		uv.NewStyledString(s.com.Styles.Status.Help.Render(runtimeLine)).Draw(scr, runtimeArea)
+	}
 }
 
 // clearInfoMsgCmd returns a command that clears the info message after the

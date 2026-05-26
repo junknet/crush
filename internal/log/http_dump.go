@@ -104,18 +104,20 @@ type dumpTransport struct {
 }
 
 type dumpEntry struct {
-	Time         string              `json:"time"`
-	TraceID      string              `json:"trace_id,omitempty"`
-	SessionID    string              `json:"session_id,omitempty"`
-	Method       string              `json:"method"`
-	URL          string              `json:"url"`
-	ReqHeaders   map[string][]string `json:"req_headers"`
-	ReqBody      string              `json:"req_body"`
-	Status       int                 `json:"status,omitempty"`
-	RespHeaders  map[string][]string `json:"resp_headers,omitempty"`
-	RespBody     string              `json:"resp_body,omitempty"`
-	DurationMs   int64               `json:"duration_ms"`
-	TransportErr string              `json:"transport_err,omitempty"`
+	Time               string              `json:"time"`
+	TraceID            string              `json:"trace_id,omitempty"`
+	SessionID          string              `json:"session_id,omitempty"`
+	Method             string              `json:"method"`
+	URL                string              `json:"url"`
+	ReqHeaders         map[string][]string `json:"req_headers"`
+	ReqBody            string              `json:"req_body"`
+	Status             int                 `json:"status,omitempty"`
+	RespHeaders        map[string][]string `json:"resp_headers,omitempty"`
+	RespBody           string              `json:"resp_body,omitempty"`
+	DurationMs         int64               `json:"duration_ms"`
+	FirstByteLatencyMs int64               `json:"first_byte_latency_ms,omitempty"`
+	StreamDurationMs   int64               `json:"stream_duration_ms,omitempty"`
+	TransportErr       string              `json:"transport_err,omitempty"`
 }
 
 func (d *dumpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -161,10 +163,15 @@ func (d *dumpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if isEventStreamResponse(resp) {
 		if resp.Body != nil {
 			resp.Body = &streamCaptureBody{
-				rc:  resp.Body,
-				cap: maxStreamCaptureBytes,
+				rc:        resp.Body,
+				cap:       maxStreamCaptureBytes,
+				startedAt: start,
+				onFirstByte: func(latency time.Duration) {
+					entry.FirstByteLatencyMs = latency.Milliseconds()
+				},
 				onClose: func(captured []byte, truncated bool) {
 					entry.RespBody = string(captured)
+					entry.StreamDurationMs = time.Since(start).Milliseconds()
 					if truncated {
 						entry.RespBody += "\n[stream truncated at capture cap]"
 					}
@@ -205,16 +212,25 @@ const maxStreamCaptureBytes = 4 << 20 // 4 MiB
 // rather than only on Close is what makes capture survive one-shot runs where
 // the consumer reads to completion but never explicitly closes the body.
 type streamCaptureBody struct {
-	rc        io.ReadCloser
-	buf       bytes.Buffer
-	cap       int
-	truncated bool
-	flushed   bool
-	onClose   func(captured []byte, truncated bool)
+	rc          io.ReadCloser
+	buf         bytes.Buffer
+	cap         int
+	truncated   bool
+	flushed     bool
+	startedAt   time.Time
+	firstByte   bool
+	onFirstByte func(time.Duration)
+	onClose     func(captured []byte, truncated bool)
 }
 
 func (s *streamCaptureBody) Read(p []byte) (int, error) {
 	n, err := s.rc.Read(p)
+	if n > 0 && !s.firstByte {
+		s.firstByte = true
+		if s.onFirstByte != nil && !s.startedAt.IsZero() {
+			s.onFirstByte(time.Since(s.startedAt))
+		}
+	}
 	if n > 0 && s.buf.Len() < s.cap {
 		if rem := s.cap - s.buf.Len(); n <= rem {
 			s.buf.Write(p[:n])

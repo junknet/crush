@@ -7,7 +7,7 @@ need_tui
 
 log "starting crush in tmux"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --trace-file $TRACE" \
+  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
   | tee -a "$LOG"
 
 log "waiting for landing page"

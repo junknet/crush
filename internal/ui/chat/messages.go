@@ -51,6 +51,12 @@ type KeyEventHandler interface {
 	HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd)
 }
 
+// DoubleClickCopyable is implemented by message items whose full source text
+// should be copied when the user double-clicks the block.
+type DoubleClickCopyable interface {
+	DoubleClickCopyText() (text string, notification string, ok bool)
+}
+
 // MessageItem represents a [message.Message] item that can be displayed in the
 // UI and be part of a [list.List] identifiable by a unique ID.
 type MessageItem interface {

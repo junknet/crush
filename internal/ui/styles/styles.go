@@ -37,9 +37,9 @@ const (
 
 	SectionSeparator string = "─"
 
-	TodoCompletedIcon  string = "✓"
+	TodoCompletedIcon  string = "■"
 	TodoPendingIcon    string = "□"
-	TodoInProgressIcon string = "▶"
+	TodoInProgressIcon string = "■"
 	TodoFailedIcon     string = "×"
 
 	ImageIcon string = "■"

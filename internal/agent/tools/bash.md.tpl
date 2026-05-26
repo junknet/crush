@@ -17,15 +17,12 @@ Common shell builtins and core utils available on Windows.
 
 <usage_notes>
 - Command required, working_dir optional (defaults to current directory)
-- IMPORTANT: Use `rg`/`search`/`agent` tools instead of 'find'/'grep' commands. Use `view`/`ls` tools instead of 'cat'/'head'/'tail'/'ls'.
-- **NEVER use the `grep` or `find` commands** under `bash` — they are extremely slow, ignore `.gitignore` / `.crushignore`, and are considered garbage tools. For text searches via `bash`, ALWAYS use `rg` directly (which is binary-safe and respects gitignore).
-- **NEVER use `find`** via bash for finding files/filenames — use the `search` tool, or `rg --files | rg PATTERN`.
+- IMPORTANT: Use `rg`/`fd`/`agent` tools instead of `grep`/`find` commands. Use `view`/`ls` tools instead of `cat`/`head`/`tail`/`ls`.
+- **NEVER use `grep`, `rg`, or `find` under `bash` for repository search**. Use the `rg` tool for content, `fd` for filenames/paths, and `ast_grep` for structural code search.
+- **NEVER use foreground sleep polling**: commands like `sleep 10 && status-check`, `sleep 20; job-output`, or long standalone `sleep` are blocked. Use `run_in_background=true` and `monitor`, or `schedule_wakeup` for a pure time delay.
 - Chain with ';' or '&&', avoid newlines except in quoted strings
 - Each command runs in independent shell (no state persistence between calls)
 - Prefer absolute paths over 'cd' (use 'cd' only if user explicitly requests)
-{{- if .RgAvailable }}
-- Ripgrep (`rg`) is available in $PATH; safe to call directly for ad-hoc searches, file listings (`rg --files`), or piped flows.
-{{- end }}
 </usage_notes>
 
 <background_execution>
@@ -37,8 +34,10 @@ Common shell builtins and core utils available on Windows.
 - Commands that should run in background:
   * Long-running servers (e.g., `npm start`, `python -m http.server`, `node server.js`)
   * Watch/monitoring tasks (e.g., `npm run watch`, `tail -f logfile`)
+  * External/cloud polling loops that wait for remote completion (e.g., `aliyun ecs DescribeInvocationResults` after `RunCommand`)
   * Continuous processes that don't exit on their own
   * Any command expected to run indefinitely
+- For external/cloud jobs, start one background shell that loops until a terminal state and prints a final line such as `DONE`, `FAILED`, `ERROR`, or `Finished`; then call `monitor` on that shell ID with a matching regex. Do not repeatedly call `job_output`.
 - Commands that should NOT run in background:
   * Build commands (e.g., `npm run build`, `go build`)
   * Test suites (e.g., `npm test`, `pytest`)

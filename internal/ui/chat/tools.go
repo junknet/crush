@@ -223,8 +223,8 @@ func NewToolMessageItem(
 		item = NewEditToolMessageItem(sty, toolCall, result, canceled)
 	case tools.MultiEditToolName:
 		item = NewMultiEditToolMessageItem(sty, toolCall, result, canceled)
-	case tools.SearchToolName:
-		item = NewSearchToolMessageItem(sty, toolCall, result, canceled)
+	case tools.FdToolName:
+		item = NewFdToolMessageItem(sty, toolCall, result, canceled)
 	case tools.RgToolName:
 		item = NewRgToolMessageItem(sty, toolCall, result, canceled)
 	case tools.LSToolName:
@@ -1224,8 +1224,8 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 			}
 			return strings.Join(parts, "\n")
 		}
-	case tools.SearchToolName:
-		var params tools.SearchParams
+	case tools.FdToolName:
+		var params tools.FdParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			var parts []string
 			parts = append(parts, fmt.Sprintf("**Pattern:** %s", params.Pattern))
@@ -1324,7 +1324,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatWebFetchResultForCopy()
 	case agent.AgentToolName:
 		return t.formatAgentResultForCopy()
-	case tools.DownloadToolName, tools.RgToolName, tools.SearchToolName, tools.LSToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
+	case tools.DownloadToolName, tools.RgToolName, tools.FdToolName, tools.LSToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
 		return fmt.Sprintf("```\n%s\n```", t.result.Content)
 	default:
 		return t.result.Content
@@ -1663,8 +1663,8 @@ func prettifyToolName(name string) string {
 		return tools.WebFetchToolName
 	case tools.WebSearchToolName:
 		return tools.WebSearchToolName
-	case tools.SearchToolName:
-		return tools.SearchToolName
+	case tools.FdToolName:
+		return tools.FdToolName
 	case tools.RgToolName:
 		return tools.RgToolName
 	case tools.LSToolName:

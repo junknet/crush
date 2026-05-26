@@ -80,10 +80,8 @@ export type CrushEnvelope =
     | { type: 'session'; payload: { type: string; payload: Session } }
     | { type: 'agent_event'; payload: { type: string; payload: AgentEvent } }
     | { type: 'permission_request'; payload: { type: string; payload: PermissionRequest } }
-    | {
-          type: 'permission_notification'
-          payload: { type: string; payload: { tool_call_id: string } }
-      }
+    | { type: 'permission_notification'; payload: { type: string; payload: { tool_call_id: string } } }
+    | { type: 'sync_complete'; payload: { session_id: string } }
     | { type: string; payload: any }
 
 const jc = JSONCodec<any>()
@@ -247,7 +245,9 @@ export class CrushApi {
             if (opts2?.historyMs && opts2.historyMs > 0) {
                 opts.startAtTimeDelta(opts2.historyMs)
             } else {
-                opts.deliverAll()
+                // Pull last 20 messages by default to ensure instant load.
+                // loadOlderHistory handles backfilling older context on scroll-up.
+                opts.deliverLast(20)
             }
             const sub = await js.subscribe(subject, opts)
 
@@ -256,6 +256,10 @@ export class CrushApi {
                     for await (const m of sub) {
                         try {
                             onEvent(jc.decode(m.data))
+                            // If pending is 0, we've caught up with history.
+                            if (m.info?.pending === 0) {
+                                onEvent({ type: 'sync_complete', payload: { session_id: sessionID } })
+                            }
                         } catch (err) {
                             console.error('Failed to decode event', err)
                         }

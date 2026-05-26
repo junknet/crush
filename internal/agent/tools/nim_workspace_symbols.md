@@ -1,6 +1,6 @@
 Search for symbols across the entire workspace by name fragment (`workspace/symbol`).
 
-Use this when you have a symbol name (or part of one) but don't yet know which file it lives in. Much faster than grep because the LSP returns precise declaration locations, not text matches in comments/strings.
+Use this when you have a symbol name (or part of one) but don't yet know which file it lives in. Much faster than text search because the LSP returns precise declaration locations, not text matches in comments/strings.
 
 Query semantics (per LSP spec): the server treats the query as a *relaxed* match — case-insensitive, characters appear in order, no strict prefix/substring requirement. Pass a short, distinctive substring of the symbol name.
 

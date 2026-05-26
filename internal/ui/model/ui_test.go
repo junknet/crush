@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -215,6 +216,8 @@ func TestSchedulerEventUpdatesStatus(t *testing.T) {
 
 	require.NotNil(t, ui.status)
 	require.Contains(t, ui.status.msg.Msg, "Task started")
+	require.Contains(t, ui.runtimeStatusLine(), "dag 1 running/1")
+	require.Contains(t, ui.runtimeStatusLine(), "parallel 1")
 }
 
 func TestRuntimeStatusLineOmitsIdleCounters(t *testing.T) {
@@ -223,6 +226,50 @@ func TestRuntimeStatusLineOmitsIdleCounters(t *testing.T) {
 	ui := newTestUIWithConfig(t, nil)
 
 	require.Empty(t, ui.runtimeStatusLine())
+}
+
+func TestPillsAreaHeightAccountsForTodoActivityLines(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.width = 100
+	ui.height = 40
+	ui.session = &session.Session{
+		ID: "session-a",
+		Todos: []session.Todo{
+			{Content: "running", ActiveForm: "doing focused work", Status: session.TodoStatusInProgress},
+			{Content: "pending", Status: session.TodoStatusPending},
+			{Content: "done", Status: session.TodoStatusCompleted},
+		},
+	}
+	ui.pillsExpanded = true
+	ui.focusedPillSection = pillSectionTodos
+
+	require.Equal(t, pillHeightWithBorder+4, ui.pillsAreaHeight())
+}
+
+func TestSupportedImageMimeOfRejectsEmptyData(t *testing.T) {
+	t.Parallel()
+
+	_, ok := supportedImageMimeOf(nil)
+
+	require.False(t, ok)
+}
+
+func TestSupportedImageMimeOfAcceptsPNGBytes(t *testing.T) {
+	t.Parallel()
+
+	pngHeader := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00,
+	}
+
+	mimeType, ok := supportedImageMimeOf(pngHeader)
+
+	require.True(t, ok)
+	require.Equal(t, "image/png", mimeType)
 }
 
 func TestRuntimeStatusLineShowsActiveSignals(t *testing.T) {
@@ -261,7 +308,245 @@ func TestRuntimeStatusLineShowsActiveSignals(t *testing.T) {
 		CompletionTokens: 500,
 	}
 
-	require.Equal(t, "model running  ·  jobs 2  ·  monitor 1  ·  ctx 15%", ui.runtimeStatusLine())
+	require.Equal(t, "model running  ·  jobs 2  ·  monitor 1  ·  ctx 15% 1.5K/10K auto@70%", ui.runtimeStatusLine())
+}
+
+func TestRuntimeStatusLineShowsUnknownContextWindow(t *testing.T) {
+	t.Parallel()
+
+	providers := csync.NewMap[string, config.ProviderConfig]()
+	providers.Set("test-provider", config.ProviderConfig{
+		ID: "test-provider",
+		Models: []catwalk.Model{
+			{ID: "test-model"},
+		},
+	})
+	cfg := &config.Config{
+		Models: map[config.SelectedModelType]config.SelectedModel{
+			config.SelectedModelTypeBrain: {
+				Provider: "test-provider",
+				Model:    "test-model",
+			},
+		},
+		Providers: providers,
+		Agents: map[string]config.Agent{
+			config.AgentBrain: {Model: config.SelectedModelTypeBrain},
+		},
+	}
+	ui := newTestUIWithConfig(t, cfg)
+	ui.session = &session.Session{
+		PromptTokens:     12_000,
+		CompletionTokens: 6_000,
+	}
+
+	require.Equal(t, "ctx -- 18K/unknown auto@70%", ui.runtimeStatusLine())
+}
+
+func TestRuntimeStatusLineUsesGeminiFamilyContextWindowFallback(t *testing.T) {
+	t.Parallel()
+
+	providers := csync.NewMap[string, config.ProviderConfig]()
+	providers.Set("antigravity", config.ProviderConfig{
+		ID:   "antigravity",
+		Type: "antigravity",
+		Models: []catwalk.Model{
+			{ID: "gemini-2.5-pro"},
+		},
+	})
+	cfg := &config.Config{
+		Models: map[config.SelectedModelType]config.SelectedModel{
+			config.SelectedModelTypeBrain: {
+				Provider: "antigravity",
+				Model:    "gemini-2.5-pro",
+			},
+		},
+		Providers: providers,
+		Agents: map[string]config.Agent{
+			config.AgentBrain: {Model: config.SelectedModelTypeBrain},
+		},
+	}
+	ui := newTestUIWithConfig(t, cfg)
+	ui.session = &session.Session{
+		PromptTokens:     200_000,
+		CompletionTokens: 3_800,
+	}
+
+	require.Equal(t, "ctx 19% 203.8K/1M auto@70%", ui.runtimeStatusLine())
+}
+
+func TestRuntimeStatusLineShowsDagProfiles(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.recordTaskRuntimeEvent(scheduler.Event{
+		Kind:    scheduler.EventTaskStarted,
+		NodeID:  "explore-1",
+		Profile: scheduler.ProfileExploreAgent,
+	})
+	ui.recordTaskRuntimeEvent(scheduler.Event{
+		Kind:    scheduler.EventTaskStarted,
+		NodeID:  "worker-1",
+		Profile: scheduler.ProfileWorkerAgent,
+	})
+
+	require.Equal(t, "dag 2 running/2  ·  parallel 2  ·  agents explore 1/worker 1", ui.runtimeStatusLine())
+}
+
+func TestRuntimeStatusLineShowsActiveToolParallelism(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.recordToolRuntimeTrace(agentruntime.TaskTrace{
+		Kind:       agentruntime.TraceKindToolStarted,
+		ToolName:   "rg",
+		ToolCallID: "call-1",
+	})
+	ui.recordToolRuntimeTrace(agentruntime.TaskTrace{
+		Kind:       agentruntime.TraceKindToolStarted,
+		ToolName:   "view",
+		ToolCallID: "call-2",
+	})
+
+	require.Equal(t, "tools 2 running  ·  tool-parallel 2  ·  active rg/view", ui.runtimeStatusLine())
+
+	ui.recordToolRuntimeTrace(agentruntime.TaskTrace{
+		Kind:       agentruntime.TraceKindToolFinished,
+		ToolName:   "rg",
+		ToolCallID: "call-1",
+	})
+
+	require.Equal(t, "tools 1 running  ·  tool-parallel 1  ·  active view", ui.runtimeStatusLine())
+}
+
+func TestRuntimeTraceAddsCompactionActivity(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.session = &session.Session{ID: "session-1"}
+	startedAt := time.Now().Add(-12 * time.Second)
+
+	_, _ = ui.Update(pubsub.Event[agentruntime.TaskTrace]{
+		Type: pubsub.CreatedEvent,
+		Payload: agentruntime.TaskTrace{
+			Kind:                          agentruntime.TraceKindConversationCompactionStarted,
+			ConversationSessionID:         "session-1",
+			StartedAt:                     startedAt,
+			ProviderID:                    "openai",
+			ModelID:                       "gpt-test",
+			ContextMessageCount:           9,
+			PreflightEstimatedInputTokens: 58_000,
+		},
+	})
+
+	item, ok := ui.chat.MessageItem(compactionActivityID("session-1")).(*uichat.RuntimeActivityItem)
+	require.True(t, ok)
+	require.Equal(t, uichat.RuntimeActivityRunning, item.Snapshot().Status)
+	require.Contains(t, ui.runtimeStatusLine(), "compacting")
+	require.Contains(t, ui.runtimeStatusLine(), "~58K tokens")
+
+	_, _ = ui.Update(pubsub.Event[agentruntime.TaskTrace]{
+		Type: pubsub.UpdatedEvent,
+		Payload: agentruntime.TaskTrace{
+			Kind:                  agentruntime.TraceKindConversationCompactionFinished,
+			ConversationSessionID: "session-1",
+			StartedAt:             startedAt,
+			FinishedAt:            time.Now(),
+			ProviderID:            "openai",
+			ModelID:               "gpt-test",
+			TotalTokens:           61_500,
+		},
+	})
+
+	require.NotContains(t, ui.runtimeStatusLine(), "compacting")
+	require.Equal(t, uichat.RuntimeActivityDone, item.Snapshot().Status)
+	require.Equal(t, int64(61_500), item.Snapshot().Tokens)
+	require.True(t, item.Snapshot().TokensAreExact)
+}
+
+func TestBackgroundMonitorEventAddsRuntimeActivity(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.session = &session.Session{ID: "session-1"}
+	ws := ui.com.Workspace.(*testWorkspace)
+	ws.shellStats = shell.BackgroundShellStats{ActiveMonitors: 1}
+
+	_, _ = ui.Update(pubsub.Event[shell.BackgroundJobEvent]{
+		Type: pubsub.CreatedEvent,
+		Payload: shell.BackgroundJobEvent{
+			Kind:      shell.BackgroundKindMonitorLine,
+			ID:        "001",
+			SessionID: "session-1",
+			MatchLine: "sample 50 still running",
+		},
+	})
+
+	item, ok := ui.chat.MessageItem(monitorActivityID("session-1", "001")).(*uichat.RuntimeActivityItem)
+	require.True(t, ok)
+	require.Equal(t, uichat.RuntimeActivityRunning, item.Snapshot().Status)
+	require.Equal(t, 1, item.Snapshot().LineCount)
+	require.Contains(t, item.Snapshot().Detail, "sample 50")
+
+	_, _ = ui.Update(pubsub.Event[shell.BackgroundJobEvent]{
+		Type: pubsub.UpdatedEvent,
+		Payload: shell.BackgroundJobEvent{
+			Kind:      shell.BackgroundKindMonitorHit,
+			ID:        "001",
+			SessionID: "session-1",
+			Pattern:   "done",
+			MatchLine: "done in 42s",
+		},
+	})
+
+	require.Equal(t, uichat.RuntimeActivityDone, item.Snapshot().Status)
+	require.Contains(t, item.Snapshot().Detail, `pattern "done"`)
+	require.True(t, item.Finished())
+}
+
+func TestRuntimeStatusLineUsesLatestLLMTraceContextUsage(t *testing.T) {
+	t.Parallel()
+
+	providers := csync.NewMap[string, config.ProviderConfig]()
+	providers.Set("test-provider", config.ProviderConfig{
+		ID: "test-provider",
+		Models: []catwalk.Model{
+			{ID: "test-model", ContextWindow: 1_000_000},
+		},
+	})
+	cfg := &config.Config{
+		Models: map[config.SelectedModelType]config.SelectedModel{
+			config.SelectedModelTypeBrain: {
+				Provider: "test-provider",
+				Model:    "test-model",
+			},
+		},
+		Providers: providers,
+		Agents: map[string]config.Agent{
+			config.AgentBrain: {Model: config.SelectedModelTypeBrain},
+		},
+	}
+	ui := newTestUIWithConfig(t, cfg)
+	ui.session = &session.Session{ID: "session-1"}
+
+	ui.recordLLMContextTrace(agentruntime.TaskTrace{
+		Kind:                          agentruntime.TraceKindLLMStarted,
+		ConversationSessionID:         "session-1",
+		Sequence:                      1,
+		PreflightEstimatedInputTokens: 58_000,
+		ContextWindowTokens:           1_000_000,
+	})
+
+	require.Equal(t, "ctx 5% 58K/1M auto@70%", ui.runtimeStatusLine())
+
+	ui.recordLLMContextTrace(agentruntime.TaskTrace{
+		Kind:                  agentruntime.TraceKindLLMFinished,
+		ConversationSessionID: "session-1",
+		Sequence:              2,
+		TotalTokens:           118_275,
+		ContextWindowTokens:   1_000_000,
+	})
+
+	require.Equal(t, "ctx 11% 118.3K/1M auto@70%", ui.runtimeStatusLine())
 }
 
 func TestContextUsagePercentWithoutSession(t *testing.T) {
@@ -275,6 +560,73 @@ func TestContextUsagePercentWithoutSession(t *testing.T) {
 	})
 
 	require.Empty(t, ui.contextUsagePercent())
+}
+
+func TestRuntimeStatusLineShowsIdleContext(t *testing.T) {
+	t.Parallel()
+
+	providers := csync.NewMap[string, config.ProviderConfig]()
+	providers.Set("test-provider", config.ProviderConfig{
+		ID: "test-provider",
+		Models: []catwalk.Model{
+			{ID: "test-model", ContextWindow: 200_000},
+		},
+	})
+	cfg := &config.Config{
+		Models: map[config.SelectedModelType]config.SelectedModel{
+			config.SelectedModelTypeBrain: {
+				Provider: "test-provider",
+				Model:    "test-model",
+			},
+		},
+		Providers: providers,
+		Agents: map[string]config.Agent{
+			config.AgentBrain: {Model: config.SelectedModelTypeBrain},
+		},
+	}
+	ui := newTestUIWithConfig(t, cfg)
+	ui.session = &session.Session{
+		PromptTokens:     140_000,
+		CompletionTokens: 1_000,
+	}
+
+	require.Equal(t, "ctx 70% 141K/200K auto@70% compact", ui.runtimeStatusLine())
+}
+
+func TestRuntimeStatusLineUsesRuntimeAgentContextWindowFallback(t *testing.T) {
+	t.Parallel()
+
+	providers := csync.NewMap[string, config.ProviderConfig]()
+	providers.Set("test-provider", config.ProviderConfig{
+		ID: "test-provider",
+		Models: []catwalk.Model{
+			{ID: "test-model"},
+		},
+	})
+	cfg := &config.Config{
+		Models: map[config.SelectedModelType]config.SelectedModel{
+			config.SelectedModelTypeBrain: {
+				Provider: "test-provider",
+				Model:    "test-model",
+			},
+		},
+		Providers: providers,
+		Agents: map[string]config.Agent{
+			config.AgentBrain: {Model: config.SelectedModelTypeBrain},
+		},
+	}
+	ui := newTestUIWithConfig(t, cfg)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ws.agentReady = true
+	ws.agentModel = workspace.AgentModel{
+		CatwalkCfg: catwalk.Model{ContextWindow: 120_000},
+	}
+	ui.session = &session.Session{
+		PromptTokens:     12_000,
+		CompletionTokens: 6_000,
+	}
+
+	require.Equal(t, "ctx 15% 18K/120K auto@70%", ui.runtimeStatusLine())
 }
 
 func TestStatusClearUsesMessageID(t *testing.T) {
@@ -303,6 +655,22 @@ func TestStatusMessageTTLSeverityMinimums(t *testing.T) {
 		Msg:  "long",
 		TTL:  2 * time.Minute,
 	}))
+}
+
+func TestStatusDrawKeepsRuntimeLineDuringNotification(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.status.SetStatusLine("model running  ·  ctx -- 18K/unknown auto@70%")
+	ui.status.SetInfoMsg(util.NewInfoMsg("Task started: inspect repository"))
+	scr := uv.NewScreenBuffer(80, 1)
+
+	ui.status.Draw(scr, uv.Rect(0, 0, 80, 1))
+
+	rendered := scr.Render()
+	require.Contains(t, rendered, "Task started")
+	require.Contains(t, rendered, "ctx")
+	require.Contains(t, rendered, "auto@70%")
 }
 
 func TestSchedulerEventIgnoresOtherConversationSession(t *testing.T) {
@@ -460,6 +828,37 @@ func TestMouseWheelDownToBottomReengagesFollow(t *testing.T) {
 	require.True(t, ui.chat.Follow())
 }
 
+func TestDoubleClickUserInputBlockCopiesWholeMessage(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.chat.SetSize(80, 10)
+	msg := &message.Message{
+		ID:   "user-copy",
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "copy this whole input block"},
+		},
+	}
+	renderer := attachments.NewRenderer(
+		ui.com.Styles.Attachments.Normal,
+		ui.com.Styles.Attachments.Deleting,
+		ui.com.Styles.Attachments.Image,
+		ui.com.Styles.Attachments.Text,
+	)
+	item := uichat.NewUserMessageItem(ui.com.Styles, msg, renderer)
+	ui.chat.SetMessages(item)
+
+	handled, firstCmd := ui.chat.HandleMouseDown(2, 0)
+	require.True(t, handled)
+	require.NotNil(t, firstCmd)
+
+	handled, secondCmd := ui.chat.HandleMouseDown(2, 0)
+	require.True(t, handled)
+	require.NotNil(t, secondCmd)
+	require.False(t, ui.chat.HasHighlight())
+}
+
 func TestEscapeStopsMouseAutoScroll(t *testing.T) {
 	t.Parallel()
 
@@ -556,11 +955,41 @@ func TestLoadPromptHistoryUsesCurrentSessionMessages(t *testing.T) {
 	require.Equal(t, "previous prompt", loaded.messages[0])
 }
 
+func TestLoadPromptHistorySkipsInternalSummaryPrompt(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ui.session = &session.Session{ID: "session-a", Mode: session.ModeExecute}
+	ws.userMessages = []message.Message{
+		{
+			ID:        "summary-prompt",
+			SessionID: "session-a",
+			Role:      message.User,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "Compress the conversation into durable memory for the next agent.\nPreserve the minimum state needed to resume."},
+			},
+		},
+		{
+			ID:        "message-a",
+			SessionID: "session-a",
+			Role:      message.User,
+			Parts:     []message.ContentPart{message.TextContent{Text: "real user prompt"}},
+		},
+	}
+
+	msg := ui.loadPromptHistory()()
+	loaded := msg.(promptHistoryLoadedMsg)
+
+	require.Equal(t, []string{"real user prompt"}, loaded.messages)
+}
+
 // testWorkspace is a minimal [workspace.Workspace] stub for unit tests.
 type testWorkspace struct {
 	workspace.Workspace
 	cfg                   *config.Config
 	agentReady            bool
+	agentModel            workspace.AgentModel
 	agentBusy             bool
 	lastCreateSessionMode session.Mode
 	lastCreatedSession    session.Session
@@ -626,6 +1055,10 @@ func (w *testWorkspace) FileTrackerListReadFiles(context.Context, string) ([]str
 
 func (w *testWorkspace) AgentIsReady() bool {
 	return w.agentReady
+}
+
+func (w *testWorkspace) AgentModel() workspace.AgentModel {
+	return w.agentModel
 }
 
 func (w *testWorkspace) AgentIsBusy() bool {

@@ -1,6 +1,7 @@
 package log
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewProviderHTTPClientUsesSharedPooledTransport(t *testing.T) {
@@ -92,6 +94,58 @@ func (readFailBody) Read(p []byte) (int, error) {
 }
 
 func (readFailBody) Close() error { return nil }
+
+func TestDumpTransportRecordsEventStreamLatency(t *testing.T) {
+	dir := t.TempDir()
+	dt := &dumpTransport{
+		path: filepath.Join(dir, "test.jsonl"),
+		next: finiteEventStreamRoundTripper{},
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.invalid/stream", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := dt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip returned error: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	_, err = io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close stream: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "test.jsonl"))
+	if err != nil {
+		t.Fatalf("read dump file: %v", err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("decode dump: %v", err)
+	}
+	if _, ok := entry["first_byte_latency_ms"]; !ok {
+		t.Fatalf("missing first_byte_latency_ms in %s", data)
+	}
+	if _, ok := entry["stream_duration_ms"]; !ok {
+		t.Fatalf("missing stream_duration_ms in %s", data)
+	}
+	if !strings.Contains(entry["resp_body"].(string), "data: hello") {
+		t.Fatalf("missing captured stream body: %s", data)
+	}
+}
+
+type finiteEventStreamRoundTripper struct{}
+
+func (finiteEventStreamRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader("data: hello\n\n")),
+		Request:    req,
+	}, nil
+}
 
 // brokenCloser implements io.ReadCloser whose Close always returns an
 // error. This forces drainBody down the (nil, b, err) return path that

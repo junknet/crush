@@ -190,6 +190,9 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 					if model.Name == "" {
 						model.Name = model.ID
 					}
+					if knownModel, ok := findKnownModelByID(p.Models, model.ID); ok {
+						model = fillMissingModelMetadata(model, knownModel)
+					}
 					models = append(models, model)
 				}
 				for _, model := range p.Models {
@@ -372,6 +375,7 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 			c.Providers.Del(id)
 			continue
 		}
+		providerConfig.Models = enrichProviderModelsFromKnownProviders(providerConfig.Models, knownProviders)
 		if !noAuthRequired {
 			apiKey, err := resolver.ResolveValue(providerConfig.APIKey)
 			if apiKey == "" || err != nil {
@@ -828,6 +832,78 @@ func deduplicateProviderModels(models []catwalk.Model) []catwalk.Model {
 
 	slices.Reverse(deduplicated)
 	return deduplicated
+}
+
+func enrichProviderModelsFromKnownProviders(models []catwalk.Model, knownProviders []catwalk.Provider) []catwalk.Model {
+	if len(models) == 0 || len(knownProviders) == 0 {
+		return models
+	}
+	enriched := make([]catwalk.Model, 0, len(models))
+	for _, model := range models {
+		if knownModel, ok := findKnownModelInProviders(knownProviders, model.ID); ok {
+			model = fillMissingModelMetadata(model, knownModel)
+		}
+		if model.Name == "" {
+			model.Name = model.ID
+		}
+		enriched = append(enriched, model)
+	}
+	return enriched
+}
+
+func findKnownModelInProviders(providers []catwalk.Provider, modelID string) (catwalk.Model, bool) {
+	for _, provider := range providers {
+		if model, ok := findKnownModelByID(provider.Models, modelID); ok {
+			return model, true
+		}
+	}
+	return catwalk.Model{}, false
+}
+
+func findKnownModelByID(models []catwalk.Model, modelID string) (catwalk.Model, bool) {
+	for _, model := range models {
+		if model.ID == modelID {
+			return model, true
+		}
+	}
+	return catwalk.Model{}, false
+}
+
+func fillMissingModelMetadata(model catwalk.Model, known catwalk.Model) catwalk.Model {
+	if model.Name == "" {
+		model.Name = known.Name
+	}
+	if model.CostPer1MIn == 0 {
+		model.CostPer1MIn = known.CostPer1MIn
+	}
+	if model.CostPer1MOut == 0 {
+		model.CostPer1MOut = known.CostPer1MOut
+	}
+	if model.CostPer1MInCached == 0 {
+		model.CostPer1MInCached = known.CostPer1MInCached
+	}
+	if model.CostPer1MOutCached == 0 {
+		model.CostPer1MOutCached = known.CostPer1MOutCached
+	}
+	if model.ContextWindow == 0 {
+		model.ContextWindow = known.ContextWindow
+	}
+	if model.DefaultMaxTokens == 0 {
+		model.DefaultMaxTokens = known.DefaultMaxTokens
+	}
+	if !model.CanReason {
+		model.CanReason = known.CanReason
+	}
+	if len(model.ReasoningLevels) == 0 {
+		model.ReasoningLevels = append([]string(nil), known.ReasoningLevels...)
+	}
+	if model.DefaultReasoningEffort == "" {
+		model.DefaultReasoningEffort = known.DefaultReasoningEffort
+	}
+	if !model.SupportsImages {
+		model.SupportsImages = known.SupportsImages
+	}
+	return model
 }
 
 func hasAWSCredentials(env env.Env) bool {

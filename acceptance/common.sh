@@ -77,6 +77,68 @@ need_nimlsp() {
   [[ -d "$NIM_CORE_PATH" ]] || skip "nim-core project missing: $NIM_CORE_PATH"
 }
 
-# 关掉孤儿 session
-trap '"$TUI" kill "${SESS:-acceptance-$SCENARIO_NAME}" 2>/dev/null || true' EXIT
 SESS="acceptance-$SCENARIO_NAME"
+
+# ── Global Test Configuration Isolation ─────────────────────────────
+# We generate a temporary configuration directory for each test run to
+# isolate it from the user's real ~/.config/crush/crush.yaml. This prevents
+# rate limits, token conflicts, and cost on real providers.
+# We map all model profiles to the WaitAI mock provider.
+
+TEST_CFG_DIR=""
+if [[ -z "${CRUSH_GLOBAL_CONFIG:-}" ]]; then
+  TEST_CFG_DIR="$(mktemp -d -t crush_test_cfg_XXXXXX)"
+  export CRUSH_GLOBAL_CONFIG="$TEST_CFG_DIR"
+  
+  cat > "$TEST_CFG_DIR/crush.yaml" <<EOF
+agents:
+  explore:
+    allowed_mcp: null
+  auditor:
+    allowed_mcp: null
+models:
+  brain:
+    model: claude-opus-4-7
+    provider: waitai-anthropic
+  explore:
+    model: claude-haiku-4-5-20251001
+    provider: waitai-anthropic
+  worker:
+    model: claude-sonnet-4-6
+    provider: waitai-anthropic
+  plan:
+    model: claude-sonnet-4-6
+    provider: waitai-anthropic
+  auditor:
+    model: claude-sonnet-4-6
+    provider: waitai-anthropic
+providers:
+  waitai-anthropic:
+    api_key: \${WAITAI_API_KEY:-\${NCODER_WAITAI_KEY:-test}}
+    base_url: \${WAITAI_CRUSH_BASE:-http://127.0.0.1:43917/v1}
+    models:
+      - id: claude-opus-4-7
+        name: Claude Opus 4.7
+        context_window: 1000000
+        default_max_tokens: 128000
+        can_reason: true
+      - id: claude-sonnet-4-6
+        name: Claude Sonnet 4.6
+        context_window: 1000000
+        default_max_tokens: 64000
+        can_reason: true
+      - id: claude-haiku-4-5-20251001
+        name: Claude Haiku 4.5
+        context_window: 200000
+        default_max_tokens: 64000
+        can_reason: false
+EOF
+fi
+
+cleanup_common() {
+  "$TUI" kill "${SESS:-acceptance-$SCENARIO_NAME}" 2>/dev/null || true
+  if [[ -n "${TEST_CFG_DIR:-}" && -d "$TEST_CFG_DIR" ]]; then
+    rm -rf "$TEST_CFG_DIR"
+  fi
+}
+trap cleanup_common EXIT

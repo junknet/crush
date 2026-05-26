@@ -754,6 +754,7 @@ func allToolNames() []string {
 		"bash",
 		"crush_info",
 		"crush_logs",
+		"dag_run",
 		"job_output",
 		"job_kill",
 		"download",
@@ -773,10 +774,10 @@ func allToolNames() []string {
 		"nim_workspace_symbols",
 		"fetch",
 		"agentic_fetch",
-		"search",
+		"fd",
 		"rg",
 		"ls",
-		"nu",
+		"run",
 		"monitor",
 		"schedule_wakeup",
 		"sourcegraph",
@@ -802,7 +803,7 @@ func resolveExploreTools(tools []string) []string {
 	// constrains it to read-only inspection commands. Direct mutators
 	// (edit/multiedit/write/download/todos) and nim_restart are excluded.
 	exploreTools := []string{
-		"bash", "nu", "search", "rg", "ls", "sourcegraph", "view",
+		"bash", "fd", "rg", "ls", "sourcegraph", "view",
 		"nim_call_hierarchy",
 		"nim_check_file",
 		"nim_definition",
@@ -865,7 +866,7 @@ func (c *Config) SetupAgents() {
 		AgentExplore: {
 			ID:           AgentExplore,
 			Name:         "Explore",
-			Description:  "A fast tool-oriented agent for search and inspection.",
+			Description:  "A fast tool-oriented agent for fd/rg search and inspection.",
 			Model:        SelectedModelTypeExplore,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: resolveExploreTools(allowedTools),
@@ -877,7 +878,7 @@ func (c *Config) SetupAgents() {
 			// a half-finished "going to look at X" line that looked like a
 			// truncated return to the parent.
 			MaxTurns:      16,
-			ParallelTools: []string{"search", "rg", "view", "ls", "bash", "nu"},
+			ParallelTools: []string{"fd", "rg", "view", "ls", "bash", "nu"},
 		},
 		AgentAuditor: {
 			ID:           AgentAuditor,

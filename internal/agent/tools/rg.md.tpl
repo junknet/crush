@@ -1,3 +1,3 @@
-Search file contents using ripgrep (`rg`); regex or literal text; returns matching file paths sorted by modification time (max {{ .MaxResults }}); respects .gitignore. Use search to filter by filename, not contents.
+Search file contents using ripgrep (`rg`); regex by default, literal text when `literal_text=true`; returns matching lines sorted by file modification time (max {{ .MaxResults }}). Respects `.gitignore`.
 
-This tool is the dedicated content-search tool. Internally it shells out to ripgrep with `--json`, so it is fast on large repos, binary-safe, and honors `.gitignore` by default. Do not call `grep` via `bash` — use this `rg` tool instead.
+This is the ONLY content-search tool. Do not call `grep`, `rg`, or `find` via `bash` for repository search. Use `fd` for filename/path search and `ast_grep` for structural code search.

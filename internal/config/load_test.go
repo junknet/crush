@@ -54,6 +54,46 @@ func TestConfig_LoadFromBytes_DeduplicatesProviderModels(t *testing.T) {
 	require.Equal(t, "gpt-4o", prov.Models[1].ID)
 }
 
+func TestConfig_ConfigureProvidersEnrichesCustomModelMetadata(t *testing.T) {
+	t.Parallel()
+
+	knownProviders := []catwalk.Provider{{
+		ID:   catwalk.InferenceProvider("opencode-zen"),
+		Name: "OpenCode Zen",
+		Models: []catwalk.Model{{
+			ID:               "claude-opus-4-7",
+			Name:             "Claude Opus 4.7",
+			ContextWindow:    1_000_000,
+			DefaultMaxTokens: 128_000,
+			CanReason:        true,
+		}},
+	}}
+	cfg := &Config{
+		Providers: csync.NewMapFrom(map[string]ProviderConfig{
+			"waitai-anthropic": {
+				ID:      "waitai-anthropic",
+				BaseURL: "http://127.0.0.1:43917/v1",
+				APIKey:  "test-key",
+				Models: []catwalk.Model{{
+					ID: "claude-opus-4-7",
+				}},
+			},
+		}),
+	}
+	cfg.setDefaults("/tmp", "")
+	env := env.NewFromMap(map[string]string{})
+	resolver := NewShellVariableResolver(env)
+
+	require.NoError(t, cfg.configureProviders(testStore(cfg), env, resolver, knownProviders))
+
+	provider, ok := cfg.Providers.Get("waitai-anthropic")
+	require.True(t, ok)
+	require.Len(t, provider.Models, 1)
+	require.Equal(t, int64(1_000_000), provider.Models[0].ContextWindow)
+	require.Equal(t, int64(128_000), provider.Models[0].DefaultMaxTokens)
+	require.True(t, provider.Models[0].CanReason)
+}
+
 // TestLookupConfigs_SingleLocation verifies the single-location model:
 // lookupConfigs resolves only the global config base candidates and the
 // runtime state candidates, never a project- or parent-local crush.json.
@@ -785,7 +825,7 @@ func TestConfig_setupAgentsOverlaysCustomAgents(t *testing.T) {
 				Name:         "Review",
 				Description:  "Custom review agent",
 				Model:        SelectedModelTypeExplore,
-				AllowedTools: []string{"search", "rg"},
+				AllowedTools: []string{"fd", "rg"},
 				ContextPaths: []string{"docs"},
 			},
 		},
@@ -796,7 +836,7 @@ func TestConfig_setupAgentsOverlaysCustomAgents(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "Review", review.Name)
 	require.Equal(t, SelectedModelTypeExplore, review.Model)
-	require.Equal(t, []string{"search", "rg"}, review.AllowedTools)
+	require.Equal(t, []string{"fd", "rg"}, review.AllowedTools)
 	require.Contains(t, review.ContextPaths, "docs")
 	require.Equal(t, AgentBrain, cfg.DefaultAgent)
 }

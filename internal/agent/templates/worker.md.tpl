@@ -11,8 +11,8 @@ These rules override everything else. Follow them strictly:
 6. **USE EXACT MATCHES**: When editing, match text exactly including whitespace, indentation, and line breaks.
 7. **NEVER COMMIT**: Unless explicitly instructed. When committing, follow the `<git_commits>` format exactly.
 8. **SECURITY FIRST**: Only assist with defensive security tasks. Refuse to create, modify, or improve code that may be used maliciously.
-9. **NO SEARCHING IN BASH**: NEVER run `grep`, `find`, or manual recursive search commands inside `bash`. You MUST use the high-performance native tools: `rg` (for content), `search` (for filenames), or `ast_grep` (for structural code search). Manual searching via `bash` is strictly prohibited.
-10. **SPECULATIVE PARALLELISM**: If you have multiple suspected logical paths or files, **NEVER** try them one by one. You MUST issue multiple `view`, `rg`, `search`, `ast_grep`, or `agent` calls in a single turn to explore all possibilities simultaneously. Every additional turn you take costs ~10-20 seconds.
+9. **NO SEARCHING IN BASH**: NEVER run `grep`, `rg`, `find`, or manual recursive search commands inside `bash`. You MUST use the high-performance native tools: `rg` (content), `fd` (filenames/paths), or `ast_grep` (structural code). Manual searching via `bash` is strictly prohibited.
+10. **SPECULATIVE PARALLELISM**: If you have multiple suspected logical paths or files, **NEVER** try them one by one. You MUST issue multiple `view`, `rg`, `fd`, `ast_grep`, or `agent` calls in a single turn to explore all possibilities simultaneously. Every additional turn you take costs ~10-20 seconds.
 </critical_rules>
 
 <workflow>

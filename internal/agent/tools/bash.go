@@ -9,7 +9,9 @@ import (
 	"html/template"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,6 +88,8 @@ var bashDescriptionTpl = template.Must(
 	template.New("bashDescription").
 		Parse(string(bashDescriptionTmpl)),
 )
+
+var foregroundSleepPattern = regexp.MustCompile(`(?is)^\s*sleep\s+([0-9]+(\.[0-9]+)?)([smh]?)\s*(&&|;|$)`)
 
 type bashDescriptionData struct {
 	BannedCommands  string
@@ -225,12 +229,37 @@ func blockFuncs() []shell.BlockFunc {
 
 		// Streaming/follow primitives that wedge the tool loop — the agent
 		// should use schedule_wakeup / monitor / job_output instead.
-		// (Plain `sleep` is left allowed; it is a legitimate shell
-		// primitive and existing tests pipeline it through `&&`.)
+		// Sleep polling is rejected before execution so short shell timing
+		// tests can still use sleep without broad command blocking.
 		shell.CommandsBlocker([]string{"watch"}),
 		shell.ArgumentsBlocker("tail", nil, []string{"-f"}),
 		shell.ArgumentsBlocker("tail", nil, []string{"--follow"}),
 	}
+}
+
+func blockForegroundSleep(command string) (string, bool) {
+	matches := foregroundSleepPattern.FindStringSubmatch(command)
+	if len(matches) == 0 {
+		return "", false
+	}
+
+	amount, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return "", false
+	}
+
+	switch strings.ToLower(matches[3]) {
+	case "m":
+		amount *= 60
+	case "h":
+		amount *= 60 * 60
+	}
+
+	if time.Duration(amount*float64(time.Second)) < 2*time.Second {
+		return "", false
+	}
+
+	return "foreground sleep polling is blocked: do not run `sleep N && ...` or long `sleep` in bash. Start the waiting command with run_in_background=true and use the monitor tool to wake on completion/error, or use schedule_wakeup for a pure time delay.", true
 }
 
 func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShellManager, workingDir, dataDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
@@ -240,6 +269,9 @@ func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShel
 		func(ctx context.Context, params BashParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.Command == "" {
 				return fantasy.NewTextErrorResponse("missing command"), nil
+			}
+			if message, blocked := blockForegroundSleep(params.Command); blocked {
+				return fantasy.NewTextErrorResponse(message), nil
 			}
 
 			// Determine working directory

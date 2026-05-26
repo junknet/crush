@@ -32,6 +32,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -501,7 +502,9 @@ func (app *App) setupEvents() {
 	setupSubscriber(ctx, app.serviceEventsWG, "history", app.History.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "agent-notifications", app.agentNotifications.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "mcp", mcp.SubscribeEvents, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "runtime-trace", agentruntime.SubscribeTraceEvents, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "scheduler", scheduler.SubscribeEvents, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "background-jobs", shell.SubscribeBackgroundJobs, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "lsp", SubscribeLSPEvents, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "skills", skills.SubscribeEvents, app.events)
 	cleanupFunc := func(context.Context) error {

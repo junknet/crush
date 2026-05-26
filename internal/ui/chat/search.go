@@ -20,8 +20,8 @@ type SearchToolMessageItem struct {
 
 var _ ToolMessageItem = (*SearchToolMessageItem)(nil)
 
-// NewSearchToolMessageItem creates a new [SearchToolMessageItem].
-func NewSearchToolMessageItem(
+// NewFdToolMessageItem creates a new [SearchToolMessageItem].
+func NewFdToolMessageItem(
 	sty *styles.Styles,
 	toolCall message.ToolCall,
 	result *message.ToolResult,
@@ -37,10 +37,10 @@ type SearchToolRenderContext struct{}
 func (g *SearchToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if opts.IsPending() {
-		return pendingTool(sty, tools.SearchToolName, opts.Compact)
+		return pendingTool(sty, tools.FdToolName, opts.Compact)
 	}
 
-	var params tools.SearchParams
+	var params tools.FdParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
 		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
 	}
@@ -50,7 +50,7 @@ func (g *SearchToolRenderContext) RenderTool(sty *styles.Styles, width int, opts
 		toolParams = append(toolParams, "path", params.Path)
 	}
 
-	header := toolHeader(sty, opts.Status, tools.SearchToolName, cappedWidth, opts.Compact, toolParams...)
+	header := toolHeader(sty, opts.Status, tools.FdToolName, cappedWidth, opts.Compact, toolParams...)
 	if opts.Compact {
 		return header
 	}

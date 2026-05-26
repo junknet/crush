@@ -5,6 +5,30 @@
 
 ---
 
+## Wave 6 — Memory recall & context runtime (2026-05-26)
+
+### Added
+- **Project memory recall 注入** (`internal/memdir/scan.go`, `internal/agent/coordinator.go`) — brain turn 会扫描项目 memory manifest,按当前 prompt 选取最多 5 个相关 memory 文件作为 attachment 注入;单文件 200 行 / 25KB 截断,支持 CJK bigram 匹配,避免把整个 memory 目录无差别塞进上下文。
+- **Session memory 实时压缩底座** (`internal/agent/session_memory.go`) — 成功 brain turn 后后台维护 `<dataDir>/sessions/<sessionID>/session-memory/summary.md`;10K token 初始化,5K token 增量,3 tool call 阈值。自动压缩前优先用 session memory 生成 summary message,失败再回退旧 LLM summarizer。
+- **Memory extraction manifest 预注入** (`internal/agent/coordinator.go`) — 后台 memory extraction 先读项目 memory manifest,再并行读写目标 memory 文件,并强制输出落在项目 memory 目录内。
+
+### Changed
+- **Context runtime 可观测性闭环** (`internal/agent/llm_trace.go`, `internal/ui/model/status.go`) — LLM request trace 记录 context message/token/window/auto-threshold/tool-schema/attachment 指标;TUI 底栏显示 `ctx used/window auto@threshold`,用于确认 70% 自动压缩触发线。
+
+### Tests
+- `go test ./internal/memdir ./internal/agent` ✅
+- `go test ./...` ✅
+- `CGO_ENABLED=0 GOEXPERIMENT=greenteagc go build -trimpath -o /tmp/crush-memory-verify .` ✅
+- `tui-test` real PTY run ✅ — `/tmp/crush-tui-memory-e2e/screen.txt`, `/tmp/crush-tui-memory-e2e/screen.png`, trace `/home/junknet/.local/state/crush-dev/trace-20260526-195038.jsonl`;屏幕返回 `MEMORY_RECALL_OK`,底栏显示 `dag 1 done · ctx 3% 33.3K/1M auto@70%`,trace 有 `attachment_count=1` 与 `task_output success=true`。
+
+### Module IDs
+- `memory_recall_v2` — prompt 相关 memory attachment 注入
+- `session_memory_v1` — turn 后实时 session memory + compact 前复用
+- `memory_extract_manifest_v1` — extraction 前 manifest 预注入 + memory 目录边界
+- `context_runtime_meter_v1` — TUI ctx 百分比 + 70% threshold trace
+
+---
+
 ## Wave 5 — TUI UX 闭环 & launcher 韧性 (2026-05-25)
 
 ### Added

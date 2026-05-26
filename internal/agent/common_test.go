@@ -326,7 +326,7 @@ func workerAgent(r *vcr.Recorder, env fakeEnv, primary, title fantasy.LanguageMo
 		tools.NewEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewFetchTool(env.permissions, env.workingDir, r.GetDefaultClient()),
-		tools.NewSearchTool(env.permissions, env.workingDir),
+		tools.NewFdTool(env.permissions, env.workingDir),
 		tools.NewRgTool(env.permissions, env.workingDir, cfg.Config().Tools.Rg),
 		tools.NewLsTool(env.permissions, env.workingDir, cfg.Config().Tools.Ls),
 		tools.NewSourcegraphTool(r.GetDefaultClient()),

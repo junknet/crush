@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -429,7 +430,10 @@ func (c *coordinator) watchBackgroundJobs(ctx context.Context) {
 			slog.DebugContext(ctx, "Background job finished — waking session",
 				"job", job.ID, "session_id", job.SessionID, "exit_code", job.ExitCode)
 			go func() {
-				if _, err := c.Run(ctx, job.SessionID, prompt, false); err != nil {
+				// Mark as a system-initiated run so that if it gets queued and
+				// then canceled on ESC, it doesn't pollute the user's textarea.
+				systemCtx := WithSystemPrompt(ctx)
+				if _, err := c.Run(systemCtx, job.SessionID, prompt, false); err != nil {
 					slog.Error("Background job wake-up run failed",
 						"job", job.ID, "session_id", job.SessionID, "error", err)
 				}
@@ -594,6 +598,9 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	if err := c.UpdateModels(ctx); err != nil {
 		return nil, fmt.Errorf("failed to update models: %w", err)
 	}
+	if err := c.refreshAgentSystemPrompt(ctx, rootAgentName, c.currentAgent); err != nil {
+		return nil, fmt.Errorf("failed to refresh %s prompt: %w", rootAgentName, err)
+	}
 
 	model := c.currentAgent.Model()
 	maxTokens := model.CatwalkCfg.DefaultMaxTokens
@@ -624,6 +631,16 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	if boost {
 		slog.Debug("Reasoning boost engaged for this turn", "session", sessionID, "keyword", reasoningBoostKeyword)
 	}
+	readOnlyTurn := promptRequestsReadOnly(prompt) ||
+		rootProfile == scheduler.ProfileExploreAgent ||
+		rootProfile == scheduler.ProfilePlanAgent ||
+		rootProfile == scheduler.ProfileAuditorAgent
+
+	if rootProfile == scheduler.ProfileBrainAgent {
+		if memoryAttachments := c.relevantMemoryAttachments(runCtx, sessionID, prompt); len(memoryAttachments) > 0 {
+			attachments = append(memoryAttachments, attachments...)
+		}
+	}
 
 	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(sessionID, model, providerCfg, boost)
 
@@ -640,6 +657,12 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		taskNode := c.ensureRootTask(taskScheduler, sessionID, prompt, maxTokens, rootProfile)
 		if taskNode == nil {
 			return nil, errors.New("failed to create root task")
+		}
+		if readOnlyTurn {
+			taskNode.Mode = scheduler.TaskReadOnly
+		}
+		if c.attachAutoExplorePreflight(taskScheduler, taskNode, prompt, maxTokens, rootProfile, readOnlyTurn) {
+			slog.Debug("Auto-attached explore preflight", "session", sessionID)
 		}
 		c.preBindTaskTreeModels(taskNode)
 
@@ -679,6 +702,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 				TopK:             topK,
 				FrequencyPenalty: freqPenalty,
 				PresencePenalty:  presPenalty,
+				ReadOnly:         readOnlyTurn || node.Mode == scheduler.TaskReadOnly,
 				TraceRuntime:     taskRuntime,
 				TaskNodeID:       node.ID,
 				TaskParentID:     nodeParentIDForCall(node),
@@ -737,7 +761,9 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	// its own timeout via the suggestion service).
 	if originalErr == nil && result != nil && rootProfile == scheduler.ProfileBrainAgent {
 		sid := sessionID
-		go c.triggerMemoryExtraction(context.Background(), sid)
+		if !readOnlyTurn {
+			go c.triggerMemoryExtraction(context.Background(), sid)
+		}
 
 		if c.suggestion != nil {
 			go func() {
@@ -1133,14 +1159,16 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewJobKillTool(c.bgManager),
 		tools.NewMonitorTool(c.bgManager),
 		tools.NewScheduleWakeupTool(c.cfg.Config().Options.DataDirectory),
+		tools.NewDagRunTool(c.permissions, c.cfg.WorkingDir()),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
-		tools.NewSearchTool(c.permissions, c.cfg.WorkingDir()),
+		tools.NewFdTool(c.permissions, c.cfg.WorkingDir()),
 		tools.NewRgTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Rg),
 		tools.NewAstGrepTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.AstGrep),
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
+		tools.NewRunTool(c.permissions, c.cfg.WorkingDir()),
 		tools.NewSourcegraphTool(nil),
 		tools.NewNuTool(c.permissions, c.cfg.WorkingDir()),
 		tools.NewTodosTool(c.sessions),
@@ -1258,6 +1286,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// itself is still wrapped from the brain's side.
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
 	filteredTools = wrapToolsWithTimeout(filteredTools, 60*time.Second)
+	filteredTools = wrapToolsWithTrace(filteredTools)
 
 	if c.runtime != nil {
 		for _, tool := range filteredTools {
@@ -1869,8 +1898,22 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 		slog.Error("Failed to refresh OAuth2 token before summarize. Proceeding with existing token.", "error", err)
 	}
 
+	model := c.currentAgent.Model()
+	taskRuntime := c.newTaskRuntime(sessionID)
+	c.setLastRuntime(taskRuntime)
+	traceCtx := tools.WithTraceContext(
+		ctx,
+		taskRuntime,
+		"conversation_compaction",
+		"",
+		string(scheduler.ProfileBrainAgent),
+		model.ModelCfg.Provider,
+		string(model.ProviderType),
+		model.ModelCfg.Model,
+	)
+
 	summarize := func() error {
-		return c.currentAgent.Summarize(ctx, sessionID, getProviderOptions(sessionID, c.currentAgent.Model(), providerCfg, false))
+		return c.currentAgent.Summarize(traceCtx, sessionID, getProviderOptions(sessionID, model, providerCfg, false))
 	}
 
 	err := summarize()
@@ -1881,6 +1924,23 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 	}
 
 	return err
+}
+
+func (c *coordinator) refreshAgentSystemPrompt(ctx context.Context, agentName string, agent SessionAgent) error {
+	if agent == nil {
+		return nil
+	}
+	p, err := promptForAgentRole(agentName, agentprompt.WithWorkingDir(c.cfg.WorkingDir()))
+	if err != nil {
+		return err
+	}
+	model := agent.Model()
+	systemPrompt, err := p.Build(ctx, model.Model.Provider(), model.Model.Model(), c.cfg)
+	if err != nil {
+		return err
+	}
+	agent.SetSystemPrompt(systemPrompt)
+	return nil
 }
 
 // refreshTokenIfExpired proactively refreshes the OAuth token if it has expired.
@@ -2020,6 +2080,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 			FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
 			PresencePenalty:  model.ModelCfg.PresencePenalty,
 			NonInteractive:   true,
+			ReadOnly:         node.Mode == scheduler.TaskReadOnly,
 			TraceRuntime:     taskRuntime,
 			TaskNodeID:       node.ID,
 			TaskParentID:     nodeParentIDForCall(node),
@@ -2199,9 +2260,111 @@ func (c *coordinator) ensureChildTask(taskScheduler *scheduler.AgentScheduler, p
 	return node
 }
 
+func (c *coordinator) attachAutoExplorePreflight(taskScheduler *scheduler.AgentScheduler, root *scheduler.TaskNode, prompt string, maxTokens int64, rootProfile scheduler.WorkerProfile, readOnlyTurn bool) bool {
+	if c == nil || taskScheduler == nil || root == nil {
+		return false
+	}
+	if rootProfile != scheduler.ProfileBrainAgent || !readOnlyTurn || !promptNeedsExplorePreflight(prompt) {
+		return false
+	}
+	if c.agentForProfile(scheduler.ProfileExploreAgent) == nil {
+		return false
+	}
+
+	exploreGoal := buildAutoExplorePrompt(prompt, c.cfg.WorkingDir())
+	exploreNode := taskScheduler.SpawnChild(root, "", exploreGoal, scheduler.ProfileExploreAgent, nil, "Return repository facts, exact file paths, and open risks.")
+	if exploreNode == nil {
+		return false
+	}
+	exploreNode.Kind, exploreNode.Mode = taskKindAndModeForProfile(scheduler.ProfileExploreAgent)
+	exploreNode.Intent.BudgetTokens = int(maxTokens)
+
+	brainNode := taskScheduler.SpawnChild(root, "", prompt, scheduler.ProfileBrainAgent, nil, "Synthesize the final answer from the explore preflight and direct evidence.")
+	if brainNode == nil {
+		return false
+	}
+	brainNode.Kind, brainNode.Mode = taskKindAndModeForProfile(scheduler.ProfileBrainAgent)
+	brainNode.Mode = scheduler.TaskReadOnly
+	brainNode.Intent.BudgetTokens = int(maxTokens)
+	brainNode.Deps = []*scheduler.TaskNode{exploreNode}
+	return true
+}
+
+func buildAutoExplorePrompt(prompt, workingDir string) string {
+	return strings.TrimSpace(fmt.Sprintf(`Read-only repository exploration preflight.
+Use fd, rg, view, ast_grep, read-only LSP tools, or read-only dag_run nodes in parallel where useful.
+Do not edit files, write memories, restart services, or run mutating shell commands.
+
+Working directory:
+%s
+
+User task:
+%s
+
+Return only high-signal findings: relevant entry points, likely files/functions, evidence, and unresolved risks.`, workingDir, prompt))
+}
+
+func promptRequestsReadOnly(prompt string) bool {
+	text := strings.ToLower(strings.TrimSpace(prompt))
+	if text == "" {
+		return false
+	}
+	needles := []string{
+		"只做评估",
+		"只评估",
+		"不修改文件",
+		"不要修改",
+		"不要写",
+		"别修改",
+		"别写",
+		"禁止修改",
+		"禁止写入",
+		"只读",
+		"read-only",
+		"readonly",
+		"do not modify",
+		"don't modify",
+		"no edits",
+		"no file changes",
+		"without editing",
+	}
+	for _, needle := range needles {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func promptNeedsExplorePreflight(prompt string) bool {
+	text := strings.ToLower(strings.TrimSpace(prompt))
+	if text == "" {
+		return false
+	}
+	score := 0
+	groups := [][]string{
+		{"分析", "评估", "定位", "排查", "诊断", "探索", "梳理", "design", "analyze", "diagnose", "investigate"},
+		{"仓库", "代码库", "repo", "repository", "codebase", "架构", "入口", "依赖"},
+		{"bug", "问题", "错误", "crash", "panic", "性能热点", "hotspot", "llvm", "ir", "codegen"},
+		{"/", ".go", ".nim", ".rs", ".ts", ".py"},
+	}
+	for _, group := range groups {
+		for _, needle := range group {
+			if strings.Contains(text, needle) {
+				score++
+				break
+			}
+		}
+	}
+	if len([]rune(text)) > 80 {
+		score++
+	}
+	return score >= 3
+}
+
 func normalizeSubAgentProfile(profile scheduler.WorkerProfile) scheduler.WorkerProfile {
 	switch profile {
-	case scheduler.ProfileExploreAgent, scheduler.ProfilePlanAgent, scheduler.ProfileWorkerAgent:
+	case scheduler.ProfileExploreAgent, scheduler.ProfilePlanAgent, scheduler.ProfileWorkerAgent, scheduler.ProfileAuditorAgent, scheduler.ProfileBrainAgent:
 		return profile
 	default:
 		return scheduler.ProfileWorkerAgent
@@ -2210,7 +2373,7 @@ func normalizeSubAgentProfile(profile scheduler.WorkerProfile) scheduler.WorkerP
 
 func taskKindAndModeForProfile(profile scheduler.WorkerProfile) (scheduler.TaskKind, scheduler.TaskMode) {
 	switch profile {
-	case scheduler.ProfilePlanAgent:
+	case scheduler.ProfilePlanAgent, scheduler.ProfileAuditorAgent:
 		return scheduler.TaskPlan, scheduler.TaskReadOnly
 	case scheduler.ProfileExploreAgent:
 		return scheduler.TaskExplore, scheduler.TaskReadOnly
@@ -2569,7 +2732,11 @@ func (c *coordinator) triggerMemoryExtraction(ctx context.Context, sessionID str
 		return
 	}
 
-	memoryDir := filepath.Join(c.cfg.Config().Options.DataDirectory, "projects", memdir.WorkspaceSlug(c.cfg.WorkingDir()), "memory")
+	memoryDir := memdir.MemoryDir(c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir())
+	if err := memdir.EnsureWorkspace(c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()); err != nil {
+		slog.Debug("Failed to ensure memory workspace", "session", sessionID, "error", err)
+		return
+	}
 
 	if hasMemoryWrites(msgs, memoryDir) {
 		slog.Debug("Skipping memory extraction — turn already wrote memories", "session", sessionID)
@@ -2582,16 +2749,45 @@ func (c *coordinator) triggerMemoryExtraction(ctx context.Context, sessionID str
 		return
 	}
 
-	extractionPrompt := `You are a background memory extraction agent. Your job is to extract durable learning and project-specific setup/preferences from the conversation and update the workspace memories under the memory/ folder.
-Identify:
-1. Build, test, and lint commands that were run or defined.
-2. Custom settings or developer preferences.
-3. Code patterns, conventions, or design decisions discussed or implemented.
-4. Open risks, key files to watch, or next steps.
+	headers, scanErr := memdir.ScanMemoryFiles(ctx, c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir())
+	if scanErr != nil {
+		slog.Debug("Failed to scan memory manifest", "session", sessionID, "error", scanErr)
+	}
+	manifest := memdir.FormatMemoryManifest(headers)
+	extractionPrompt := `You are the background memory extraction agent for this Crush workspace.
 
-Use the ` + "`search`" + `, ` + "`rg`" + `, ` + "`view`" + `, ` + "`write`" + `, and ` + "`edit`" + ` tools to inspect the memory directory and MEMORY.md and write or update the memories.
-Only write files under the memory directory. Do not make any edits or writes outside of the memory directory. Do not use bash tools to run mutating commands.
-If there are no new learnings, setup, or preferences to record, do not write any files and simply reply.`
+Analyze only the recent conversation since the last user request. Persist durable, future-useful information into the workspace memory directory:
+` + memoryDir + `
+
+Existing memory files:
+` + manifest + `
+
+Save memories with this structure:
+1. Write each memory to its own semantic topic file next to MEMORY.md using frontmatter:
+---
+name: short-slug
+description: one-line summary
+metadata:
+  type: user | feedback | project | reference
+---
+2. Add a one-line pointer to MEMORY.md: - [Title](file.md) — one-line hook
+
+Memory categories:
+- user: stable user preferences, operating style, long-lived constraints.
+- feedback: corrections the user made about agent behavior.
+- project: repository-specific commands, architecture decisions, recurring workflows.
+- reference: external facts or tool usage notes that are not obvious from code.
+
+Efficiency rules:
+- Do not investigate source code to verify the conversation. Use only the conversation and existing memory manifest.
+- If updating existing files, issue all needed view calls in one turn, then all write/edit calls in one turn.
+- Do not create duplicate memories; update the existing topic when possible.
+- Keep MEMORY.md an index, not a dump. Each index line stays under ~150 characters.
+- If there is nothing durable to save, write nothing and reply briefly.
+
+Tool policy:
+- Allowed: fd, rg, view, write, edit inside the memory directory.
+- Forbidden: writes outside the memory directory, mutating shell, agent spawning, unrelated tools.`
 
 	slog.Debug("Starting background memory extraction", "session", sessionID)
 
@@ -2643,6 +2839,64 @@ func hasMemoryWrites(msgs []message.Message, memoryDir string) bool {
 		}
 	}
 	return false
+}
+
+func (c *coordinator) relevantMemoryAttachments(ctx context.Context, sessionID, prompt string) []message.Attachment {
+	if !memoryRecallPromptEligible(prompt) {
+		return nil
+	}
+	dataDir := c.cfg.Config().Options.DataDirectory
+	workingDir := c.cfg.WorkingDir()
+	alreadySurfaced := map[string]struct{}{}
+	if msgs, err := c.messages.List(ctx, sessionID); err == nil {
+		memoryDir := filepath.Clean(memdir.MemoryDir(dataDir, workingDir))
+		for _, msg := range msgs {
+			for _, part := range msg.Parts {
+				bin, ok := part.(message.BinaryContent)
+				if !ok || bin.Path == "" {
+					continue
+				}
+				cleanPath := filepath.Clean(bin.Path)
+				if strings.HasPrefix(cleanPath, memoryDir) {
+					alreadySurfaced[cleanPath] = struct{}{}
+				}
+			}
+		}
+	}
+	memories, err := memdir.FindRelevantMemories(ctx, dataDir, workingDir, prompt, alreadySurfaced)
+	if err != nil {
+		slog.Debug("Relevant memory recall failed", "session", sessionID, "error", err)
+		return nil
+	}
+	if len(memories) == 0 {
+		return nil
+	}
+	attachments := make([]message.Attachment, 0, len(memories))
+	for _, memory := range memories {
+		content := fmt.Sprintf(
+			"Cross-session relevant memory. Use it only when it helps the current request.\n\nMemory: %s\nType: %s\nDescription: %s\n\n%s",
+			memory.Header.Path,
+			memory.Header.Type,
+			memory.Header.Description,
+			memory.Content,
+		)
+		attachments = append(attachments, message.Attachment{
+			FilePath: memory.Header.Path,
+			FileName: memory.Header.Filename,
+			MimeType: "text/markdown",
+			Content:  []byte(content),
+		})
+	}
+	slog.Debug("Attached relevant memories", "session", sessionID, "count", len(attachments))
+	return attachments
+}
+
+func memoryRecallPromptEligible(prompt string) bool {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return false
+	}
+	return strings.ContainsFunc(prompt, unicode.IsSpace) || len([]rune(prompt)) >= 12
 }
 
 type aliasTool struct {

@@ -10,7 +10,7 @@ PROMPT="${PROMPT:-Please use the 'agent' tool to delegate all parts of this task
 
 log "starting crush against WaitAI"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --trace-file $TRACE" \
+  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
   | tee -a "$LOG"
 
 log "waiting for landing"
@@ -24,14 +24,17 @@ log "waiting for brain_agent / worker_agent / explore_agent flow"
 "$TUI" expect "$SESS" 'Task started|Plan' 30
 
 log "waiting for completion(verify 步骤的 ✓ 或最终 ◇ 完成不带秒数)"
-# crush 完成 verify 步骤后,最后一个 ◇ 没有 "Ns" 后缀。给 120s 上限。
+# crush 完成 verify 步骤后,最后一个 ◇ 没有 "Ns" 后缀。给 240s 上限。
 last_snapshot=""
-for i in $(seq 1 120); do
+stable_count=0
+for i in $(seq 1 240); do
   cur=$("$TUI" text "$SESS" 2>/dev/null | tail -25)
-  # 验证完成标志:有 ✓ 任何字符(verify 输出 / tool 完成),或者底部 hint 出现 ctrl+c
-  # 且整屏 60s 内不再变化(LLM 不在 streaming)
-  if echo "$cur" | grep -qE '✓|✗|completed|Task finished|Sautéed for' \
-     && [[ "$cur" == "$last_snapshot" ]]; then
+  if [[ -n "$cur" && "$cur" == "$last_snapshot" ]]; then
+    stable_count=$((stable_count+1))
+  else
+    stable_count=0
+  fi
+  if (( stable_count >= 3 )) && echo "$cur" | tail -5 | grep -q 'Ready'; then
     log "  completion marker seen + 屏幕稳定 at t+${i}s"
     break
   fi

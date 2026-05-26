@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/message"
@@ -82,7 +83,7 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 					} else {
 						headerText = fmt.Sprintf("created %d todos", meta.Total)
 					}
-					body = FormatTodosList(sty, meta.Todos, styles.ArrowRightIcon, cappedWidth)
+					body = FormatTodosList(sty, meta.Todos, cappedWidth)
 				} else {
 					// Build header based on what changed.
 					hasCompleted := len(meta.JustCompleted) > 0
@@ -108,9 +109,9 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 					// Build body with details.
 					if allCompleted {
 						// Show all todos when all are completed, like when created.
-						body = FormatTodosList(sty, meta.Todos, styles.ArrowRightIcon, cappedWidth)
+						body = FormatTodosList(sty, meta.Todos, cappedWidth)
 					} else if meta.JustStarted != "" {
-						body = sty.Tool.TodoInProgressIcon.Render(styles.ArrowRightIcon+" ") +
+						body = RenderTodoInProgressIcon(sty) + " " +
 							sty.Tool.TodoJustStarted.Render(meta.JustStarted)
 					}
 				}
@@ -135,9 +136,37 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	return joinToolParts(header, sty.Tool.Body.Render(body))
 }
 
+const todoInProgressBlinkInterval = 450 * time.Millisecond
+
+// RenderTodoInProgressIcon alternates between the pending empty box and the
+// completed solid box so running todos read as active without changing width.
+func RenderTodoInProgressIcon(sty *styles.Styles) string {
+	frame := time.Now().UnixMilli() / todoInProgressBlinkInterval.Milliseconds()
+	if frame%2 == 0 {
+		return sty.Tool.TodoPendingIcon.Render(styles.TodoPendingIcon)
+	}
+	return sty.Tool.TodoInProgressIcon.Render(styles.TodoInProgressIcon)
+}
+
 // FormatTodosList formats a list of todos for display.
-func FormatTodosList(sty *styles.Styles, todos []session.Todo, inProgressIcon string, width int) string {
+func FormatTodosList(sty *styles.Styles, todos []session.Todo, width int) string {
+	return formatTodosList(sty, todos, width, 0)
+}
+
+// FormatTodosListWithLimit formats todos, clipping the body to maxLines and
+// replacing overflow with a compact status summary.
+func FormatTodosListWithLimit(sty *styles.Styles, todos []session.Todo, width int, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	return formatTodosList(sty, todos, width, maxLines)
+}
+
+func formatTodosList(sty *styles.Styles, todos []session.Todo, width int, maxLines int) string {
 	if len(todos) == 0 {
+		return ""
+	}
+	if width <= 0 {
 		return ""
 	}
 
@@ -145,48 +174,103 @@ func FormatTodosList(sty *styles.Styles, todos []session.Todo, inProgressIcon st
 	copy(sorted, todos)
 	sortTodos(sorted)
 
+	visibleLineBudget := maxLines
+	if maxLines > 0 && todosRenderedLineCount(sorted) > maxLines && maxLines > 1 {
+		visibleLineBudget = maxLines - 1
+	}
+
 	var lines []string
+	var hidden []session.Todo
 	for _, todo := range sorted {
-		var prefix string
-		textStyle := sty.Tool.TodoItem
-
-		switch todo.Status {
-		case session.TodoStatusCompleted:
-			prefix = sty.Tool.TodoCompletedIcon.Render(styles.TodoCompletedIcon) + " "
-			textStyle = textStyle.Faint(true)
-		case session.TodoStatusInProgress:
-			prefix = sty.Tool.TodoInProgressIcon.Render(styles.TodoInProgressIcon) + " "
-			textStyle = textStyle.Bold(true)
-		case session.TodoStatusFailed:
-			prefix = sty.Tool.TodoFailedIcon.Render(styles.TodoFailedIcon) + " "
-			textStyle = textStyle.Foreground(sty.Tool.TodoFailedIcon.GetForeground())
-		default:
-			prefix = sty.Tool.TodoPendingIcon.Render(styles.TodoPendingIcon) + " "
+		todoLines := formatTodoItemLines(sty, todo, width)
+		if visibleLineBudget > 0 && len(lines)+len(todoLines) > visibleLineBudget {
+			hidden = append(hidden, todo)
+			continue
 		}
+		lines = append(lines, todoLines...)
+	}
 
-		subjectLine := prefix + textStyle.Render(todo.Content)
-		subjectLine = ansi.Truncate(subjectLine, width, "…")
-
-		var itemBlock string
-		if todo.Status == session.TodoStatusInProgress && todo.ActiveForm != "" {
-			activity := todo.ActiveForm
-			if !strings.HasSuffix(activity, "…") && !strings.HasSuffix(activity, "...") {
-				activity += "…"
-			}
-			activityLine := "  " + sty.Tool.TodoItem.Faint(true).Render(activity)
-			activityLine = ansi.Truncate(activityLine, width, "…")
-			itemBlock = subjectLine + "\n" + activityLine
-		} else {
-			itemBlock = subjectLine
+	if maxLines > 0 && len(hidden) > 0 {
+		summary := ansi.Truncate(formatHiddenTodosSummary(sty, hidden), width, "…")
+		if len(lines) < maxLines {
+			lines = append(lines, summary)
+		} else if len(lines) > 0 {
+			lines[len(lines)-1] = summary
 		}
-
-		lines = append(lines, itemBlock)
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-// sortTodos sorts todos by status: completed, in_progress, pending.
+func todosRenderedLineCount(todos []session.Todo) int {
+	count := len(todos)
+	for _, todo := range todos {
+		if todo.Status == session.TodoStatusInProgress && todo.ActiveForm != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func formatTodoItemLines(sty *styles.Styles, todo session.Todo, width int) []string {
+	var prefix string
+	textStyle := sty.Tool.TodoItem
+
+	switch todo.Status {
+	case session.TodoStatusCompleted:
+		prefix = sty.Tool.TodoCompletedIcon.Render(styles.TodoCompletedIcon) + " "
+		textStyle = textStyle.Faint(true)
+	case session.TodoStatusInProgress:
+		prefix = RenderTodoInProgressIcon(sty) + " "
+		textStyle = textStyle.Bold(true)
+	case session.TodoStatusFailed:
+		prefix = sty.Tool.TodoFailedIcon.Render(styles.TodoFailedIcon) + " "
+		textStyle = textStyle.Foreground(sty.Tool.TodoFailedIcon.GetForeground())
+	default:
+		prefix = sty.Tool.TodoPendingIcon.Render(styles.TodoPendingIcon) + " "
+	}
+
+	subjectLine := prefix + textStyle.Render(todo.Content)
+	subjectLine = ansi.Truncate(subjectLine, width, "…")
+	lines := []string{subjectLine}
+
+	if todo.Status == session.TodoStatusInProgress && todo.ActiveForm != "" {
+		activity := todo.ActiveForm
+		if !strings.HasSuffix(activity, "…") && !strings.HasSuffix(activity, "...") {
+			activity += "…"
+		}
+		activityLine := "  " + sty.Tool.TodoItem.Faint(true).Render(activity)
+		activityLine = ansi.Truncate(activityLine, width, "…")
+		lines = append(lines, activityLine)
+	}
+
+	return lines
+}
+
+func formatHiddenTodosSummary(sty *styles.Styles, todos []session.Todo) string {
+	hiddenByStatus := map[session.TodoStatus]int{}
+	for _, todo := range todos {
+		hiddenByStatus[todo.Status]++
+	}
+
+	var parts []string
+	if count := hiddenByStatus[session.TodoStatusInProgress]; count > 0 {
+		parts = append(parts, fmt.Sprintf("%d in progress", count))
+	}
+	if count := hiddenByStatus[session.TodoStatusPending]; count > 0 {
+		parts = append(parts, fmt.Sprintf("%d pending", count))
+	}
+	if count := hiddenByStatus[session.TodoStatusFailed]; count > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", count))
+	}
+	if count := hiddenByStatus[session.TodoStatusCompleted]; count > 0 {
+		parts = append(parts, fmt.Sprintf("%d completed", count))
+	}
+
+	return sty.Tool.TodoStatusNote.Render("… +" + strings.Join(parts, ", "))
+}
+
+// sortTodos sorts todos so active and open work stays visible first.
 func sortTodos(todos []session.Todo) {
 	slices.SortStableFunc(todos, func(a, b session.Todo) int {
 		return statusOrder(a.Status) - statusOrder(b.Status)
@@ -196,13 +280,15 @@ func sortTodos(todos []session.Todo) {
 // statusOrder returns the sort order for a todo status.
 func statusOrder(s session.TodoStatus) int {
 	switch s {
-	case session.TodoStatusCompleted:
-		return 0
 	case session.TodoStatusInProgress:
+		return 0
+	case session.TodoStatusPending:
 		return 1
 	case session.TodoStatusFailed:
 		return 2
-	default:
+	case session.TodoStatusCompleted:
 		return 3
+	default:
+		return 4
 	}
 }

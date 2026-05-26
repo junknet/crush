@@ -17,11 +17,11 @@ source "$(dirname "$0")/../common.sh"
 need_tui
 need_waitai
 
-PROMPT="${PROMPT:-I need you to verify whether the file 'acceptance-probe-file-does-not-exist.txt' exists in this repository. Use the 'agent' tool to delegate this check to an explore agent (role='explore'). The explore agent should use the bash tool to run \`ls acceptance-probe-file-does-not-exist.txt\` — this command will return exit code 2 because the file is absent, and that non-zero exit is the expected verification signal (we are confirming the file is NOT there). After the explore agent reports back, simply reply 'file absent, as expected' in one short sentence. Do NOT create the file.}"
+PROMPT="${PROMPT:-Please run a check. Use the 'agent' tool to delegate a task to an explore agent (role='explore'). The explore agent MUST use the bash tool to run ONLY the command \`exit 2\` to simulate a failure. The explore agent must NOT run any other command. After the explore agent reports back that the command failed with exit code 2, reply with 'task failed as expected' in one short sentence.}"
 
 log "starting crush against WaitAI"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --trace-file $TRACE" \
+  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
   | tee -a "$LOG"
 
 log "waiting for landing"
@@ -36,10 +36,15 @@ log "waiting for delegation flow"
 
 log "waiting for completion"
 last_snapshot=""
+stable_count=0
 for i in $(seq 1 120); do
   cur=$("$TUI" text "$SESS" 2>/dev/null | tail -25)
-  if echo "$cur" | grep -qE '✓|✗|completed|Task finished|Sautéed for|不存在|nonexistent|No such file' \
-     && [[ "$cur" == "$last_snapshot" ]]; then
+  if [[ -n "$cur" && "$cur" == "$last_snapshot" ]]; then
+    stable_count=$((stable_count+1))
+  else
+    stable_count=0
+  fi
+  if (( stable_count >= 3 )) && echo "$cur" | tail -5 | grep -q 'Ready'; then
     log "  completion + 屏幕稳定 at t+${i}s"
     break
   fi

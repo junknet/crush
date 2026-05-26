@@ -1,11 +1,25 @@
 package runtime
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/pubsub"
 )
+
+var traceBroker = pubsub.NewBroker[TaskTrace]()
+
+// SubscribeTraceEvents returns runtime trace entries as they are appended.
+func SubscribeTraceEvents(ctx context.Context) <-chan pubsub.Event[TaskTrace] {
+	return traceBroker.Subscribe(ctx)
+}
+
+// PublishTraceEvent emits a runtime trace entry to UI and app subscribers.
+func PublishTraceEvent(entry TaskTrace) {
+	traceBroker.Publish(pubsub.UpdatedEvent, entry)
+}
 
 // EventBus is the runtime callback used to surface semantic events.
 type EventBus func(tea.Msg)
@@ -262,7 +276,6 @@ func (s *RuntimeSession) AppendTrace(entry TaskTrace) TaskTrace {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if entry.ConversationSessionID == "" {
 		entry.ConversationSessionID = s.sessionID
@@ -279,6 +292,9 @@ func (s *RuntimeSession) AppendTrace(entry TaskTrace) TaskTrace {
 
 	entry.Scope = append([]string(nil), entry.Scope...)
 	s.trace = append(s.trace, entry)
+	s.mu.Unlock()
+
+	PublishTraceEvent(entry)
 	return entry
 }
 

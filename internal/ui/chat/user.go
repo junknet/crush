@@ -139,3 +139,12 @@ func (m *UserMessageItem) HandleKeyEvent(key tea.KeyMsg) (bool, tea.Cmd) {
 	}
 	return false, nil
 }
+
+// DoubleClickCopyText returns the original user input for block-level copy.
+func (m *UserMessageItem) DoubleClickCopyText() (string, string, bool) {
+	text := m.message.Content().Text
+	if strings.TrimSpace(text) == "" {
+		return "", "", false
+	}
+	return text, "Input copied to clipboard", true
+}

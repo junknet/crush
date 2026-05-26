@@ -1,6 +1,6 @@
 Search and optionally rewrite code using Abstract Syntax Tree (AST) patterns via `ast-grep`.
 
-This tool is much more powerful than `grep` for code because it understands the structure of the source code. It can match nested expressions, handle comments/whitespace flexibly, and even perform structural rewrites.
+This tool is much more powerful than `rg` for code because it understands the structure of the source code. It can match nested expressions, handle comments/whitespace flexibly, and even perform structural rewrites.
 
 ### Parameters:
 - `pattern`: The AST pattern to search for (e.g., `fmt.Println($MSG)`). Use `$` followed by a name to create a "metavariable" that matches any AST node.

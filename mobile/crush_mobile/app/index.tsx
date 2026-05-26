@@ -360,517 +360,613 @@ function isType(word: string, lang: string): boolean {
 }
 
 // Sub-component to render code with advanced syntax highlighting mimicking Tree-sitter
-const renderHighlightedCode = (code: string, lang: string) => {
-    const normalizedLang = (lang || '').toLowerCase().trim()
-    const lines = code.split('\n')
-    const tokenizedLines: Token[][] = []
+const HighlightedCode = React.memo(
+    ({ code, lang }: { code: string; lang: string }) => {
+        const normalizedLang = (lang || '').toLowerCase().trim()
+        const lines = code.split('\n')
+        const tokenizedLines: Token[][] = []
 
-    let state: ParseState = { type: 'normal' }
+        let state: ParseState = { type: 'normal' }
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]
-        const lineTokens: Token[] = []
-        let index = 0
-        let lastNonWsToken: Token | null = null
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i]
+            const lineTokens: Token[] = []
+            let index = 0
+            let lastNonWsToken: Token | null = null
 
-        while (index < line.length) {
-            const remaining = line.substring(index)
+            while (index < line.length) {
+                const remaining = line.substring(index)
 
-            // 1. Handle Block Comment state
-            if (state.type === 'comment_block') {
-                const endIdx = remaining.indexOf(state.endDelimiter)
-                if (endIdx !== -1) {
-                    const commentText = remaining.substring(0, endIdx + state.endDelimiter.length)
-                    const tok: Token = { text: commentText, type: 'comment' }
-                    lineTokens.push(tok)
-                    index += endIdx + state.endDelimiter.length
-                    state = { type: 'normal' }
-                    lastNonWsToken = tok
-                } else {
-                    const tok: Token = { text: remaining, type: 'comment' }
-                    lineTokens.push(tok)
-                    index += remaining.length
-                }
-                continue
-            }
-
-            // 2. Handle Multi-line String state
-            if (state.type === 'string_block') {
-                const endIdx = remaining.indexOf(state.endDelimiter)
-                if (endIdx !== -1) {
-                    const stringText = remaining.substring(0, endIdx + state.endDelimiter.length)
-                    const tok: Token = { text: stringText, type: 'string' }
-                    lineTokens.push(tok)
-                    index += endIdx + state.endDelimiter.length
-                    state = { type: 'normal' }
-                    lastNonWsToken = tok
-                } else {
-                    const tok: Token = { text: remaining, type: 'string' }
-                    lineTokens.push(tok)
-                    index += remaining.length
-                }
-                continue
-            }
-
-            // 3. Match Whitespace
-            const wsMatch = remaining.match(/^(\s+)/)
-            if (wsMatch) {
-                lineTokens.push({ text: wsMatch[0], type: 'plain' })
-                index += wsMatch[0].length
-                continue
-            }
-
-            // 4. Handle comment block initiation
-            if (
-                [
-                    'javascript',
-                    'js',
-                    'typescript',
-                    'ts',
-                    'jsx',
-                    'tsx',
-                    'go',
-                    'golang',
-                    'css',
-                    'scss',
-                    'rust',
-                    'rs',
-                ].includes(normalizedLang)
-            ) {
-                if (remaining.startsWith('/*')) {
-                    state = { type: 'comment_block', endDelimiter: '*/' }
-                    const tok: Token = { text: '/*', type: 'comment' }
-                    lineTokens.push(tok)
-                    index += 2
-                    lastNonWsToken = tok
-                    continue
-                }
-            } else if (normalizedLang === 'html' || normalizedLang === 'xml') {
-                if (remaining.startsWith('<!--')) {
-                    state = { type: 'comment_block', endDelimiter: '-->' }
-                    const tok: Token = { text: '<!--', type: 'comment' }
-                    lineTokens.push(tok)
-                    index += 4
-                    lastNonWsToken = tok
-                    continue
-                }
-            }
-
-            // 5. Handle multi-line string block initiation
-            if (normalizedLang === 'python' || normalizedLang === 'py') {
-                if (remaining.startsWith('"""')) {
-                    state = { type: 'string_block', endDelimiter: '"""' }
-                    const tok: Token = { text: '"""', type: 'string' }
-                    lineTokens.push(tok)
-                    index += 3
-                    lastNonWsToken = tok
-                    continue
-                }
-                if (remaining.startsWith("'''")) {
-                    state = { type: 'string_block', endDelimiter: "'''" }
-                    const tok: Token = { text: "'''", type: 'string' }
-                    lineTokens.push(tok)
-                    index += 3
-                    lastNonWsToken = tok
-                    continue
-                }
-            } else if (
-                ['javascript', 'js', 'typescript', 'ts', 'jsx', 'tsx', 'go', 'golang'].includes(
-                    normalizedLang
-                )
-            ) {
-                if (remaining.startsWith('`')) {
-                    state = { type: 'string_block', endDelimiter: '`' }
-                    const tok: Token = { text: '`', type: 'string' }
-                    lineTokens.push(tok)
-                    index += 1
-                    lastNonWsToken = tok
-                    continue
-                }
-            }
-
-            let matched = false
-
-            // HTML / XML tag parsing
-            if (
-                normalizedLang === 'html' ||
-                normalizedLang === 'xml' ||
-                normalizedLang === 'jsx' ||
-                normalizedLang === 'tsx'
-            ) {
-                const tagMatch = remaining.match(/^<\/?[a-zA-Z][a-zA-Z0-9_-]*/)
-                if (tagMatch) {
-                    const tok: Token = { text: tagMatch[0], type: 'tag' }
-                    lineTokens.push(tok)
-                    index += tagMatch[0].length
-                    matched = true
-                    lastNonWsToken = tok
-                    continue
-                }
-                const tagEndMatch = remaining.match(/^(\/>|>)/)
-                if (tagEndMatch) {
-                    const tok: Token = { text: tagEndMatch[0], type: 'tag' }
-                    lineTokens.push(tok)
-                    index += tagEndMatch[0].length
-                    matched = true
-                    lastNonWsToken = tok
-                    continue
-                }
-                const attrMatch = remaining.match(/^([a-zA-Z0-9_-]+)=/)
-                if (attrMatch) {
-                    const tok: Token = { text: attrMatch[1], type: 'attr' }
-                    lineTokens.push(tok)
-                    lineTokens.push({ text: '=', type: 'operator' })
-                    index += attrMatch[0].length
-                    matched = true
-                    lastNonWsToken = tok
-                    continue
-                }
-            }
-
-            // Single-line Comments
-            if (
-                remaining.startsWith('//') &&
-                normalizedLang !== 'python' &&
-                normalizedLang !== 'py'
-            ) {
-                const tok: Token = { text: remaining, type: 'comment' }
-                lineTokens.push(tok)
-                index += remaining.length
-                matched = true
-                lastNonWsToken = tok
-                continue
-            }
-            if (
-                remaining.startsWith('#') &&
-                (normalizedLang === 'python' ||
-                    normalizedLang === 'py' ||
-                    normalizedLang === 'bash' ||
-                    normalizedLang === 'shell' ||
-                    normalizedLang === 'sh' ||
-                    normalizedLang === 'zsh' ||
-                    normalizedLang === 'nim')
-            ) {
-                const tok: Token = { text: remaining, type: 'comment' }
-                lineTokens.push(tok)
-                index += remaining.length
-                matched = true
-                lastNonWsToken = tok
-                continue
-            }
-
-            // Single-line Strings
-            const strMatch = remaining.match(/^("(\\.|[^"\\])*"|'(\\.|[^'\\])*')/)
-            if (strMatch) {
-                const tok: Token = { text: strMatch[0], type: 'string' }
-                lineTokens.push(tok)
-                index += strMatch[0].length
-                matched = true
-                lastNonWsToken = tok
-                continue
-            }
-
-            // Regex Literal in JS/TS
-            if (
-                (normalizedLang === 'javascript' ||
-                    normalizedLang === 'js' ||
-                    normalizedLang === 'typescript' ||
-                    normalizedLang === 'ts' ||
-                    normalizedLang === 'jsx' ||
-                    normalizedLang === 'tsx') &&
-                remaining.startsWith('/')
-            ) {
-                const isRegexStart =
-                    !lastNonWsToken ||
-                    lastNonWsToken.type === 'operator' ||
-                    (lastNonWsToken.type === 'keyword' &&
-                        /^(return|yield|throw|typeof|instanceof|case|else|do)$/.test(
-                            lastNonWsToken.text
-                        ))
-
-                if (isRegexStart) {
-                    const regexMatch = remaining.match(/^\/(\\.|[^\/\n\\])+\/[gimuyvd]*/)
-                    if (regexMatch) {
-                        const tok: Token = { text: regexMatch[0], type: 'regex' }
+                // 1. Handle Block Comment state
+                if (state.type === 'comment_block') {
+                    const endIdx = remaining.indexOf(state.endDelimiter)
+                    if (endIdx !== -1) {
+                        const commentText = remaining.substring(0, endIdx + state.endDelimiter.length)
+                        const tok: Token = { text: commentText, type: 'comment' }
                         lineTokens.push(tok)
-                        index += regexMatch[0].length
+                        index += endIdx + state.endDelimiter.length
+                        state = { type: 'normal' }
+                        lastNonWsToken = tok
+                    } else {
+                        const tok: Token = { text: remaining, type: 'comment' }
+                        lineTokens.push(tok)
+                        index += remaining.length
+                    }
+                    continue
+                }
+
+                // 2. Handle Multi-line String state
+                if (state.type === 'string_block') {
+                    const endIdx = remaining.indexOf(state.endDelimiter)
+                    if (endIdx !== -1) {
+                        const stringText = remaining.substring(0, endIdx + state.endDelimiter.length)
+                        const tok: Token = { text: stringText, type: 'string' }
+                        lineTokens.push(tok)
+                        index += endIdx + state.endDelimiter.length
+                        state = { type: 'normal' }
+                        lastNonWsToken = tok
+                    } else {
+                        const tok: Token = { text: remaining, type: 'string' }
+                        lineTokens.push(tok)
+                        index += remaining.length
+                    }
+                    continue
+                }
+
+                // 3. Match Whitespace
+                const wsMatch = remaining.match(/^(\s+)/)
+                if (wsMatch) {
+                    lineTokens.push({ text: wsMatch[0], type: 'plain' })
+                    index += wsMatch[0].length
+                    continue
+                }
+
+                // 4. Handle comment block initiation
+                if (
+                    [
+                        'javascript',
+                        'js',
+                        'typescript',
+                        'ts',
+                        'jsx',
+                        'tsx',
+                        'go',
+                        'golang',
+                        'css',
+                        'scss',
+                        'rust',
+                        'rs',
+                    ].includes(normalizedLang)
+                ) {
+                    if (remaining.startsWith('/*')) {
+                        state = { type: 'comment_block', endDelimiter: '*/' }
+                        const tok: Token = { text: '/*', type: 'comment' }
+                        lineTokens.push(tok)
+                        index += 2
+                        lastNonWsToken = tok
+                        continue
+                    }
+                } else if (normalizedLang === 'html' || normalizedLang === 'xml') {
+                    if (remaining.startsWith('<!--')) {
+                        state = { type: 'comment_block', endDelimiter: '-->' }
+                        const tok: Token = { text: '<!--', type: 'comment' }
+                        lineTokens.push(tok)
+                        index += 4
+                        lastNonWsToken = tok
+                        continue
+                    }
+                }
+
+                // 5. Handle multi-line string block initiation
+                if (normalizedLang === 'python' || normalizedLang === 'py') {
+                    if (remaining.startsWith('"""')) {
+                        state = { type: 'string_block', endDelimiter: '"""' }
+                        const tok: Token = { text: '"""', type: 'string' }
+                        lineTokens.push(tok)
+                        index += 3
+                        lastNonWsToken = tok
+                        continue
+                    }
+                    if (remaining.startsWith("'''")) {
+                        state = { type: 'string_block', endDelimiter: "'''" }
+                        const tok: Token = { text: "'''", type: 'string' }
+                        lineTokens.push(tok)
+                        index += 3
+                        lastNonWsToken = tok
+                        continue
+                    }
+                } else if (
+                    ['javascript', 'js', 'typescript', 'ts', 'jsx', 'tsx', 'go', 'golang'].includes(
+                        normalizedLang
+                    )
+                ) {
+                    if (remaining.startsWith('`')) {
+                        state = { type: 'string_block', endDelimiter: '`' }
+                        const tok: Token = { text: '`', type: 'string' }
+                        lineTokens.push(tok)
+                        index += 1
+                        lastNonWsToken = tok
+                        continue
+                    }
+                }
+
+                let matched = false
+
+                // HTML / XML tag parsing
+                if (
+                    normalizedLang === 'html' ||
+                    normalizedLang === 'xml' ||
+                    normalizedLang === 'jsx' ||
+                    normalizedLang === 'tsx'
+                ) {
+                    const tagMatch = remaining.match(/^<\/?[a-zA-Z][a-zA-Z0-9_-]*/)
+                    if (tagMatch) {
+                        const tok: Token = { text: tagMatch[0], type: 'tag' }
+                        lineTokens.push(tok)
+                        index += tagMatch[0].length
+                        matched = true
+                        lastNonWsToken = tok
+                        continue
+                    }
+                    const tagEndMatch = remaining.match(/^(\/>|>)/)
+                    if (tagEndMatch) {
+                        const tok: Token = { text: tagEndMatch[0], type: 'tag' }
+                        lineTokens.push(tok)
+                        index += tagEndMatch[0].length
+                        matched = true
+                        lastNonWsToken = tok
+                        continue
+                    }
+                    const attrMatch = remaining.match(/^([a-zA-Z0-9_-]+)=/)
+                    if (attrMatch) {
+                        const tok: Token = { text: attrMatch[1], type: 'attr' }
+                        lineTokens.push(tok)
+                        lineTokens.push({ text: '=', type: 'operator' })
+                        index += attrMatch[0].length
                         matched = true
                         lastNonWsToken = tok
                         continue
                     }
                 }
-            }
 
-            // Numbers
-            const numMatch = remaining.match(
-                /^(\b0x[0-9a-fA-F_]+\b|\b0b[01_]+\b|\b\d[\d_]*(\.[\d_]+)?([eE][+-]?\d+)?\b)/
-            )
-            if (numMatch) {
-                const tok: Token = { text: numMatch[0], type: 'number' }
-                lineTokens.push(tok)
-                index += numMatch[0].length
-                matched = true
-                lastNonWsToken = tok
-                continue
-            }
+                // Single-line Comments
+                if (
+                    remaining.startsWith('//') &&
+                    normalizedLang !== 'python' &&
+                    normalizedLang !== 'py'
+                ) {
+                    const tok: Token = { text: remaining, type: 'comment' }
+                    lineTokens.push(tok)
+                    index += remaining.length
+                    matched = true
+                    lastNonWsToken = tok
+                    continue
+                }
+                if (
+                    remaining.startsWith('#') &&
+                    (normalizedLang === 'python' ||
+                        normalizedLang === 'py' ||
+                        normalizedLang === 'bash' ||
+                        normalizedLang === 'shell' ||
+                        normalizedLang === 'sh' ||
+                        normalizedLang === 'zsh' ||
+                        normalizedLang === 'nim')
+                ) {
+                    const tok: Token = { text: remaining, type: 'comment' }
+                    lineTokens.push(tok)
+                    index += remaining.length
+                    matched = true
+                    lastNonWsToken = tok
+                    continue
+                }
 
-            // Decorators / Annotations
-            const decMatch = remaining.match(/^(@[a-zA-Z_][a-zA-Z0-9_]*)/)
-            if (decMatch) {
-                const tok: Token = { text: decMatch[0], type: 'keyword' }
-                lineTokens.push(tok)
-                index += decMatch[0].length
-                matched = true
-                lastNonWsToken = tok
-                continue
-            }
+                // Single-line Strings
+                const strMatch = remaining.match(/^("(\\.|[^"\\])*"|'(\\.|[^'\\])*')/)
+                if (strMatch) {
+                    const tok: Token = { text: strMatch[0], type: 'string' }
+                    lineTokens.push(tok)
+                    index += strMatch[0].length
+                    matched = true
+                    lastNonWsToken = tok
+                    continue
+                }
 
-            // Identifiers: keywords, builtins, types, classes, functions, properties, variables
-            const wordMatch = remaining.match(/^([a-zA-Z_][a-zA-Z0-9_]*)/)
-            if (wordMatch) {
-                const word = wordMatch[1]
-                let type: Token['type'] = 'plain'
+                // Regex Literal in JS/TS
+                if (
+                    (normalizedLang === 'javascript' ||
+                        normalizedLang === 'js' ||
+                        normalizedLang === 'typescript' ||
+                        normalizedLang === 'ts' ||
+                        normalizedLang === 'jsx' ||
+                        normalizedLang === 'tsx') &&
+                    remaining.startsWith('/')
+                ) {
+                    const isRegexStart =
+                        !lastNonWsToken ||
+                        lastNonWsToken.type === 'operator' ||
+                        (lastNonWsToken.type === 'keyword' &&
+                            /^(return|yield|throw|typeof|instanceof|case|else|do)$/.test(
+                                lastNonWsToken.text
+                            ))
 
-                if (isKeyword(word, normalizedLang)) {
-                    type = 'keyword'
-                } else if (isBuiltin(word, normalizedLang)) {
-                    type = 'builtin'
-                } else if (isType(word, normalizedLang)) {
-                    type = 'type'
-                } else {
-                    const nextRemaining = remaining.substring(word.length)
-                    const isFuncCall = /^\s*\(/.test(nextRemaining)
-                    const isPropertyAccess = lastNonWsToken && lastNonWsToken.text === '.'
-                    const isPropertyKey =
-                        /^\s*:/.test(nextRemaining) &&
-                        !/^\s*::/.test(nextRemaining) &&
-                        (normalizedLang === 'javascript' ||
-                            normalizedLang === 'js' ||
-                            normalizedLang === 'typescript' ||
-                            normalizedLang === 'ts' ||
-                            normalizedLang === 'json' ||
-                            normalizedLang === 'go' ||
-                            normalizedLang === 'golang')
-
-                    const isClassOrTypeDecl =
-                        lastNonWsToken &&
-                        (lastNonWsToken.text === 'class' ||
-                            lastNonWsToken.text === 'struct' ||
-                            lastNonWsToken.text === 'interface' ||
-                            (lastNonWsToken.text === 'type' && normalizedLang !== 'python'))
-
-                    const isFuncDecl =
-                        lastNonWsToken &&
-                        /^(def|func|fn|proc|template|macro)$/.test(lastNonWsToken.text)
-
-                    if (isClassOrTypeDecl) {
-                        type = 'class'
-                    } else if (isFuncDecl || isFuncCall) {
-                        type = 'function'
-                    } else if (isPropertyAccess || isPropertyKey) {
-                        type = 'property'
-                    } else if (/^[A-Z_][A-Z0-9_]+$/.test(word) && word.length >= 2) {
-                        type = 'constant'
-                    } else if (/^[A-Z][a-zA-Z0-9_]*$/.test(word)) {
-                        type = 'class'
-                    } else {
-                        type = 'plain'
+                    if (isRegexStart) {
+                        const regexMatch = remaining.match(/^\/(\\.|[^\/\n\\])+\/[gimuyvd]*/)
+                        if (regexMatch) {
+                            const tok: Token = { text: regexMatch[0], type: 'regex' }
+                            lineTokens.push(tok)
+                            index += regexMatch[0].length
+                            matched = true
+                            lastNonWsToken = tok
+                            continue
+                        }
                     }
                 }
 
-                const tok: Token = { text: word, type: type }
-                lineTokens.push(tok)
-                index += word.length
-                matched = true
-                lastNonWsToken = tok
-                continue
+                // Numbers
+                const numMatch = remaining.match(
+                    /^(\b0x[0-9a-fA-F_]+\b|\b0b[01_]+\b|\b\d[\d_]*(\.[\d_]+)?([eE][+-]?\d+)?\b)/
+                )
+                if (numMatch) {
+                    const tok: Token = { text: numMatch[0], type: 'number' }
+                    lineTokens.push(tok)
+                    index += numMatch[0].length
+                    matched = true
+                    lastNonWsToken = tok
+                    continue
+                }
+
+                // Decorators / Annotations
+                const decMatch = remaining.match(/^(@[a-zA-Z_][a-zA-Z0-9_]*)/)
+                if (decMatch) {
+                    const tok: Token = { text: decMatch[0], type: 'keyword' }
+                    lineTokens.push(tok)
+                    index += decMatch[0].length
+                    matched = true
+                    lastNonWsToken = tok
+                    continue
+                }
+
+                // Identifiers: keywords, builtins, types, classes, functions, properties, variables
+                const wordMatch = remaining.match(/^([a-zA-Z_][a-zA-Z0-9_]*)/)
+                if (wordMatch) {
+                    const word = wordMatch[1]
+                    let type: Token['type'] = 'plain'
+
+                    if (isKeyword(word, normalizedLang)) {
+                        type = 'keyword'
+                    } else if (isBuiltin(word, normalizedLang)) {
+                        type = 'builtin'
+                    } else if (isType(word, normalizedLang)) {
+                        type = 'type'
+                    } else {
+                        const nextRemaining = remaining.substring(word.length)
+                        const isFuncCall = /^\s*\(/.test(nextRemaining)
+                        const isPropertyAccess = lastNonWsToken && lastNonWsToken.text === '.'
+                        const isPropertyKey =
+                            /^\s*:/.test(nextRemaining) &&
+                            !/^\s*::/.test(nextRemaining) &&
+                            (normalizedLang === 'javascript' ||
+                                normalizedLang === 'js' ||
+                                normalizedLang === 'typescript' ||
+                                normalizedLang === 'ts' ||
+                                normalizedLang === 'json' ||
+                                normalizedLang === 'go' ||
+                                normalizedLang === 'golang')
+
+                        const isClassOrTypeDecl =
+                            lastNonWsToken &&
+                            (lastNonWsToken.text === 'class' ||
+                                lastNonWsToken.text === 'struct' ||
+                                lastNonWsToken.text === 'interface' ||
+                                (lastNonWsToken.text === 'type' && normalizedLang !== 'python'))
+
+                        const isFuncDecl =
+                            lastNonWsToken &&
+                            /^(def|func|fn|proc|template|macro)$/.test(lastNonWsToken.text)
+
+                        if (isClassOrTypeDecl) {
+                            type = 'class'
+                        } else if (isFuncDecl || isFuncCall) {
+                            type = 'function'
+                        } else if (isPropertyAccess || isPropertyKey) {
+                            type = 'property'
+                        } else if (/^[A-Z_][A-Z0-9_]+$/.test(word) && word.length >= 2) {
+                            type = 'constant'
+                        } else if (/^[A-Z][a-zA-Z0-9_]*$/.test(word)) {
+                            type = 'class'
+                        } else {
+                            type = 'plain'
+                        }
+                    }
+
+                    const tok: Token = { text: word, type: type }
+                    lineTokens.push(tok)
+                    index += word.length
+                    matched = true
+                    lastNonWsToken = tok
+                    continue
+                }
+
+                // Operators, punctuation
+                const symbolMatch = remaining.match(/^([+\-*/%=!&|^~<>?:;.,()[\]{}])/)
+                if (symbolMatch) {
+                    const symbol = symbolMatch[0]
+                    const tok: Token = { text: symbol, type: 'operator' }
+                    lineTokens.push(tok)
+                    index += symbol.length
+                    matched = true
+                    lastNonWsToken = tok
+                    continue
+                }
+
+                // Fallback
+                if (!matched) {
+                    const char = remaining[0]
+                    const tok: Token = { text: char, type: 'plain' }
+                    lineTokens.push(tok)
+                    index += 1
+                    lastNonWsToken = tok
+                }
             }
 
-            // Operators, punctuation
-            const symbolMatch = remaining.match(/^([+\-*/%=!&|^~<>?:;.,()[\]{}])/)
-            if (symbolMatch) {
-                const symbol = symbolMatch[0]
-                const tok: Token = { text: symbol, type: 'operator' }
-                lineTokens.push(tok)
-                index += symbol.length
-                matched = true
-                lastNonWsToken = tok
-                continue
-            }
+            tokenizedLines.push(lineTokens)
+        }
 
-            // Fallback
-            if (!matched) {
-                const char = remaining[0]
-                const tok: Token = { text: char, type: 'plain' }
-                lineTokens.push(tok)
-                index += 1
-                lastNonWsToken = tok
+        const getTokenStyle = (type: Token['type']) => {
+            switch (type) {
+                case 'keyword':
+                    return { color: '#c084fc', fontWeight: 'bold' as const }
+                case 'builtin':
+                    return { color: '#38bdf8' }
+                case 'type':
+                    return { color: '#2dd4bf' }
+                case 'class':
+                    return { color: '#34d399' }
+                case 'function':
+                    return { color: '#60a5fa' }
+                case 'property':
+                    return { color: '#f472b6' }
+                case 'constant':
+                    return { color: '#fda4af', fontWeight: 'bold' as const }
+                case 'string':
+                    return { color: '#fcd34d' }
+                case 'regex':
+                    return { color: '#f87171' }
+                case 'comment':
+                    return { color: '#64748b', fontStyle: 'italic' as const }
+                case 'number':
+                    return { color: '#f43f5e' }
+                case 'operator':
+                    return { color: '#94a3b8' }
+                case 'tag':
+                    return { color: '#f43f5e', fontWeight: 'bold' as const }
+                case 'attr':
+                    return { color: '#fb923c' }
+                default:
+                    return { color: '#cbd5e1' }
             }
         }
 
-        tokenizedLines.push(lineTokens)
-    }
-
-    const getTokenStyle = (type: Token['type']) => {
-        switch (type) {
-            case 'keyword':
-                return { color: '#c084fc', fontWeight: 'bold' as const }
-            case 'builtin':
-                return { color: '#38bdf8' }
-            case 'type':
-                return { color: '#2dd4bf' }
-            case 'class':
-                return { color: '#34d399' }
-            case 'function':
-                return { color: '#60a5fa' }
-            case 'property':
-                return { color: '#f472b6' }
-            case 'constant':
-                return { color: '#fda4af', fontWeight: 'bold' as const }
-            case 'string':
-                return { color: '#fcd34d' }
-            case 'regex':
-                return { color: '#f87171' }
-            case 'comment':
-                return { color: '#64748b', fontStyle: 'italic' as const }
-            case 'number':
-                return { color: '#f43f5e' }
-            case 'operator':
-                return { color: '#94a3b8' }
-            case 'tag':
-                return { color: '#f43f5e', fontWeight: 'bold' as const }
-            case 'attr':
-                return { color: '#fb923c' }
-            default:
-                return { color: '#cbd5e1' }
-        }
-    }
-
-    return tokenizedLines.map((lineTokens, lineIdx) => {
-        if (lineTokens.length === 0) {
-            return <Text key={lineIdx}>{'\n'}</Text>
-        }
         return (
-            <Text key={lineIdx} style={styles.markdownCodeBlockText} numberOfLines={0}>
-                {lineTokens.map((token, tokenIdx) => (
-                    <Text key={tokenIdx} style={getTokenStyle(token.type)}>
-                        {token.text}
-                    </Text>
-                ))}
-                {lineIdx < tokenizedLines.length - 1 ? '\n' : ''}
-            </Text>
+            <>
+                {tokenizedLines.map((lineTokens, lineIdx) => {
+                    if (lineTokens.length === 0) {
+                        return <Text key={lineIdx} selectable={true}>{'\n'}</Text>
+                    }
+                    return (
+                        <Text key={lineIdx} style={styles.markdownCodeBlockText} numberOfLines={0} selectable={true}>
+                            {lineTokens.map((token, tokenIdx) => (
+                                <Text key={tokenIdx} style={getTokenStyle(token.type)} selectable={true}>
+                                    {token.text}
+                                </Text>
+                            ))}
+                            {lineIdx < tokenizedLines.length - 1 ? '\n' : ''}
+                        </Text>
+                    )
+                })}
+            </>
         )
-    })
-}
+    },
+    (prev, next) => prev.code === next.code && prev.lang === next.lang
+)
+HighlightedCode.displayName = 'HighlightedCode'
+
 
 // Sub-component for Markdown code blocks with copy & collapse
-const MarkdownCodeBlock = ({
-    lang,
-    code,
-    flat,
-}: {
-    lang: string
-    code: string
-    flat?: boolean
-}) => {
-    const [expanded, setExpanded] = useState(false)
-    const lines = code.split('\n')
-    const needsFolding = lines.length > 12
-    const displayCode = needsFolding && !expanded ? lines.slice(0, 12).join('\n') : code
+const MarkdownCodeBlock = React.memo(
+    ({ lang, code, flat }: { lang: string; code: string; flat?: boolean }) => {
+        const [expanded, setExpanded] = useState(false)
+        const lines = code.split('\n')
+        const needsFolding = lines.length > 12
+        const displayCode = needsFolding && !expanded ? lines.slice(0, 12).join('\n') : code
 
-    const handleCopy = () => {
-        Clipboard.setString(code)
-    }
+        const handleCopy = () => {
+            Clipboard.setString(code)
+        }
 
-    const toggle = () => {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
-        setExpanded(!expanded)
-    }
+        const toggle = () => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
+            setExpanded(!expanded)
+        }
 
-    return (
-        <View
-            style={[
-                styles.markdownCodeBlockContainer,
-                flat && {
-                    backgroundColor: 'transparent',
-                    borderWidth: 0,
-                    borderRadius: 0,
-                    padding: 0,
-                    marginVertical: 4,
-                    shadowColor: 'transparent',
-                    shadowOffset: { width: 0, height: 0 },
-                    shadowOpacity: 0,
-                    shadowRadius: 0,
-                    elevation: 0,
-                },
-            ]}>
+        return (
             <View
                 style={[
-                    styles.markdownCodeBlockHeader,
+                    styles.markdownCodeBlockContainer,
                     flat && {
-                        borderBottomWidth: 0,
-                        paddingBottom: 0,
-                        marginBottom: 4,
+                        backgroundColor: 'transparent',
+                        borderWidth: 0,
+                        borderRadius: 0,
+                        padding: 0,
+                        marginVertical: 4,
+                        shadowColor: 'transparent',
+                        shadowOffset: { width: 0, height: 0 },
+                        shadowOpacity: 0,
+                        shadowRadius: 0,
+                        elevation: 0,
                     },
                 ]}>
-                {lang ? <Text style={styles.markdownCodeBlockLang}>{lang}</Text> : <View />}
-                <Pressable
-                    onPress={handleCopy}
-                    style={({ pressed }) => [
-                        styles.copyButton,
-                        pressed && styles.pressed,
+                <View
+                    style={[
+                        styles.markdownCodeBlockHeader,
                         flat && {
-                            paddingHorizontal: 4,
-                            paddingVertical: 2,
-                            backgroundColor: 'transparent',
+                            borderBottomWidth: 0,
+                            paddingBottom: 0,
+                            marginBottom: 4,
                         },
                     ]}>
-                    <Feather name="copy" size={10} color="#94a3b8" />
-                    <Text style={styles.copyButtonText}>复制</Text>
-                </Pressable>
+                    {lang ? <Text style={styles.markdownCodeBlockLang}>{lang}</Text> : <View />}
+                    <Pressable
+                        onPress={handleCopy}
+                        style={({ pressed }) => [
+                            styles.copyButton,
+                            pressed && styles.pressed,
+                            flat && {
+                                paddingHorizontal: 4,
+                                paddingVertical: 2,
+                                backgroundColor: 'transparent',
+                            },
+                        ]}>
+                        <Feather name="copy" size={10} color="#94a3b8" />
+                        <Text style={styles.copyButtonText}>复制</Text>
+                    </Pressable>
+                </View>
+                <Text style={styles.markdownCodeBlockText} selectable>
+                    <HighlightedCode code={displayCode} lang={lang} />
+                </Text>
+                {needsFolding && (
+                    <Pressable
+                        onPress={toggle}
+                        style={({ pressed }) => [styles.expandCodeButton, pressed && styles.pressed]}>
+                        <Text style={styles.expandCodeText}>
+                            {expanded ? '收起代码' : `展开代码 (余下 ${lines.length - 12} 行)`}
+                        </Text>
+                    </Pressable>
+                )}
             </View>
-            <Text style={styles.markdownCodeBlockText} selectable>
-                {renderHighlightedCode(displayCode, lang)}
-            </Text>
-            {needsFolding && (
-                <Pressable
-                    onPress={toggle}
-                    style={({ pressed }) => [styles.expandCodeButton, pressed && styles.pressed]}>
-                    <Text style={styles.expandCodeText}>
-                        {expanded ? '收起代码' : `展开代码 (余下 ${lines.length - 12} 行)`}
-                    </Text>
-                </Pressable>
-            )}
-        </View>
-    )
-}
+        )
+    },
+    (prev, next) => prev.code === next.code && prev.lang === next.lang && prev.flat === next.flat
+)
+MarkdownCodeBlock.displayName = 'MarkdownCodeBlock'
+
+
+// Sub-component for Markdown tables
+const MarkdownTable = React.memo(
+    ({ tableData, flat }: { tableData: string[][]; flat?: boolean }) => {
+        if (tableData.length === 0) return null
+        const header = tableData[0]
+        const rows = tableData.slice(1)
+
+        return (
+            <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={[
+                    styles.markdownTableScrollView,
+                    flat && { marginHorizontal: 0, paddingHorizontal: 0 },
+                ]}
+                contentContainerStyle={styles.markdownTableContent}>
+                <View style={styles.markdownTable}>
+                    {/* Header Row */}
+                    <View style={styles.markdownTableHeaderRow}>
+                        {header.map((cell, idx) => (
+                            <View
+                                key={idx}
+                                style={[
+                                    styles.markdownTableCell,
+                                    styles.markdownTableHeaderCell,
+                                    idx === 0 && { borderLeftWidth: 0 },
+                                ]}>
+                                <Text
+                                    style={[styles.markdownTableHeaderText]}
+                                    selectable={true}>
+                                    {renderMarkdownInline(cell.trim(), flat)}
+                                </Text>
+                            </View>
+                        ))}
+                    </View>
+                    {/* Data Rows */}
+                    {rows.map((row, rowIdx) => (
+                        <View
+                            key={rowIdx}
+                            style={[
+                                styles.markdownTableRow,
+                                rowIdx % 2 === 0 && styles.markdownTableOddRow,
+                                rowIdx === rows.length - 1 && { borderBottomWidth: 0 },
+                            ]}>
+                            {row.map((cell, cellIdx) => (
+                                <View
+                                    key={cellIdx}
+                                    style={[
+                                        styles.markdownTableCell,
+                                        cellIdx === 0 && { borderLeftWidth: 0 },
+                                    ]}>
+                                    <Text style={styles.markdownTableCellText} selectable={true}>
+                                        {renderMarkdownInline(cell.trim(), flat)}
+                                    </Text>
+                                </View>
+                            ))}
+                        </View>
+                    ))}
+                </View>
+            </ScrollView>
+        )
+    },
+    (prev, next) => {
+        if (prev.flat !== next.flat) return false
+        if (prev.tableData.length !== next.tableData.length) return false
+        for (let i = 0; i < prev.tableData.length; i++) {
+            if (prev.tableData[i].length !== next.tableData[i].length) return false
+            for (let j = 0; j < prev.tableData[i].length; j++) {
+                if (prev.tableData[i][j] !== next.tableData[i][j]) return false
+            }
+        }
+        return true
+    }
+)
+MarkdownTable.displayName = 'MarkdownTable'
+
 
 // Sub-component for lightweight Markdown rendering
+const preprocessCache = new Map<string, string>()
 const preprocessHtmlToMarkdown = (rawText: string): string => {
     if (!rawText) return ''
-    return rawText
+    const cached = preprocessCache.get(rawText)
+    if (cached) return cached
+
+    const result = rawText
         .replace(/<br\s*\/?>/gi, '\n')
         .replace(/<\/?b>/gi, '**')
         .replace(/<\/?strong>/gi, '**')
         .replace(/<\/?i>/gi, '*')
         .replace(/<\/?em>/gi, '*')
         .replace(/<\/?code>/gi, '`')
+
+    if (preprocessCache.size > 500) preprocessCache.clear()
+    preprocessCache.set(rawText, result)
+    return result
 }
 
+const inlineCache = new Map<string, React.ReactNode[]>()
 const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
     if (!inlineText) return ''
+    const cacheKey = `${flat ? 'f' : 'n'}:${inlineText}`
+    const cached = inlineCache.get(cacheKey)
+    if (cached) return cached
+
     const tokens = inlineText.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`|\[[^\]]+\]\([^)]+\))/g)
-    return tokens.map((token, idx) => {
+    const result = tokens.map((token, idx) => {
         if (token.startsWith('**') && token.endsWith('**')) {
             return (
-                <Text key={idx} style={{ fontWeight: 'bold', color: '#f8fafc' }}>
+                <Text key={idx} style={{ fontWeight: 'bold', color: '#f8fafc' }} selectable={true}>
                     {token.slice(2, -2)}
                 </Text>
             )
         }
         if (token.startsWith('*') && token.endsWith('*')) {
             return (
-                <Text key={idx} style={{ fontStyle: 'italic', color: '#cbd5e1' }}>
+                <Text key={idx} style={{ fontStyle: 'italic', color: '#cbd5e1' }} selectable={true}>
                     {token.slice(1, -1)}
                 </Text>
             )
@@ -879,6 +975,7 @@ const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
             return (
                 <Text
                     key={idx}
+                    selectable={true}
                     style={[
                         styles.markdownInlineCode,
                         flat && {
@@ -899,6 +996,7 @@ const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
                 return (
                     <Text
                         key={idx}
+                        selectable={true}
                         style={{ color: '#38bdf8', textDecorationLine: 'underline' }}
                         onPress={() => {
                             Linking.openURL(url).catch((err) =>
@@ -910,60 +1008,65 @@ const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
                 )
             }
         }
-        return token
+        return (
+            <Text key={idx} selectable={true}>
+                {token}
+            </Text>
+        )
     })
+
+    if (inlineCache.size > 1000) inlineCache.clear()
+    inlineCache.set(cacheKey, result)
+    return result
 }
 
-const MarkdownDetails = ({
-    block,
-    style,
-    flat,
-}: {
-    block: string
-    style?: any
-    flat?: boolean
-}) => {
-    const [expanded, setExpanded] = useState(false)
+const MarkdownDetails = React.memo(
+    ({ block, style, flat }: { block: string; style?: any; flat?: boolean }) => {
+        const [expanded, setExpanded] = useState(false)
 
-    const detailsMatch = block.match(/<details[^>]*>([\s\S]*?)<\/details>/i)
-    if (!detailsMatch) return null
+        const detailsMatch = block.match(/<details[^>]*>([\s\S]*?)<\/details>/i)
+        if (!detailsMatch) return null
 
-    const innerContent = detailsMatch[1]
-    const summaryMatch = innerContent.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i)
-    let summaryText = 'Details'
-    let bodyText = innerContent
-    if (summaryMatch) {
-        summaryText = summaryMatch[1].trim()
-        bodyText = innerContent.replace(/<summary[^>]*>[\s\S]*?<\/summary>/i, '')
-    }
+        const innerContent = detailsMatch[1]
+        const summaryMatch = innerContent.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i)
+        let summaryText = 'Details'
+        let bodyText = innerContent
+        if (summaryMatch) {
+            summaryText = summaryMatch[1].trim()
+            bodyText = innerContent.replace(/<summary[^>]*>[\s\S]*?<\/summary>/i, '')
+        }
 
-    const toggle = () => {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
-        setExpanded(!expanded)
-    }
+        const toggle = () => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
+            setExpanded(!expanded)
+        }
 
-    return (
-        <View style={styles.detailsBubble}>
-            <Pressable
-                onPress={toggle}
-                style={({ pressed }) => [styles.detailsHeader, pressed && styles.pressed]}>
-                <Feather
-                    name={expanded ? 'chevron-down' : 'chevron-right'}
-                    size={12}
-                    color="#a78bfa"
-                />
-                <Text style={styles.detailsHeaderText}>
-                    {renderMarkdownInline(summaryText, flat)}
-                </Text>
-            </Pressable>
-            {expanded && (
-                <View style={styles.detailsBody}>
-                    <MarkdownText text={bodyText} style={style} flat={flat} />
-                </View>
-            )}
-        </View>
-    )
-}
+        return (
+            <View style={styles.detailsBubble}>
+                <Pressable
+                    onPress={toggle}
+                    style={({ pressed }) => [styles.detailsHeader, pressed && styles.pressed]}>
+                    <Feather
+                        name={expanded ? 'chevron-down' : 'chevron-right'}
+                        size={12}
+                        color="#a78bfa"
+                    />
+                    <Text style={styles.detailsHeaderText}>
+                        {renderMarkdownInline(summaryText, flat)}
+                    </Text>
+                </Pressable>
+                {expanded && (
+                    <View style={styles.detailsBody}>
+                        <MarkdownText text={bodyText} style={style} flat={flat} />
+                    </View>
+                )}
+            </View>
+        )
+    },
+    (prev, next) => prev.block === next.block && prev.flat === next.flat
+)
+MarkdownDetails.displayName = 'MarkdownDetails'
+
 
 // Sub-component for lightweight Markdown rendering
 const MarkdownText = React.memo(
@@ -1009,112 +1112,179 @@ const MarkdownText = React.memo(
                     }
 
                     const lines = block.split('\n')
+                    const renderedLines: React.ReactNode[] = []
+                    let currentTable: string[][] = []
+                    let isParsingTable = false
+
+                    const flushTable = (key: string | number) => {
+                        if (currentTable.length > 0) {
+                            renderedLines.push(
+                                <MarkdownTable
+                                    key={`table-${key}`}
+                                    tableData={currentTable}
+                                    flat={flat}
+                                />
+                            )
+                            currentTable = []
+                        }
+                        isParsingTable = false
+                    }
+
+                    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+                        const line = lines[lineIdx]
+                        const isTableLine = line.trim().startsWith('|') && line.trim().endsWith('|')
+
+                        if (isTableLine) {
+                            const cells = line
+                                .trim()
+                                .slice(1, -1)
+                                .split('|')
+                                .map((c) => c.trim())
+
+                            // Check if it's a separator line (e.g., |---|---|)
+                            const isSeparator = cells.every((c) => /^[ \-:]+$/.test(c))
+
+                            if (isSeparator) {
+                                if (currentTable.length > 0) {
+                                    isParsingTable = true
+                                }
+                                continue
+                            }
+
+                            if (!isParsingTable && currentTable.length > 0 && !isTableLine) {
+                                flushTable(lineIdx)
+                            }
+
+                            currentTable.push(cells)
+                            continue
+                        } else if (currentTable.length > 0) {
+                            flushTable(lineIdx)
+                        }
+
+                        const headingMatch = line.match(/^(#{1,6})\s+(.*)$/)
+                        if (headingMatch) {
+                            const level = headingMatch[1].length
+                            const content = headingMatch[2]
+                            const headingStyle =
+                                level === 1
+                                    ? styles.markdownH1
+                                    : level === 2
+                                      ? styles.markdownH2
+                                      : level === 3
+                                        ? styles.markdownH3
+                                        : styles.markdownH4
+                            renderedLines.push(
+                                <Text key={lineIdx} style={[headingStyle, style]} selectable={true}>
+                                    {renderInline(content)}
+                                </Text>
+                            )
+                            continue
+                        }
+
+                        const blockquoteMatch = line.match(/^>\s*(.*)$/)
+                        if (blockquoteMatch) {
+                            const content = blockquoteMatch[1]
+                            renderedLines.push(
+                                <View
+                                    key={lineIdx}
+                                    style={[
+                                        styles.markdownBlockquote,
+                                        flat && {
+                                            backgroundColor: 'transparent',
+                                            borderLeftWidth: 0,
+                                            paddingHorizontal: 0,
+                                            paddingVertical: 0,
+                                            marginVertical: 2,
+                                        },
+                                    ]}>
+                                    <Text style={styles.markdownBlockquoteText} selectable={true}>
+                                        {renderInline(content)}
+                                    </Text>
+                                </View>
+                            )
+                            continue
+                        }
+
+                        if (line === '---' || line === '***' || line === '___') {
+                            renderedLines.push(
+                                <View
+                                    key={lineIdx}
+                                    style={[
+                                        styles.markdownHR,
+                                        flat && {
+                                            backgroundColor: 'transparent',
+                                            height: 0,
+                                            marginVertical: 4,
+                                        },
+                                    ]}
+                                />
+                            )
+                            continue
+                        }
+
+                        const listMatch = line.match(/^(\s*)[-*+]\s+(.*)$/)
+                        if (listMatch) {
+                            const indent = listMatch[1].length * 4
+                            const content = listMatch[2]
+                            renderedLines.push(
+                                <View
+                                    key={lineIdx}
+                                    style={[
+                                        styles.markdownListItemRow,
+                                        { paddingLeft: Math.max(8, indent) },
+                                    ]}>
+                                    <Text style={styles.markdownListBullet} selectable={true}>
+                                        •
+                                    </Text>
+                                    <Text
+                                        style={[styles.markdownListItemText, style]}
+                                        selectable={true}>
+                                        {renderInline(content)}
+                                    </Text>
+                                </View>
+                            )
+                            continue
+                        }
+
+                        const numListMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/)
+                        if (numListMatch) {
+                            const indent = numListMatch[1].length * 4
+                            const num = numListMatch[2]
+                            const content = numListMatch[3]
+                            renderedLines.push(
+                                <View
+                                    key={lineIdx}
+                                    style={[
+                                        styles.markdownListItemRow,
+                                        { paddingLeft: Math.max(8, indent) },
+                                    ]}>
+                                    <Text style={styles.markdownListNum} selectable={true}>
+                                        {num}.
+                                    </Text>
+                                    <Text
+                                        style={[styles.markdownListItemText, style]}
+                                        selectable={true}>
+                                        {renderInline(content)}
+                                    </Text>
+                                </View>
+                            )
+                            continue
+                        }
+
+                        renderedLines.push(
+                            <Text
+                                key={lineIdx}
+                                style={[styles.markdownParagraph, style]}
+                                selectable={true}>
+                                {renderInline(line)}
+                            </Text>
+                        )
+                    }
+                    flushTable('final')
+
                     return (
                         <View key={blockIdx} style={styles.markdownTextBlock}>
-                            {lines.map((line, lineIdx) => {
-                                const headingMatch = line.match(/^(#{1,6})\s+(.*)$/)
-                                if (headingMatch) {
-                                    const level = headingMatch[1].length
-                                    const content = headingMatch[2]
-                                    const headingStyle =
-                                        level === 1
-                                            ? styles.markdownH1
-                                            : level === 2
-                                              ? styles.markdownH2
-                                              : level === 3
-                                                ? styles.markdownH3
-                                                : styles.markdownH4
-                                    return (
-                                        <Text key={lineIdx} style={[headingStyle, style]}>
-                                            {renderInline(content)}
-                                        </Text>
-                                    )
-                                }
-
-                                const blockquoteMatch = line.match(/^>\s*(.*)$/)
-                                if (blockquoteMatch) {
-                                    const content = blockquoteMatch[1]
-                                    return (
-                                        <View
-                                            key={lineIdx}
-                                            style={[
-                                                styles.markdownBlockquote,
-                                                flat && {
-                                                    backgroundColor: 'transparent',
-                                                    borderLeftWidth: 0,
-                                                    paddingHorizontal: 0,
-                                                    paddingVertical: 0,
-                                                    marginVertical: 2,
-                                                },
-                                            ]}>
-                                            <Text style={styles.markdownBlockquoteText}>
-                                                {renderInline(content)}
-                                            </Text>
-                                        </View>
-                                    )
-                                }
-
-                                if (line === '---' || line === '***' || line === '___') {
-                                    return (
-                                        <View
-                                            key={lineIdx}
-                                            style={[
-                                                styles.markdownHR,
-                                                flat && {
-                                                    backgroundColor: 'transparent',
-                                                    height: 0,
-                                                    marginVertical: 4,
-                                                },
-                                            ]}
-                                        />
-                                    )
-                                }
-
-                                const listMatch = line.match(/^(\s*)[-*+]\s+(.*)$/)
-                                if (listMatch) {
-                                    const indent = listMatch[1].length * 4
-                                    const content = listMatch[2]
-                                    return (
-                                        <View
-                                            key={lineIdx}
-                                            style={[
-                                                styles.markdownListItemRow,
-                                                { paddingLeft: Math.max(8, indent) },
-                                            ]}>
-                                            <Text style={styles.markdownListBullet}>•</Text>
-                                            <Text style={[styles.markdownListItemText, style]}>
-                                                {renderInline(content)}
-                                            </Text>
-                                        </View>
-                                    )
-                                }
-
-                                const numListMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/)
-                                if (numListMatch) {
-                                    const indent = numListMatch[1].length * 4
-                                    const num = numListMatch[2]
-                                    const content = numListMatch[3]
-                                    return (
-                                        <View
-                                            key={lineIdx}
-                                            style={[
-                                                styles.markdownListItemRow,
-                                                { paddingLeft: Math.max(8, indent) },
-                                            ]}>
-                                            <Text style={styles.markdownListNum}>{num}.</Text>
-                                            <Text style={[styles.markdownListItemText, style]}>
-                                                {renderInline(content)}
-                                            </Text>
-                                        </View>
-                                    )
-                                }
-
-                                return (
-                                    <Text key={lineIdx} style={[styles.markdownParagraph, style]}>
-                                        {renderInline(line)}
-                                    </Text>
-                                )
-                            })}
+                            {renderedLines}
                         </View>
                     )
                 })}
@@ -1125,56 +1295,65 @@ const MarkdownText = React.memo(
 )
 MarkdownText.displayName = 'MarkdownText'
 
+
 // Sub-component for Collapsible Thinking Process
-const ThinkingPart = ({ thinking, finishedAt }: { thinking: string; finishedAt?: number }) => {
-    const [expanded, setExpanded] = useState(false)
-    const isThinking = !finishedAt
+const ThinkingPart = React.memo(
+    ({ thinking, finishedAt }: { thinking: string; finishedAt?: number }) => {
+        const [expanded, setExpanded] = useState(false)
+        const isThinking = !finishedAt
 
-    useEffect(() => {
-        if (isThinking) {
-            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
-            setExpanded(true)
-        } else {
-            const timer = setTimeout(() => {
+        useEffect(() => {
+            if (isThinking) {
                 LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
-                setExpanded(false)
-            }, 1500)
-            return () => clearTimeout(timer)
+                setExpanded(true)
+            } else {
+                const timer = setTimeout(() => {
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
+                    setExpanded(false)
+                }, 1500)
+                return () => clearTimeout(timer)
+            }
+        }, [isThinking])
+
+        if (!thinking && !isThinking) return null
+
+        const toggle = () => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
+            setExpanded(!expanded)
         }
-    }, [isThinking])
 
-    if (!thinking && !isThinking) return null
+        return (
+            <View style={styles.thinkingBubble}>
+                <Pressable
+                    onPress={toggle}
+                    style={({ pressed }) => [styles.thinkingHeader, pressed && styles.pressed]}>
+                    <Feather
+                        name={expanded ? 'chevron-down' : 'chevron-right'}
+                        size={12}
+                        color="#c084fc"
+                    />
+                    <Text style={styles.thinkingHeaderText}>
+                        {isThinking ? 'Agent 正在思考...' : '思考过程 (Reasoning)'}
+                    </Text>
+                    {isThinking && (
+                        <ActivityIndicator size="small" color="#c084fc" style={{ marginLeft: 6 }} />
+                    )}
+                </Pressable>
+                {expanded && thinking ? (
+                    <View style={styles.thinkingBody}>
+                        <Text style={styles.thinkingText} selectable={true}>
+                            {thinking}
+                            {isThinking && <BlinkingCursor color="#c084fc" size={10} />}
+                        </Text>
+                    </View>
+                ) : null}
+            </View>
+        )
+    },
+    (prev, next) => prev.thinking === next.thinking && prev.finishedAt === next.finishedAt
+)
+ThinkingPart.displayName = 'ThinkingPart'
 
-    const toggle = () => {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
-        setExpanded(!expanded)
-    }
-
-    return (
-        <View style={styles.thinkingBubble}>
-            <Pressable
-                onPress={toggle}
-                style={({ pressed }) => [styles.thinkingHeader, pressed && styles.pressed]}>
-                <Feather
-                    name={expanded ? 'chevron-down' : 'chevron-right'}
-                    size={12}
-                    color="#c084fc"
-                />
-                <Text style={styles.thinkingHeaderText}>
-                    {isThinking ? 'Agent 正在思考...' : '思考过程 (Reasoning)'}
-                </Text>
-                {isThinking && (
-                    <ActivityIndicator size="small" color="#c084fc" style={{ marginLeft: 6 }} />
-                )}
-            </Pressable>
-            {expanded && thinking ? (
-                <View style={styles.thinkingBody}>
-                    <Text style={styles.thinkingText}>{thinking}</Text>
-                </View>
-            ) : null}
-        </View>
-    )
-}
 
 interface AnsiState {
     bold: boolean
@@ -1260,7 +1439,7 @@ const AnsiText = ({ text, style }: { text: string; style?: any }) => {
         }
     })
 
-    return <Text style={style}>{elements}</Text>
+    return <Text style={style} selectable={true}>{elements}</Text>
 }
 
 function cleanTerminalOutput(content?: string): string {
@@ -1745,7 +1924,7 @@ const FileContentViewer = ({ content, lang }: { content: string; lang: string })
                                     wrapText && { flexWrap: 'wrap', width: SCREEN_WIDTH - 60 },
                                 ]}
                                 selectable>
-                                {renderHighlightedCode(line, lang)}
+                                <HighlightedCode code={line} lang={lang} />
                             </Text>
                         </View>
                     ))}
@@ -1755,19 +1934,20 @@ const FileContentViewer = ({ content, lang }: { content: string; lang: string })
     )
 }
 
-const TerminalSessionCard = ({
-    name,
-    input,
-    finished,
-    result,
-    onMaximize,
-}: {
-    name?: string
-    input?: string
-    finished?: boolean
-    result?: { content?: string; is_error?: boolean }
-    onMaximize?: (name: string, input: string, content: string, isError?: boolean) => void
-}) => {
+const TerminalSessionCard = React.memo(
+    ({
+        name,
+        input,
+        finished,
+        result,
+        onMaximize,
+    }: {
+        name?: string
+        input?: string
+        finished?: boolean
+        result?: { content?: string; is_error?: boolean }
+        onMaximize?: (name: string, input: string, content: string, isError?: boolean) => void
+    }) => {
     const [expanded, setExpanded] = useState(false)
     const [activeTab, setActiveTab] = useState<'formatted' | 'raw'>('formatted')
 
@@ -1862,7 +2042,7 @@ const TerminalSessionCard = ({
                 <Text style={styles.terminalPrompt}>crush ❯</Text>
                 {(name === 'bash' || name === 'run_command') && summary.details ? (
                     <Text style={styles.terminalCommandText} selectable numberOfLines={0}>
-                        {renderHighlightedCode(summary.details, 'bash')}
+                        <HighlightedCode code={summary.details} lang="bash" />
                     </Text>
                 ) : (
                     <Text style={styles.terminalCommandText} selectable>
@@ -1977,7 +2157,19 @@ const TerminalSessionCard = ({
             )}
         </View>
     )
+},
+(prev, next) => {
+    if (prev.name !== next.name) return false
+    if (prev.input !== next.input) return false
+    if (prev.finished !== next.finished) return false
+    if (prev.onMaximize !== next.onMaximize) return false
+    if (prev.result?.content !== next.result?.content) return false
+    if (prev.result?.is_error !== next.result?.is_error) return false
+    return true
 }
+)
+TerminalSessionCard.displayName = 'TerminalSessionCard'
+
 
 const FullTerminalModal = ({
     visible,
@@ -2235,8 +2427,8 @@ const MessageItem = React.memo(
         onMaximize?: (name: string, input: string, content: string, isError?: boolean) => void
     }) => {
         const renderableParts = useMemo(() => {
-            return message.parts ? groupMessageParts(message.parts) : []
-        }, [message.parts])
+            return message.parts ? groupMessageParts([...message.parts]) : []
+        }, [message, message.parts])
         const isCanceled = isMessageCanceled(message)
         const finishMessage =
             message.parts?.find((part) => part.type === 'finish')?.data?.message || 'Canceled'
@@ -2527,7 +2719,13 @@ const CrushMobile = () => {
     // is only a render projection refreshed on a 50ms tick so a 10k-event
     // history replay no longer triggers 10k React renders.
     const messagesMapRef = useRef<Map<string, Message>>(new Map())
-    const messagesFlushScheduledRef = useRef(false)
+    // Pending flush timer ID so a finish-event can cancel-and-flush
+    // synchronously, batching setMessages with setAgentInfo(is_busy:false)
+    // in the same React tick. Boolean flag was insufficient because the
+    // is_busy=false ran 100ms before setMessages and the typing indicator
+    // never had a render frame where both `is_busy` and the user echo were
+    // visible at the same time (short-answer race; phone looked frozen).
+    const messagesFlushScheduledRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const localCancelMessageIdsRef = useRef<Set<string>>(new Set())
     const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null)
     const [sessionAccessTimes, setSessionAccessTimes] = useState<Record<string, number>>({})
@@ -2545,16 +2743,15 @@ const CrushMobile = () => {
     }, [sessionID])
 
     const [messages, setMessages] = useState<Message[]>([])
+    const [isSyncing, setIsSyncing] = useState(false)
+    const syncingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const [agentInfo, setAgentInfo] = useState<AgentInfo>({ is_busy: false, is_ready: true })
-    const activeRunVisible = useMemo(() => {
-        if (!agentInfo.is_busy) return false
-        if (messages.length === 0) return false
-        const lastMessage = messages[messages.length - 1]
-        if (lastMessage.role === 'user') return true
-        return messages.some(
-            (message) => message.role === 'assistant' && !isMessageFinished(message)
-        )
-    }, [messages, agentInfo.is_busy])
+    // is_busy is the single source of truth from server (turn_started /
+    // turn_finished / message-with-finish). Don't gate on last-message-role:
+    // during the 100ms message flush debounce, the user echo may not yet be
+    // in `messages` so the previous turn's finished assistant is still the
+    // tail. Trusting is_busy alone keeps the spinner alive across that gap.
+    const activeRunVisible = !!agentInfo.is_busy
     const isAgentReasoning = useMemo(() => {
         if (!activeRunVisible || messages.length === 0) return false
         const lastMsg = messages[messages.length - 1]
@@ -2598,6 +2795,32 @@ const CrushMobile = () => {
     // are hidden. Default empty = all groups expanded. Persisted only in
     // memory; on app relaunch everything is shown.
     const [collapsedCwdGroups, setCollapsedCwdGroups] = useState<Set<string>>(new Set())
+
+    const groupedSessions = useMemo(() => {
+        const sortedSessions = [...sessions].sort((a, b) => {
+            const timeA =
+                sessionAccessTimes[a.id] ||
+                a.created_at ||
+                a.updated_at ||
+                0
+            const timeB =
+                sessionAccessTimes[b.id] ||
+                b.created_at ||
+                b.updated_at ||
+                0
+            if (timeB !== timeA) return timeB - timeA
+            return (a.id || '').localeCompare(b.id || '')
+        })
+        const groups = new Map<string, Session[]>()
+        for (const s of sortedSessions) {
+            if (!s || !s.id) continue
+            const key = s.path || '(unknown)'
+            const arr = groups.get(key)
+            if (arr) arr.push(s)
+            else groups.set(key, [s])
+        }
+        return Array.from(groups.entries())
+    }, [sessions, sessionAccessTimes])
 
     const [terminalModalVisible, setTerminalModalVisible] = useState(false)
     const [terminalModalTitle, setTerminalModalTitle] = useState('')
@@ -2881,7 +3104,9 @@ const CrushMobile = () => {
         setLoadingOlder(true)
         try {
             const sizeBefore = messagesMapRef.current.size
-            await api.loadOlderHistory(sessionID, oldestTsMs, 30 * 60 * 1000, (env) => {
+            // Use a large window (24h) to avoid sparse-history gaps.
+            // Breaking on pending===0 ensures we don't over-pull.
+            await api.loadOlderHistory(sessionID, oldestTsMs, 24 * 60 * 60 * 1000, (env) => {
                 try {
                     handleEventRef.current?.(env)
                 } catch (err) {
@@ -2892,6 +3117,7 @@ const CrushMobile = () => {
             out.sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
             setMessages(out)
             if (messagesMapRef.current.size === sizeBefore) {
+                // If we found nothing in a 24h window, history is truly exhausted.
                 setExhaustedHistory(true)
             }
         } catch (err) {
@@ -2904,10 +3130,10 @@ const CrushMobile = () => {
     loadOlderHistoryRef.current = loadOlderHistory
 
     const handleContentSizeChange = useCallback(() => {
-        if (isCloseToBottom.current) {
+        if (isCloseToBottom.current && !isSyncing) {
             flatListRef.current?.scrollToEnd({ animated: true })
         }
-    }, [])
+    }, [isSyncing])
 
     // Cheap scroll trigger: last message id + part count. JSON.stringify on
     // the whole parts array would re-serialize every streaming token
@@ -2919,13 +3145,13 @@ const CrushMobile = () => {
     }, [messages])
 
     useEffect(() => {
-        if (isCloseToBottom.current) {
+        if (isCloseToBottom.current && !isSyncing) {
             const timer = setTimeout(() => {
                 flatListRef.current?.scrollToEnd({ animated: true })
             }, 50)
             return () => clearTimeout(timer)
         }
-    }, [lastMessageSig])
+    }, [lastMessageSig, isSyncing])
 
     const activeSession = useMemo(() => {
         return sessions.find((s) => s.id === sessionID)
@@ -3100,37 +3326,67 @@ const CrushMobile = () => {
                         }
                     }
                     map.set(nextMessage.id, nextMessage)
-                    if (nextMessage.role === 'assistant' && isMessageFinished(nextMessage)) {
-                        setAgentInfo((prev) => ({ ...prev, is_busy: false }))
+                }
+
+                const flushNow = () => {
+                    if (messagesFlushScheduledRef.current) {
+                        clearTimeout(messagesFlushScheduledRef.current)
+                        messagesFlushScheduledRef.current = null
+                    }
+                    const out = Array.from(messagesMapRef.current.values())
+                    out.sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
+                    const g = globalThis as any
+                    const isFirstFlush = !g.__perfFirstFlush && g.__perfTap
+                    if (isFirstFlush) {
+                        g.__perfFirstFlush = Date.now()
+                        console.log(
+                            `[PERF] T3 first_flush +${g.__perfFirstFlush - g.__perfTap}ms count=${out.length}`
+                        )
+                    }
+                    setMessages(out)
+
+                    if (isSyncing) {
+                        if (syncingTimeoutRef.current) clearTimeout(syncingTimeoutRef.current)
+                        syncingTimeoutRef.current = setTimeout(() => {
+                            setIsSyncing(false)
+                            syncingTimeoutRef.current = null
+                        }, 500)
+                    }
+                    // First flush after switching to a session with
+                    // history: stick to bottom synchronously so the
+                    // user sees the newest content, not the oldest.
+                    if (isFirstFlush) {
+                        isCloseToBottom.current = true
+                        requestAnimationFrame(() => {
+                            requestAnimationFrame(() => {
+                                flatListRef.current?.scrollToEnd({ animated: false })
+                            })
+                        })
                     }
                 }
-                if (!messagesFlushScheduledRef.current) {
-                    messagesFlushScheduledRef.current = true
-                    setTimeout(() => {
-                        messagesFlushScheduledRef.current = false
-                        const out = Array.from(messagesMapRef.current.values())
-                        out.sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
-                        const g = globalThis as any
-                        const isFirstFlush = !g.__perfFirstFlush && g.__perfTap
-                        if (isFirstFlush) {
-                            g.__perfFirstFlush = Date.now()
-                            console.log(
-                                `[PERF] T3 first_flush +${g.__perfFirstFlush - g.__perfTap}ms count=${out.length}`
-                            )
-                        }
-                        setMessages(out)
-                        // First flush after switching to a session with
-                        // history: stick to bottom synchronously so the
-                        // user sees the newest content, not the oldest.
-                        if (isFirstFlush) {
-                            isCloseToBottom.current = true
-                            requestAnimationFrame(() => {
-                                requestAnimationFrame(() => {
-                                    flatListRef.current?.scrollToEnd({ animated: false })
-                                })
-                            })
-                        }
-                    }, 100)
+
+                // Force-flush on finish so the user echoes + final assistant
+                // are visible in the SAME React commit that flips is_busy off.
+                // Without this the 100ms debounce hides both the user message
+                // and the typing spinner for short-answer turns (looked frozen).
+                if (
+                    envelope.payload.type !== 'deleted' &&
+                    nextMessage.role === 'assistant' &&
+                    isMessageFinished(nextMessage)
+                ) {
+                    flushNow()
+                    setAgentInfo((prev) => ({ ...prev, is_busy: false }))
+                    return
+                }
+
+                if (messagesFlushScheduledRef.current === null) {
+                    // Use a longer debounce (300ms) during initial history replay
+                    // to prevent "render storm" while NATS is flooding us.
+                    const delay = isSyncing ? 300 : 100
+                    messagesFlushScheduledRef.current = setTimeout(() => {
+                        messagesFlushScheduledRef.current = null
+                        flushNow()
+                    }, delay)
                 }
                 return
             }
@@ -3166,9 +3422,19 @@ const CrushMobile = () => {
                 setPendingPermissions((prev) =>
                     prev.filter((item) => item.tool_call_id !== toolCallID)
                 )
+                return
+            }
+            if (envelope.type === 'sync_complete') {
+                console.log(`[PERF] T4 sync_complete session=${envelope.payload.session_id}`)
+                setIsSyncing(false)
+                if (syncingTimeoutRef.current) {
+                    clearTimeout(syncingTimeoutRef.current)
+                    syncingTimeoutRef.current = null
+                }
+                return
             }
         },
-        [recordActivity]
+        [recordActivity, isSyncing]
     )
     handleEventRef.current = handleEvent
 
@@ -3288,6 +3554,11 @@ const CrushMobile = () => {
         if (!sessionID) {
             messagesMapRef.current.clear()
             setMessages([])
+            setIsSyncing(false)
+            if (syncingTimeoutRef.current) {
+                clearTimeout(syncingTimeoutRef.current)
+                syncingTimeoutRef.current = null
+            }
             return
         }
 
@@ -3303,6 +3574,13 @@ const CrushMobile = () => {
         messagesMapRef.current.clear()
         localCancelMessageIdsRef.current.clear()
         setMessages([])
+        setIsSyncing(true)
+        if (syncingTimeoutRef.current) clearTimeout(syncingTimeoutRef.current)
+        // Fallback timeout to hide sync overlay if NATS sync finishes or is stuck
+        syncingTimeoutRef.current = setTimeout(() => {
+            setIsSyncing(false)
+            syncingTimeoutRef.current = null
+        }, 6000)
         // Sync ref BEFORE subscribe so the first envelope (which may
         // arrive in <50ms, before the next React commit) doesn't get
         // filtered out by handleEvent's sessionIDRef.current check.
@@ -3326,11 +3604,14 @@ const CrushMobile = () => {
                             )
                         }
                         setStatus('在线')
-                        handleEvent(envelope)
+                        handleEventRef.current?.(envelope)
                     },
                     (err) => {
                         console.log('Crush events failed:', err)
-                        if (active) setStatus('连接失败')
+                        if (active) {
+                            setStatus('连接失败')
+                            setIsSyncing(false)
+                        }
                     }
                 )
                 if (!active) {
@@ -3347,6 +3628,7 @@ const CrushMobile = () => {
                 if (active) {
                     setStatus('连接失败')
                     setErrorText(error instanceof Error ? error.message : String(error))
+                    setIsSyncing(false)
                 }
             }
         })()
@@ -3360,7 +3642,7 @@ const CrushMobile = () => {
             }
             unsubscribeRef.current = null
         }
-    }, [api, sessionID, handleEvent])
+    }, [api, sessionID])
 
     const sendMessage = async () => {
         const prompt = input.trim()
@@ -3382,8 +3664,12 @@ const CrushMobile = () => {
                 flatListRef.current?.scrollToEnd({ animated: true })
             }, 50)
 
-            await api.sendMessage(sessionID, prompt)
+            // Flip is_busy=true synchronously on tap so the typing spinner
+            // appears immediately — don't wait for the NATS publish + echo
+            // round-trip. Short-answer turns from fast models would otherwise
+            // finish before the UI ever rendered an is_busy=true frame.
             setAgentInfo((prev) => ({ ...prev, is_busy: true }))
+            await api.sendMessage(sessionID, prompt)
         } catch (error) {
             if (cancelRequestedRef.current) return
             console.error(error)
@@ -3457,6 +3743,23 @@ const CrushMobile = () => {
     }
 
     const displayMessages = useMemo(() => {
+        if (messages.length === 0) {
+            // Brand-new session OR pre-flush window after the user just
+            // tapped send: nothing in `messages` yet but agent is already
+            // busy (is_busy was set synchronously on send). Surface a typing
+            // bubble so the screen never looks frozen.
+            if (activeRunVisible) {
+                return [
+                    {
+                        id: 'typing-indicator',
+                        role: 'assistant',
+                        parts: [],
+                    } as unknown as Message,
+                ]
+            }
+            return []
+        }
+
         const getMessageRank = (msg: Message): number => {
             if (msg.role === 'user') return 1
             if (msg.role === 'assistant') {
@@ -3469,72 +3772,67 @@ const CrushMobile = () => {
             return 5
         }
 
-        const sorted = [...messages]
-            .map((msg, idx) => ({ msg, idx }))
-            .sort((a, b) => {
-                const timeA = a.msg.created_at ?? 0
-                const timeB = b.msg.created_at ?? 0
-                if (timeA !== timeB) {
-                    return timeA - timeB
-                }
-                const rankA = getMessageRank(a.msg)
-                const rankB = getMessageRank(b.msg)
-                if (rankA !== rankB) {
-                    return rankA - rankB
-                }
-                return a.idx - b.idx
-            })
-            .map((item) => item.msg)
+        // messages is already sorted by created_at in handleEvent.
+        // We just need a stable rank-based sort for same-timestamp events.
+        const baseMessages = [...messages].sort((a, b) => {
+            const ta = a.created_at || 0
+            const tb = b.created_at || 0
+            if (ta !== tb) return ta - tb
+            return getMessageRank(a) - getMessageRank(b)
+        })
 
-        let baseMessages = sorted
-        if (activeRunVisible && sorted.length > 0 && sorted[sorted.length - 1].role === 'user') {
-            baseMessages = [
-                ...sorted,
-                {
+        if (activeRunVisible && baseMessages.length > 0) {
+            const last = baseMessages[baseMessages.length - 1]
+            // Insert a typing bubble whenever the agent is busy and the
+            // visible tail is NOT a still-streaming assistant. That covers:
+            //   1. tail = user message (classic case)
+            //   2. tail = finished assistant from a previous turn but the
+            //      new turn's user echo hasn't been flushed yet
+            // An in-flight assistant (no finish part) already renders its
+            // own spinner via the isBusy prop, so we skip the placeholder
+            // there to avoid double spinners.
+            const tailIsStreamingAssistant =
+                last.role === 'assistant' && !isMessageFinished(last)
+            if (!tailIsStreamingAssistant) {
+                baseMessages.push({
                     id: 'typing-indicator',
                     role: 'assistant',
                     parts: [],
-                } as unknown as Message,
-            ]
+                } as unknown as Message)
+            }
         }
 
         const aggregated: Message[] = []
-        for (const msg of baseMessages) {
-            if (msg.role === 'tool') {
-                let merged = false
-                for (let i = aggregated.length - 1; i >= 0; i--) {
-                    if (
-                        aggregated[i].role === 'assistant' &&
-                        aggregated[i].id !== 'typing-indicator'
-                    ) {
-                        aggregated[i].parts = [...(aggregated[i].parts || []), ...(msg.parts || [])]
-                        merged = true
-                        break
-                    }
-                }
-                if (merged) continue
-            } else if (msg.role === 'assistant' && msg.id !== 'typing-indicator') {
-                let merged = false
-                for (let i = aggregated.length - 1; i >= 0; i--) {
-                    if (aggregated[i].role === 'user') {
-                        break
-                    }
-                    if (
-                        aggregated[i].role === 'assistant' &&
-                        aggregated[i].id !== 'typing-indicator'
-                    ) {
-                        aggregated[i].parts = [...(aggregated[i].parts || []), ...(msg.parts || [])]
-                        merged = true
-                        break
-                    }
-                }
-                if (merged) continue
-            }
+        let lastAssistant: Message | null = null
 
-            aggregated.push({
-                ...msg,
-                parts: msg.parts ? [...msg.parts] : [],
-            })
+        for (const msg of baseMessages) {
+            if (msg.role === 'user') {
+                lastAssistant = null
+                aggregated.push(msg)
+            } else if (
+                msg.role === 'tool' ||
+                (msg.role === 'assistant' && msg.id !== 'typing-indicator')
+            ) {
+                if (lastAssistant) {
+                    // Merge into existing assistant bubble. Reference stability:
+                    // only clone if we are actually mutating/merging.
+                    lastAssistant = {
+                        ...lastAssistant,
+                        parts: [...(lastAssistant.parts || []), ...(msg.parts || [])],
+                    }
+                    aggregated[aggregated.length - 1] = lastAssistant
+                } else if (msg.role === 'assistant') {
+                    lastAssistant = msg
+                    aggregated.push(msg)
+                } else {
+                    // Tool message without prior assistant message (rare/impossible)
+                    aggregated.push(msg)
+                }
+            } else {
+                // Typing indicator or other roles reset the merge chain
+                lastAssistant = null
+                aggregated.push(msg)
+            }
         }
         return aggregated.filter(messageHasVisibleContent)
     }, [messages, activeRunVisible])
@@ -3575,13 +3873,13 @@ const CrushMobile = () => {
                 styles.safeArea,
                 {
                     paddingTop: insets.top,
-                    paddingBottom: insets.bottom,
+                    // Remove paddingBottom here as it's handled by inputBar or KeyboardAvoidingView
                 },
             ]}
             {...panResponder.panHandlers}>
             <KeyboardAvoidingView
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-                keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 54}
+                keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : insets.top}
                 style={styles.root}>
                 <View style={styles.header}>
                     <View style={styles.headerTop}>
@@ -3842,10 +4140,15 @@ const CrushMobile = () => {
                 </View>
 
                 <View style={styles.content}>
+                    {isSyncing && messages.length === 0 && (
+                        <View style={styles.syncingOverlay}>
+                            <ActivityIndicator size="large" color="#38bdf8" />
+                            <Text style={styles.syncingText}>正在同步历史记录...</Text>
+                        </View>
+                    )}
                     <FlatList
                         ref={flatListRef}
                         style={styles.messages}
-                        contentContainerStyle={styles.messagesContent}
                         data={displayMessages}
                         keyExtractor={(item) => item.id}
                         onScroll={handleScroll}
@@ -3854,10 +4157,21 @@ const CrushMobile = () => {
                         scrollEventThrottle={16}
                         onContentSizeChange={handleContentSizeChange}
                         initialNumToRender={8}
-                        maxToRenderPerBatch={5}
-                        windowSize={5}
+                        maxToRenderPerBatch={10}
+                        windowSize={11}
                         removeClippedSubviews={true}
                         updateCellsBatchingPeriod={50}
+                        getItemLayout={(data, index) => ({
+                            length: 150,
+                            offset: 150 * index,
+                            index,
+                        })}
+                        contentContainerStyle={[
+                            styles.messagesContent,
+                            displayMessages.length === 0
+                                ? { flexGrow: 1, justifyContent: 'center' }
+                                : { flexGrow: 1, justifyContent: 'flex-end' },
+                        ]}
                         ListHeaderComponent={
                             displayMessages.length === 0 ? null : exhaustedHistory ? (
                                 <Text style={styles.loadOlderText}>—— 没有更早的消息 ——</Text>
@@ -3936,7 +4250,7 @@ const CrushMobile = () => {
                     </View>
                 )}
 
-                <View style={styles.inputBar}>
+                <View style={[styles.inputBar, { paddingBottom: Math.max(insets.bottom, 12) }]}>
                     <TextInput
                         value={input}
                         onChangeText={setInput}
@@ -4071,38 +4385,9 @@ const CrushMobile = () => {
                                 <Text style={{ color: '#4b5563', fontSize: 12 }}>无会话</Text>
                             </View>
                         ) : (
-                            (() => {
-                                // Group sessions by cwd so multiple sessions
-                                // under the same workspace collapse into one
-                                // expandable header (two-level drawer).
-                                const sortedSessions = [...sessions].sort((a, b) => {
-                                    // Stable order: user-touched access time wins;
-                                    // otherwise fall back to created_at (set once)
-                                    // not updated_at (rewritten every heartbeat).
-                                    const timeA =
-                                        sessionAccessTimes[a.id] ||
-                                        a.created_at ||
-                                        a.updated_at ||
-                                        0
-                                    const timeB =
-                                        sessionAccessTimes[b.id] ||
-                                        b.created_at ||
-                                        b.updated_at ||
-                                        0
-                                    if (timeB !== timeA) return timeB - timeA
-                                    return (a.id || '').localeCompare(b.id || '')
-                                })
-                                const groups = new Map<string, typeof sessions>()
-                                for (const s of sortedSessions) {
-                                    if (!s || !s.id) continue
-                                    const key = s.path || '(unknown)'
-                                    const arr = groups.get(key)
-                                    if (arr) arr.push(s)
-                                    else groups.set(key, [s])
-                                }
-                                return Array.from(groups.entries()).map(([cwd, groupSessions]) => {
-                                    if (groupSessions.length === 1) {
-                                        const session = groupSessions[0]
+                            groupedSessions.map(([cwd, groupSessions]) => {
+                                if (groupSessions.length === 1) {
+                                    const session = groupSessions[0]
                                         const isActiveSession = session.id === sessionID
                                         const isSessionBusy = isActiveSession
                                             ? activeRunVisible
@@ -4449,7 +4734,7 @@ const CrushMobile = () => {
                                         </View>
                                     )
                                 })
-                            })()
+
                         )}
                     </ScrollView>
 
@@ -4827,6 +5112,19 @@ const styles = StyleSheet.create({
     content: {
         flex: 1,
     },
+    syncingOverlay: {
+        ...StyleSheet.absoluteFillObject,
+        backgroundColor: '#07090e',
+        zIndex: 10,
+        justifyContent: 'center',
+        alignItems: 'center',
+        rowGap: 12,
+    },
+    syncingText: {
+        color: '#64748b',
+        fontSize: 14,
+        fontWeight: '600',
+    },
     sessionRail: {
         height: 48,
         paddingVertical: 8,
@@ -4957,39 +5255,37 @@ const styles = StyleSheet.create({
         // Core padding is handled inside specific bubbles
     },
     userBubble: {
-        maxWidth: '80%',
+        maxWidth: '85%',
         alignSelf: 'flex-end',
-        backgroundColor: '#6366f1', // Premium indigo for user
+        backgroundColor: '#4f46e5', // Modern indigo
         paddingHorizontal: 16,
-        paddingVertical: 11,
-        borderTopLeftRadius: 20,
-        borderTopRightRadius: 20,
-        borderBottomLeftRadius: 20,
-        borderBottomRightRadius: 4, // Telegram-like tail corner for user (right)
+        paddingVertical: 10,
+        paddingBottom: 6,
+        borderRadius: 22,
+        borderBottomRightRadius: 4,
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 1.5 },
-        shadowOpacity: 0.12,
-        shadowRadius: 3,
-        elevation: 2,
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.15,
+        shadowRadius: 4,
+        elevation: 3,
     },
     assistantBubble: {
-        maxWidth: '80%',
+        maxWidth: '85%',
         alignSelf: 'flex-start',
-        backgroundColor: '#1e293b', // Premium deep slate for agent
+        backgroundColor: '#1e293b',
         borderWidth: 1,
-        borderColor: '#242f41',
+        borderColor: '#2d3748',
         paddingHorizontal: 16,
-        paddingVertical: 11,
-        borderTopLeftRadius: 20,
-        borderTopRightRadius: 20,
-        borderBottomLeftRadius: 4, // Telegram-like tail corner for assistant (left)
-        borderBottomRightRadius: 20,
+        paddingVertical: 10,
+        paddingBottom: 6,
+        borderRadius: 22,
+        borderBottomLeftRadius: 4,
         rowGap: 6,
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 1.5 },
-        shadowOpacity: 0.12,
-        shadowRadius: 3,
-        elevation: 2,
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.15,
+        shadowRadius: 4,
+        elevation: 3,
     },
     typingIndicatorContainer: {
         flexDirection: 'row',
@@ -5236,11 +5532,11 @@ const styles = StyleSheet.create({
         borderWidth: 1,
         borderColor: '#242f41',
         paddingHorizontal: 16,
-        paddingVertical: 12,
+        paddingVertical: 10,
         borderRadius: 16,
         borderBottomLeftRadius: 4,
         marginTop: 6,
-        marginBottom: 10,
+        marginBottom: 4,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 1.5 },
         shadowOpacity: 0.1,
@@ -5406,8 +5702,9 @@ const styles = StyleSheet.create({
         fontWeight: '700',
     },
     emptyState: {
+        flex: 1,
         alignItems: 'center',
-        paddingVertical: 80,
+        justifyContent: 'center',
         paddingHorizontal: 32,
         rowGap: 10,
     },
@@ -5476,10 +5773,11 @@ const styles = StyleSheet.create({
         columnGap: 8,
         paddingHorizontal: 16,
         paddingTop: 8,
-        paddingBottom: 16,
+        paddingBottom: 0, // Handled by inline style with insets
         borderTopWidth: 1,
         borderTopColor: '#161f30',
         backgroundColor: '#0a0d14',
+        elevation: 0,
     },
     promptInput: {
         flex: 1,
@@ -5493,6 +5791,8 @@ const styles = StyleSheet.create({
         paddingHorizontal: 16,
         paddingVertical: 8,
         fontSize: 14,
+        elevation: 0,
+        shadowColor: 'transparent',
     },
     sendButton: {
         width: 38,
@@ -5524,65 +5824,65 @@ const styles = StyleSheet.create({
     },
     markdownParagraph: {
         color: '#f8fafc',
-        fontSize: 14.2,
-        lineHeight: 21.5,
-        marginBottom: 8,
+        fontSize: 14.5,
+        lineHeight: 22,
+        marginBottom: 6,
     },
     markdownH1: {
         color: '#f8fafc',
-        fontSize: 20,
-        lineHeight: 27,
+        fontSize: 22,
+        lineHeight: 30,
         fontWeight: '800',
-        marginTop: 14,
-        marginBottom: 8,
+        marginTop: 16,
+        marginBottom: 10,
     },
     markdownH2: {
         color: '#f8fafc',
-        fontSize: 17.5,
-        lineHeight: 24,
+        fontSize: 19,
+        lineHeight: 26,
         fontWeight: '700',
-        marginTop: 12,
-        marginBottom: 6,
+        marginTop: 14,
+        marginBottom: 8,
     },
     markdownH3: {
         color: '#f8fafc',
-        fontSize: 15.5,
-        lineHeight: 22,
+        fontSize: 17,
+        lineHeight: 24,
         fontWeight: '700',
-        marginTop: 10,
-        marginBottom: 6,
+        marginTop: 12,
+        marginBottom: 8,
     },
     markdownH4: {
         color: '#f8fafc',
-        fontSize: 14.5,
-        lineHeight: 20,
+        fontSize: 15.5,
+        lineHeight: 22,
         fontWeight: '600',
-        marginTop: 8,
-        marginBottom: 4,
+        marginTop: 10,
+        marginBottom: 6,
     },
     markdownListItemRow: {
         flexDirection: 'row',
         alignItems: 'flex-start',
-        marginBottom: 7,
+        marginBottom: 8,
     },
     markdownListBullet: {
         color: '#a78bfa',
-        fontSize: 14,
-        marginRight: 6,
-        lineHeight: 21.5,
+        fontSize: 16,
+        marginRight: 8,
+        lineHeight: 22,
     },
     markdownListNum: {
         color: '#a78bfa',
-        fontSize: 13,
+        fontSize: 14,
         fontWeight: '700',
-        marginRight: 6,
-        lineHeight: 21.5,
+        marginRight: 8,
+        lineHeight: 22,
     },
     markdownListItemText: {
         flex: 1,
         color: '#e2e8f0',
-        fontSize: 14.2,
-        lineHeight: 21.5,
+        fontSize: 14.5,
+        lineHeight: 22,
     },
     markdownInlineCode: {
         fontFamily: 'FiraCode-Regular',
@@ -5668,6 +5968,60 @@ const styles = StyleSheet.create({
         justifyContent: 'space-between',
         alignItems: 'center',
         marginBottom: 6,
+    },
+    // Markdown Table Styles
+    markdownTableScrollView: {
+        marginVertical: 10,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: '#334155',
+        backgroundColor: '#0f172a',
+    },
+    markdownTableContent: {
+        padding: 0,
+    },
+    markdownTable: {
+        flexDirection: 'column',
+    },
+    markdownTableHeaderRow: {
+        flexDirection: 'row',
+        backgroundColor: '#1e293b',
+        borderBottomWidth: 2,
+        borderBottomColor: '#334155',
+    },
+    markdownTableHeaderCell: {
+        paddingVertical: 10,
+        paddingHorizontal: 12,
+        minWidth: 100,
+        borderLeftWidth: 1,
+        borderLeftColor: '#334155',
+    },
+    markdownTableHeaderText: {
+        color: '#f8fafc',
+        fontSize: 13,
+        fontWeight: 'bold',
+        textAlign: 'left',
+    },
+    markdownTableRow: {
+        flexDirection: 'row',
+        borderBottomWidth: 1,
+        borderBottomColor: '#334155',
+    },
+    markdownTableOddRow: {
+        backgroundColor: '#131c2e',
+    },
+    markdownTableCell: {
+        paddingVertical: 8,
+        paddingHorizontal: 12,
+        minWidth: 100,
+        borderLeftWidth: 1,
+        borderLeftColor: '#334155',
+        justifyContent: 'center',
+    },
+    markdownTableCellText: {
+        color: '#cbd5e1',
+        fontSize: 13,
+        lineHeight: 18,
     },
 
     // Drawer styles

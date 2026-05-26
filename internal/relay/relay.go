@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
@@ -129,6 +130,35 @@ func Run(ctx context.Context, p *tea.Program, a *app.App, store *config.ConfigSt
 	go commandLoop(runCtx, p, a, sessionID, nc, runCancel)
 
 	subject := "crush.sess." + sessionID + ".events"
+	// Backfill history into JetStream on startup so a phone connecting
+	// mid-session sees prior context without waiting for new output.
+	// Use Msg-Id for idempotent replay across relay restarts.
+	if msgs, err := a.Messages.List(ctx, sessionID); err == nil {
+		// Cap backfill to last 100 messages to avoid flooding the stream
+		// on startup for ancient huge sessions.
+		start := 0
+		if len(msgs) > 100 {
+			start = len(msgs) - 100
+		}
+		for i := start; i < len(msgs); i++ {
+			m := msgs[i]
+			payload := WrapEvent(pubsub.Event[message.Message]{
+				Type:    pubsub.CreatedEvent,
+				Payload: m,
+			})
+			if payload == nil {
+				continue
+			}
+			data, err := json.Marshal(payload)
+			if err != nil {
+				continue
+			}
+			if _, err := js.Publish(ctx, subject, data, jetstream.WithMsgID(m.ID)); err != nil {
+				slog.Debug("Relay backfill failed", "id", m.ID, "error", err)
+			}
+		}
+	}
+
 	events := a.Events(ctx)
 	for {
 		select {

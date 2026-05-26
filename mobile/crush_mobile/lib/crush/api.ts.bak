@@ -1,0 +1,210 @@
+// import 'react-native-get-random-values'
+// import { connect, JSONCodec, NatsConnection, StringCodec } from 'nats.ws'
+type NatsConnection = any;
+
+export type Workspace = {
+    id: string
+    path: string
+}
+
+export type Session = {
+    id: string
+    title: string
+    updated_at?: number
+    created_at?: number
+    path?: string
+    alive?: boolean
+}
+
+export type MessagePart = {
+    type: 'text' | 'reasoning' | 'tool_call' | 'tool_result' | string
+    data: {
+        text?: string
+        thinking?: string
+        id?: string
+        name?: string
+        input?: string
+        finished?: boolean
+        tool_call_id?: string
+        content?: string
+        is_error?: boolean
+        finished_at?: number
+    }
+}
+
+export type Message = {
+    id: string
+    role: string
+    session_id: string
+    parts: MessagePart[]
+    created_at?: number
+}
+
+export type AgentInfo = {
+    is_busy: boolean
+    is_ready: boolean
+    model?: { id?: string }
+    model_cfg?: { model?: string }
+}
+
+export type PermissionRequest = {
+    id: string
+    session_id: string
+    tool_call_id: string
+    tool_name: string
+    description?: string
+    path?: string
+    params?: unknown
+}
+
+export type AgentEvent = {
+    type: string
+    session_id?: string
+    session_title?: string
+    sub_agent_tool_call_id?: string
+    sub_agent_prompt?: string
+    sub_agent_profile?: string
+    sub_agent_error?: string
+}
+
+export type CrushEnvelope =
+    | { type: 'message'; payload: { type: string; payload: Message } }
+    | { type: 'session'; payload: { type: string; payload: Session } }
+    | { type: 'agent_event'; payload: { type: string; payload: AgentEvent } }
+    | { type: 'permission_request'; payload: { type: string; payload: PermissionRequest } }
+    | {
+          type: 'permission_notification'
+          payload: { type: string; payload: { tool_call_id: string } }
+      }
+    | { type: string; payload: any }
+
+// const jc = JSONCodec<any>()
+// const sc = StringCodec()
+const jc: any = null
+const sc: any = null
+
+export class CrushApi {
+    private nc: NatsConnection | null = null
+    readonly url: string
+    readonly token: string
+
+    constructor(url: string, token: string = 'ymm_rpc_2026') {
+        this.url = url
+        this.token = token
+    }
+
+    async connect(): Promise<NatsConnection> {
+        if (this.nc) return this.nc
+        console.log('[CrushApi] connecting to', this.url)
+        this.nc = await connect({
+            servers: this.url,
+            token: this.token,
+            waitOnFirstConnect: true,
+            reconnect: true,
+        })
+        console.log('[CrushApi] connected')
+        return this.nc
+    }
+
+    async listSessions(onUpdate: (sessions: Session[]) => void): Promise<() => void> {
+        const nc = await this.connect()
+        const kv = await nc.jetstream().views.kv('CRUSH_SESSIONS')
+        const sessionsMap: Record<string, Session> = {}
+
+        const iter = await kv.watch({ key: '*' })
+        ;(async () => {
+            for await (const e of iter) {
+                if (e.operation === 'DEL' || e.operation === 'PURGE') {
+                    delete sessionsMap[e.key]
+                } else {
+                    try {
+                        const meta = jc.decode(e.value)
+                        sessionsMap[e.key] = {
+                            id: meta.session_id,
+                            title: meta.title || meta.session_id,
+                            path: meta.path,
+                            alive: meta.alive,
+                            updated_at: meta.updated_at,
+                        }
+                    } catch (err) {
+                        console.error('Failed to decode session meta', err)
+                    }
+                }
+                onUpdate(Object.values(sessionsMap).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)))
+            }
+        })()
+
+        return () => iter.stop()
+    }
+
+    async subscribeSessionEvents(
+        sessionID: string,
+        onEvent: (envelope: CrushEnvelope) => void,
+        onError?: (err: Error) => void
+    ): Promise<() => void> {
+        const nc = await this.connect()
+        const js = nc.jetstream()
+
+        // We use an ephemeral consumer to replay history and get live events.
+        const subject = `crush.sess.${sessionID}.events`
+        try {
+            const c = await js.consumers.get('CRUSH_EVENTS')
+            const iter = await c.consume({
+                //@ts-ignore
+                filterSubject: subject,
+            })
+
+            ;(async () => {
+                for await (const m of iter) {
+                    try {
+                        onEvent(jc.decode(m.data))
+                        m.ack()
+                    } catch (err) {
+                        console.error('Failed to decode event', err)
+                    }
+                }
+            })()
+
+            return () => iter.stop()
+        } catch (err) {
+            // If consumer group CRUSH_EVENTS doesn't exist, we might need to use a simpler sub
+            // But the plan says JetStream is used for history.
+            // For now, use a simple ordered consumer for simplicity and history replay.
+            const iter = await js.orderedConsumer('CRUSH_EVENTS', {
+                filterSubjects: [subject],
+                deliverPolicy: 'all',
+            })
+
+            ;(async () => {
+                try {
+                    for await (const m of iter) {
+                        try {
+                            onEvent(jc.decode(m.data))
+                        } catch (err) {
+                            console.error('Failed to decode event', err)
+                        }
+                    }
+                } catch (err) {
+                    onError?.(err as Error)
+                }
+            })()
+
+            return () => iter.stop()
+        }
+    }
+
+    async sendMessage(sessionID: string, prompt: string): Promise<void> {
+        const nc = await this.connect()
+        nc.publish(`crush.sess.${sessionID}.cmd`, jc.encode({ type: 'prompt', text: prompt }))
+    }
+
+    async cancelSession(sessionID: string): Promise<void> {
+        const nc = await this.connect()
+        nc.publish(`crush.sess.${sessionID}.cmd`, jc.encode({ type: 'cancel' }))
+    }
+
+    async grantPermission(sessionID: string, toolCallID: string, action: 'allow' | 'deny'): Promise<void> {
+        const nc = await this.connect()
+        nc.publish(`crush.sess.${sessionID}.cmd`, jc.encode({ type: 'grant', tool_call_id: toolCallID, action }))
+    }
+}

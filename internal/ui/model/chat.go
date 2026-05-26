@@ -275,6 +275,22 @@ func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
 	m.ScrollToBottom()
 }
 
+// UpsertRuntimeActivity appends a runtime activity when it is not already in
+// the list, or updates the existing activity in place.
+func (m *Chat) UpsertRuntimeActivity(item *chat.RuntimeActivityItem, snapshot chat.RuntimeActivitySnapshot) tea.Cmd {
+	if item == nil {
+		return nil
+	}
+	if existing, ok := m.MessageItem(item.ID()).(*chat.RuntimeActivityItem); ok {
+		cmd := existing.Update(snapshot)
+		m.ScrollToBottom()
+		return cmd
+	}
+	item.Update(snapshot)
+	m.AppendMessages(item)
+	return item.StartAnimation()
+}
+
 // UpdateNestedToolIDs updates the ID map for nested tools within a container.
 // Call this after modifying nested tools to ensure animations work correctly.
 func (m *Chat) UpdateNestedToolIDs(containerID string) {
@@ -719,7 +735,13 @@ func (m *Chat) HandleMouseDown(x, y int) (bool, tea.Cmd) {
 			}
 		})
 	case 2:
-		// Double click - select word (no delayed action)
+		if copyable, ok := m.list.ItemAt(itemIdx).(chat.DoubleClickCopyable); ok {
+			if text, notification, ok := copyable.DoubleClickCopyText(); ok {
+				m.ClearMouse()
+				return true, common.CopyToClipboard(text, notification)
+			}
+		}
+		// Double click - select word (no delayed action).
 		m.selectWord(itemIdx, x, itemY)
 	case 3:
 		// Triple click - select line (no delayed action)

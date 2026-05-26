@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // pillStyle returns the appropriate style for a pill based on focus state.
@@ -26,6 +27,9 @@ const (
 	maxTaskDisplayLength = 40
 	// maxQueueDisplayLength is the maximum length of a queue item in the list.
 	maxQueueDisplayLength = 60
+	// maxExpandedPillRows is the maximum number of body rows shown under the
+	// footer pills before the rest is summarized.
+	maxExpandedPillRows = 10
 )
 
 // pillSection represents which section of the pills panel is focused.
@@ -66,8 +70,8 @@ func queuePill(queue int, focused, panelFocused bool, t *styles.Styles) string {
 	return pillStyle(focused, panelFocused, t).Render(content)
 }
 
-// todoPill renders the todo progress pill with optional spinner and task name.
-func todoPill(todos []session.Todo, spinnerView string, focused, panelFocused bool, t *styles.Styles) string {
+// todoPill renders the todo progress pill with the current task name.
+func todoPill(todos []session.Todo, inProgressIcon string, focused, panelFocused bool, t *styles.Styles) string {
 	if !hasIncompleteTodos(todos) {
 		return ""
 	}
@@ -105,11 +109,8 @@ func todoPill(todos []session.Todo, spinnerView string, focused, panelFocused bo
 		if currentTodo.ActiveForm != "" {
 			taskText = currentTodo.ActiveForm
 		}
-		if len(taskText) > maxTaskDisplayLength {
-			taskText = taskText[:maxTaskDisplayLength-1] + "…"
-		}
-		task := t.Pills.TodoCurrentTask.Render(taskText)
-		content = fmt.Sprintf("%s %s %s  %s", spinnerView, label, progress, task)
+		task := ansi.Truncate(t.Pills.TodoCurrentTask.Render(taskText), maxTaskDisplayLength, "…")
+		content = fmt.Sprintf("%s %s %s  %s", inProgressIcon, label, progress, task)
 	} else {
 		content = fmt.Sprintf("%s %s", label, progress)
 	}
@@ -118,24 +119,34 @@ func todoPill(todos []session.Todo, spinnerView string, focused, panelFocused bo
 }
 
 // todoList renders the expanded todo list.
-func todoList(sessionTodos []session.Todo, spinnerView string, t *styles.Styles, width int) string {
-	return chat.FormatTodosList(t, sessionTodos, spinnerView, width)
+func todoList(sessionTodos []session.Todo, t *styles.Styles, width int, maxRows int) string {
+	return chat.FormatTodosListWithLimit(t, sessionTodos, width, maxRows)
 }
 
 // queueList renders the expanded queue items list.
-func queueList(queueItems []string, t *styles.Styles) string {
+func queueList(queueItems []string, t *styles.Styles, maxRows int) string {
 	if len(queueItems) == 0 {
+		return ""
+	}
+	if maxRows <= 0 {
 		return ""
 	}
 
 	var lines []string
-	for _, item := range queueItems {
+	visibleItems := min(len(queueItems), maxRows)
+	if len(queueItems) > maxRows {
+		visibleItems = maxRows - 1
+	}
+	for _, item := range queueItems[:visibleItems] {
 		text := item
 		if len(text) > maxQueueDisplayLength {
 			text = text[:maxQueueDisplayLength-1] + "…"
 		}
 		prefix := t.Pills.QueueItemPrefix.Render() + " "
 		lines = append(lines, prefix+t.Pills.QueueItemText.Render(text))
+	}
+	if hidden := len(queueItems) - visibleItems; hidden > 0 {
+		lines = append(lines, t.Pills.QueueItemText.Render(fmt.Sprintf("  … +%d queued", hidden)))
 	}
 
 	return strings.Join(lines, "\n")
@@ -203,13 +214,36 @@ func (m *UI) pillsAreaHeight() int {
 
 	pillsAreaHeight := pillHeightWithBorder
 	if m.pillsExpanded {
+		maxExpandedRows := m.maxExpandedPillRows()
 		if m.focusedPillSection == pillSectionTodos && hasIncomplete {
-			pillsAreaHeight += len(m.session.Todos)
+			pillsAreaHeight += m.renderedTodoListHeight(maxExpandedRows)
 		} else if m.focusedPillSection == pillSectionQueue && hasQueue {
-			pillsAreaHeight += m.promptQueue
+			pillsAreaHeight += min(m.promptQueue, maxExpandedRows)
 		}
 	}
 	return pillsAreaHeight
+}
+
+func (m *UI) maxExpandedPillRows() int {
+	if m.height <= 0 {
+		return maxExpandedPillRows
+	}
+	if m.height <= 10 {
+		return 0
+	}
+	return min(maxExpandedPillRows, max(3, m.height-14))
+}
+
+func (m *UI) renderedTodoListHeight(maxRows int) int {
+	if maxRows <= 0 || m.com == nil || m.com.Styles == nil {
+		return 0
+	}
+	contentWidth := max(m.width-3, 0)
+	rendered := chat.FormatTodosListWithLimit(m.com.Styles, m.session.Todos, contentWidth, maxRows)
+	if rendered == "" {
+		return 0
+	}
+	return strings.Count(rendered, "\n") + 1
 }
 
 // renderPills renders the pills panel and stores it in m.pillsView.
@@ -238,10 +272,7 @@ func (m *UI) renderPills() {
 	todosFocused := m.pillsExpanded && m.focusedPillSection == pillSectionTodos
 	queueFocused := m.pillsExpanded && m.focusedPillSection == pillSectionQueue
 
-	inProgressIcon := t.Tool.TodoInProgressIcon.Render(styles.SpinnerIcon)
-	if m.todoIsSpinning {
-		inProgressIcon = m.todoSpinner.View()
-	}
+	inProgressIcon := chat.RenderTodoInProgressIcon(t)
 
 	var pills []string
 	if hasIncomplete {
@@ -252,13 +283,14 @@ func (m *UI) renderPills() {
 	}
 
 	var expandedList string
+	maxExpandedRows := m.maxExpandedPillRows()
 	if m.pillsExpanded {
 		if todosFocused && hasIncomplete {
-			expandedList = todoList(m.session.Todos, inProgressIcon, t, contentWidth)
+			expandedList = todoList(m.session.Todos, t, contentWidth, maxExpandedRows)
 		} else if queueFocused && hasQueue {
 			if m.com.Workspace.AgentIsReady() {
 				queueItems := m.com.Workspace.AgentQueuedPromptsList(m.session.ID)
-				expandedList = queueList(queueItems, t)
+				expandedList = queueList(queueItems, t, maxExpandedRows)
 			}
 		}
 	}

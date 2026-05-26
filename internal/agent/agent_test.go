@@ -295,14 +295,14 @@ func TestWorkerAgent(t *testing.T) {
 
 				require.True(t, foundFetch, "Expected to find a fetch operation")
 			})
-			t.Run("search tool", func(t *testing.T) {
+			t.Run("fd tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
 				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
-					Prompt:          "use search to find all .go files in the current directory",
+					Prompt:          "use fd to find all .go files in the current directory",
 					SessionID:       session.ID,
 					MaxOutputTokens: 10000,
 				})
@@ -318,7 +318,7 @@ func TestWorkerAgent(t *testing.T) {
 				for _, msg := range msgs {
 					if msg.Role == message.Assistant {
 						for _, tc := range msg.ToolCalls() {
-							if tc.Name == tools.SearchToolName {
+							if tc.Name == tools.FdToolName {
 								searchTCID = tc.ID
 							}
 						}
@@ -333,7 +333,7 @@ func TestWorkerAgent(t *testing.T) {
 					}
 				}
 
-				require.True(t, foundSearch, "Expected to find a search operation")
+				require.True(t, foundSearch, "Expected to find an fd operation")
 			})
 			t.Run("rg tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
@@ -551,7 +551,7 @@ func TestWorkerAgent(t *testing.T) {
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
-					Prompt:          "use search to find all .go files and use ls to list the current directory, it is very important that you run both tool calls in parallel",
+					Prompt:          "use fd to find all .go files and use ls to list the current directory, it is very important that you run both tool calls in parallel",
 					SessionID:       session.ID,
 					MaxOutputTokens: 10000,
 				})
@@ -584,7 +584,7 @@ func TestWorkerAgent(t *testing.T) {
 				var searchTCID, lsTCID string
 
 				for _, tc := range toolCalls {
-					if tc.Name == tools.SearchToolName {
+					if tc.Name == tools.FdToolName {
 						foundSearch = true
 						searchTCID = tc.ID
 					}
@@ -594,7 +594,7 @@ func TestWorkerAgent(t *testing.T) {
 					}
 				}
 
-				require.True(t, foundSearch, "Expected to find a search tool call")
+				require.True(t, foundSearch, "Expected to find an fd tool call")
 				require.True(t, foundLS, "Expected to find an ls tool call")
 
 				require.GreaterOrEqual(t, len(toolMsgs), 2, "Expected at least 2 tool results in the same message")
@@ -606,8 +606,8 @@ func TestWorkerAgent(t *testing.T) {
 					for _, tr := range msg.ToolResults() {
 						if tr.ToolCallID == searchTCID {
 							foundSearchResult = true
-							require.Contains(t, tr.Content, "main.go", "Expected search result to contain main.go")
-							require.False(t, tr.IsError, "Expected search result to not be an error")
+							require.Contains(t, tr.Content, "main.go", "Expected fd result to contain main.go")
+							require.False(t, tr.IsError, "Expected fd result to not be an error")
 						}
 						if tr.ToolCallID == lsTCID {
 							foundLSResult = true
@@ -617,7 +617,7 @@ func TestWorkerAgent(t *testing.T) {
 					}
 				}
 
-				require.True(t, foundSearchResult, "Expected to find search tool result")
+				require.True(t, foundSearchResult, "Expected to find fd tool result")
 				require.True(t, foundLSResult, "Expected to find ls tool result")
 			})
 		})

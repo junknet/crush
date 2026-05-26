@@ -55,6 +55,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
+	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/stringext"
 	"github.com/charmbracelet/crush/internal/version"
@@ -65,10 +66,10 @@ import (
 const (
 	DefaultSessionName = "Untitled Session"
 
-	// Auto-summarization triggers when used >= 70% of context window
-	// (i.e. remaining <= 30%). Single ratio for every window size so
-	// large-window models compact at the same proportional point as small ones.
-	autoSummarizeRemainingRatio = 0.30
+	// Auto-summarization triggers when used >= 70% of context window. Single
+	// ratio for every window size so large-window models compact at the same
+	// proportional point as small ones.
+	autoSummarizeUsedRatio = 0.70
 
 	firstModelEventTimeout = 60 * time.Second
 )
@@ -87,6 +88,22 @@ var (
 	orphanThinkTagRegex = regexp.MustCompile(`</?think>`)
 )
 
+type agentCtxKey string
+
+const (
+	systemPromptCtxKey agentCtxKey = "agent:system"
+)
+
+// WithSystemPrompt marks the context as a system-initiated agent run.
+func WithSystemPrompt(ctx context.Context) context.Context {
+	return context.WithValue(ctx, systemPromptCtxKey, true)
+}
+
+func isSystemPrompt(ctx context.Context) bool {
+	v, _ := ctx.Value(systemPromptCtxKey).(bool)
+	return v
+}
+
 type SessionAgentCall struct {
 	SessionID        string
 	Prompt           string
@@ -101,6 +118,7 @@ type SessionAgentCall struct {
 	FrequencyPenalty *float64
 	PresencePenalty  *float64
 	NonInteractive   bool
+	ReadOnly         bool
 	TraceRuntime     *agentruntime.RuntimeSession
 	TaskNodeID       string
 	TaskParentID     string
@@ -108,6 +126,7 @@ type SessionAgentCall struct {
 	ProviderID       string
 	ProviderType     string
 	ModelID          string
+	IsSystem         bool
 }
 
 type SessionAgent interface {
@@ -300,6 +319,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			wrapped[i] = &memExtractToolWrapper{inner: tool, memoryDir: memoryDir}
 		}
 		agentTools = wrapped
+	} else if call.ReadOnly {
+		wrapped := make([]fantasy.AgentTool, len(agentTools))
+		for i, tool := range agentTools {
+			wrapped[i] = &readOnlyToolWrapper{inner: tool}
+		}
+		agentTools = wrapped
 	}
 
 	sessionLock := sync.Mutex{}
@@ -353,6 +378,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	traceID := uuid.NewString()
 	ctx = crushlog.WithTraceID(ctx, traceID)
 	ctx = crushlog.WithSessionID(ctx, call.SessionID)
+
+	if isSystemPrompt(ctx) {
+		call.IsSystem = true
+	}
+
 	slog.DebugContext(ctx, "Agent run started", "sub_agent", a.isSubAgent)
 
 	genCtx, cancel := context.WithCancelCause(ctx)
@@ -504,6 +534,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			go WatchProviderHealth(streamCtx, currentModel.ModelCfg.Provider, candidateModels, func() {
 				cancelStream(ErrProviderFailover)
 			})
+			requestID := call.TaskNodeID
+			if requestID == "" {
+				requestID = traceID
+			}
+			observer := newLLMTraceObserver(streamCtx, requestID, attempt)
 
 			receivedFirstToken := false
 			firstTokenTimer := time.AfterFunc(firstModelEventTimeout, func() {
@@ -518,6 +553,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					receivedFirstToken = true
 					firstTokenTimer.Stop()
 				}
+			}
+			recordFirstModelEvent := func(eventType string) {
+				observer.recordFirstEvent(eventType)
+				stopFirstTokenTimer()
+			}
+			recordFirstTextDelta := func() {
+				recordFirstModelEvent("text_delta")
+				observer.recordFirstText()
 			}
 
 			result, lastErr = agent.Stream(streamCtx, fantasy.AgentStreamCall{
@@ -589,6 +632,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					if promptPrefix != "" {
 						prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(promptPrefix)}, prepared.Messages...)
 					}
+					var maxOutputTokenValue int64
+					if maxOutputTokens != nil {
+						maxOutputTokenValue = *maxOutputTokens
+					}
+					contextWindowTokens := resolvedModelContextWindow(currentModel)
+					observer.start(options.StepNumber, buildLLMRequestMetrics(prepared.Messages, prepared.Tools, files, call.Attachments, contextWindowTokens, maxOutputTokenValue))
 
 					if isFirstStep && currentAssistant != nil {
 						if deleteErr := a.messages.Delete(callContext, currentAssistant.ID); deleteErr != nil {
@@ -616,16 +665,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return callContext, prepared, err
 				},
 				OnReasoningStart: func(id string, reasoning fantasy.ReasoningContent) error {
-					stopFirstTokenTimer()
+					recordFirstModelEvent("reasoning_start")
 					currentAssistant.AppendReasoningContent(reasoning.Text)
 					return a.messages.Update(genCtx, *currentAssistant)
 				},
 				OnReasoningDelta: func(id string, text string) error {
-					stopFirstTokenTimer()
+					recordFirstModelEvent("reasoning_delta")
 					currentAssistant.AppendReasoningContent(text)
 					return a.messages.Update(genCtx, *currentAssistant)
 				},
 				OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
+					recordFirstModelEvent("reasoning_end")
 					if anthropicData, ok := reasoning.ProviderMetadata[anthropic.Name]; ok {
 						if reasoning, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok {
 							currentAssistant.AppendReasoningSignature(reasoning.Signature)
@@ -645,7 +695,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return a.messages.Update(genCtx, *currentAssistant)
 				},
 				OnTextDelta: func(id string, text string) error {
-					stopFirstTokenTimer()
+					recordFirstTextDelta()
 					if len(currentAssistant.Parts) == 0 {
 						text = strings.TrimPrefix(text, "\n")
 					}
@@ -653,7 +703,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return a.messages.Update(genCtx, *currentAssistant)
 				},
 				OnToolInputStart: func(id string, toolName string) error {
-					stopFirstTokenTimer()
+					recordFirstModelEvent("tool_input_start")
 					toolCall := message.ToolCall{
 						ID:               id,
 						Name:             toolName,
@@ -664,10 +714,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return a.messages.Update(ctx, *currentAssistant)
 				},
 				OnRetry: func(err *fantasy.ProviderError, delay time.Duration) {
+					observer.retry(err, delay)
 					slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay)...)
 				},
 				OnToolCall: func(tc fantasy.ToolCallContent) error {
-					stopFirstTokenTimer()
+					recordFirstModelEvent("tool_call")
 					toolCall := message.ToolCall{
 						ID:               tc.ToolCallID,
 						Name:             tc.ToolName,
@@ -682,7 +733,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return a.messages.Update(ctx, *currentAssistant)
 				},
 				OnToolResult: func(result fantasy.ToolResultContent) error {
-					stopFirstTokenTimer()
+					recordFirstModelEvent("tool_result")
 					toolResult := a.convertToToolResult(result)
 					_, createMsgErr := a.messages.Create(ctx, currentAssistant.SessionID, message.CreateMessageParams{
 						Role: message.Tool,
@@ -693,7 +744,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return createMsgErr
 				},
 				OnStepFinish: func(stepResult fantasy.StepResult) error {
-					stopFirstTokenTimer()
+					recordFirstModelEvent("step_finish")
 					finishReason := message.FinishReasonUnknown
 					switch stepResult.FinishReason {
 					case fantasy.FinishReasonLength:
@@ -735,6 +786,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						return sessionErr
 					}
 					currentSession = updatedSession
+					autoSummarizeTriggered := a.shouldAutoSummarize(currentModel, currentSession)
+					observer.finish(string(stepResult.FinishReason), stepResult.Usage, llmUsageAudit{
+						autoSummarizeUsedTokens: autoSummarizeUsedTokens(currentSession),
+						autoSummarizeTriggered:  autoSummarizeTriggered,
+					})
+					if autoSummarizeTriggered {
+						shouldSummarize = true
+					}
 					if updateErr := a.messages.Update(genCtx, *currentAssistant); updateErr != nil {
 						return updateErr
 					}
@@ -745,14 +804,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					return nil
 				},
 				StopWhen: a.buildStopConditions(func(_ []fantasy.StepResult) bool {
-					cw := int64(currentModel.CatwalkCfg.ContextWindow)
-					if cw == 0 {
-						return false
-					}
-					tokens := currentSession.CompletionTokens + currentSession.PromptTokens
-					remaining := cw - tokens
-					threshold := int64(float64(cw) * autoSummarizeRemainingRatio)
-					if (remaining <= threshold) && !a.disableAutoSummarize {
+					if a.shouldAutoSummarize(currentModel, currentSession) {
 						shouldSummarize = true
 						return true
 					}
@@ -768,6 +820,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if cause := context.Cause(streamCtx); cause != nil && !errors.Is(cause, context.Canceled) {
 					lastErr = cause
 				}
+			}
+			if lastErr != nil {
+				observer.fail(lastErr)
 			}
 
 			if lastErr == nil {
@@ -997,6 +1052,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		}
 	}
 
+	if err == nil && result != nil && !a.isSubAgent && !call.ReadOnly {
+		sessionID := call.SessionID
+		model := currentModel
+		go a.maybeUpdateSessionMemory(context.Background(), sessionID, model)
+	}
+
 	// Release active request before publishing the notification.
 	// TUI handlers poll IsSessionBusy() and only re-evaluate when a
 	// tea.Msg arrives, so the cleanup must precede the notify or
@@ -1044,6 +1105,7 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 	if a.IsSessionBusy(sessionID) {
 		return ErrSessionBusy
 	}
+	ctx = context.WithValue(ctx, tools.SessionIDContextKey, sessionID)
 
 	// Snapshot cancel generation. A Cancel during summarize must
 	// block the post-summarize queue drain (line ~838) for the same
@@ -1065,6 +1127,12 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 	}
 	if len(msgs) == 0 {
 		// Nothing to summarize.
+		return nil
+	}
+
+	if compacted, compactErr := a.trySessionMemoryCompaction(ctx, sessionID, primaryModel, currentSession, msgs); compactErr != nil {
+		slog.Warn("Session memory compaction failed; falling back to LLM summarization", "session_id", sessionID, "error", compactErr)
+	} else if compacted {
 		return nil
 	}
 
@@ -1095,6 +1163,18 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 		}
 	}
 
+	compactionStartedAt := time.Now()
+	a.appendConversationCompactionTrace(ctx, agentruntime.TraceKindConversationCompactionStarted, compactionTraceOptions{
+		startedAt:                     compactionStartedAt,
+		currentModel:                  primaryModel,
+		currentSession:                currentSession,
+		sourceMessages:                len(summarySourceMessages),
+		contextBytes:                  jsonSize(summarySourceMessages),
+		preflightEstimatedInputTokens: estimatedInputTokens,
+		contextWindowTokens:           resolvedModelContextWindow(primaryModel),
+		maxOutputTokens:               summaryOutputTokens,
+	})
+
 	genCtx, cancel := context.WithCancelCause(ctx)
 	a.activeRequests.Set(sessionID, cancel)
 	defer a.activeRequests.Del(sessionID)
@@ -1124,6 +1204,7 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 
 	summaryMessages := summarySourceMessages
 	var resp *fantasy.AgentResult
+	var lastCompactionProgressAt time.Time
 	for attempt := 0; attempt < summaryRetryLimit; attempt++ {
 		summaryMessage.Parts = nil
 		if updateErr := a.messages.Update(ctx, summaryMessage); updateErr != nil {
@@ -1159,6 +1240,20 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 			},
 			OnTextDelta: func(id, text string) error {
 				summaryMessage.AppendContent(text)
+				if lastCompactionProgressAt.IsZero() || time.Since(lastCompactionProgressAt) >= time.Second {
+					lastCompactionProgressAt = time.Now()
+					a.appendConversationCompactionTrace(genCtx, agentruntime.TraceKindConversationCompactionProgress, compactionTraceOptions{
+						startedAt:                     compactionStartedAt,
+						currentModel:                  primaryModel,
+						currentSession:                currentSession,
+						sourceMessages:                len(summaryMessages),
+						contextBytes:                  jsonSize(summaryMessages),
+						preflightEstimatedInputTokens: estimatedInputTokens,
+						contextWindowTokens:           resolvedModelContextWindow(primaryModel),
+						maxOutputTokens:               summaryOutputTokens,
+						outputBytes:                   len(summaryMessage.Content().Text),
+					})
+				}
 				return a.messages.Update(genCtx, summaryMessage)
 			},
 		})
@@ -1174,6 +1269,19 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 		if errors.Is(err, context.Canceled) {
 			// User cancelled summarize we need to remove the summary message.
 			deleteErr := a.messages.Delete(ctx, summaryMessage.ID)
+			a.appendConversationCompactionTrace(ctx, agentruntime.TraceKindConversationCompactionFailed, compactionTraceOptions{
+				startedAt:                     compactionStartedAt,
+				finishedAt:                    time.Now(),
+				currentModel:                  primaryModel,
+				currentSession:                currentSession,
+				sourceMessages:                len(summaryMessages),
+				contextBytes:                  jsonSize(summaryMessages),
+				preflightEstimatedInputTokens: estimatedInputTokens,
+				contextWindowTokens:           resolvedModelContextWindow(primaryModel),
+				maxOutputTokens:               summaryOutputTokens,
+				outputBytes:                   len(summaryMessage.Content().Text),
+				err:                           context.Canceled,
+			})
 			return deleteErr
 		}
 
@@ -1196,6 +1304,19 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 		// Mark the summary message as finished with an error so the UI
 		// stops spinning.
 		summaryMessage.AddFinish(message.FinishReasonError, "Summarization Error", err.Error())
+		a.appendConversationCompactionTrace(ctx, agentruntime.TraceKindConversationCompactionFailed, compactionTraceOptions{
+			startedAt:                     compactionStartedAt,
+			finishedAt:                    time.Now(),
+			currentModel:                  primaryModel,
+			currentSession:                currentSession,
+			sourceMessages:                len(summaryMessages),
+			contextBytes:                  jsonSize(summaryMessages),
+			preflightEstimatedInputTokens: estimatedInputTokens,
+			contextWindowTokens:           resolvedModelContextWindow(primaryModel),
+			maxOutputTokens:               summaryOutputTokens,
+			outputBytes:                   len(summaryMessage.Content().Text),
+			err:                           err,
+		})
 		if updateErr := a.messages.Update(ctx, summaryMessage); updateErr != nil {
 			return updateErr
 		}
@@ -1220,6 +1341,24 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 	}
 
 	a.updateSessionUsage(primaryModel, &currentSession, resp.TotalUsage, openrouterCost)
+	a.appendConversationCompactionTrace(ctx, agentruntime.TraceKindConversationCompactionFinished, compactionTraceOptions{
+		startedAt:                     compactionStartedAt,
+		finishedAt:                    time.Now(),
+		currentModel:                  primaryModel,
+		currentSession:                currentSession,
+		sourceMessages:                len(summaryMessages),
+		contextBytes:                  jsonSize(summaryMessages),
+		preflightEstimatedInputTokens: estimatedInputTokens,
+		contextWindowTokens:           resolvedModelContextWindow(primaryModel),
+		maxOutputTokens:               summaryOutputTokens,
+		outputBytes:                   len(summaryMessage.Content().Text),
+		inputTokens:                   resp.TotalUsage.InputTokens,
+		outputTokens:                  resp.TotalUsage.OutputTokens,
+		totalTokens:                   resp.TotalUsage.TotalTokens,
+		reasoningTokens:               resp.TotalUsage.ReasoningTokens,
+		cacheCreationTokens:           resp.TotalUsage.CacheCreationTokens,
+		cacheReadTokens:               resp.TotalUsage.CacheReadTokens,
+	})
 
 	// Just in case, get just the last usage info.
 	usage := resp.Response.Usage
@@ -1251,6 +1390,75 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 	a.messageQueue.Set(sessionID, queuedMessages[1:])
 	_, qErr := a.Run(ctx, firstQueuedMessage)
 	return qErr
+}
+
+type compactionTraceOptions struct {
+	startedAt                     time.Time
+	finishedAt                    time.Time
+	currentModel                  Model
+	currentSession                session.Session
+	sourceMessages                int
+	contextBytes                  int
+	preflightEstimatedInputTokens int64
+	contextWindowTokens           int64
+	maxOutputTokens               int64
+	outputBytes                   int
+	inputTokens                   int64
+	outputTokens                  int64
+	totalTokens                   int64
+	reasoningTokens               int64
+	cacheCreationTokens           int64
+	cacheReadTokens               int64
+	err                           error
+}
+
+func (a *sessionAgent) appendConversationCompactionTrace(ctx context.Context, kind agentruntime.TraceKind, opts compactionTraceOptions) {
+	startedAt := opts.startedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	status := "running"
+	success := false
+	if kind == agentruntime.TraceKindConversationCompactionFinished {
+		status = "finished"
+		success = true
+	}
+	if kind == agentruntime.TraceKindConversationCompactionFailed {
+		status = "failed"
+	}
+	entry := agentruntime.TaskTrace{
+		StartedAt:                     startedAt,
+		FinishedAt:                    opts.finishedAt,
+		ConversationSessionID:         opts.currentSession.ID,
+		SessionID:                     opts.currentSession.ID,
+		RequestID:                     "conversation_compaction:" + opts.currentSession.ID,
+		ProviderID:                    opts.currentModel.ModelCfg.Provider,
+		ProviderType:                  string(opts.currentModel.ProviderType),
+		ModelID:                       opts.currentModel.ModelCfg.Model,
+		Kind:                          kind,
+		Status:                        status,
+		Success:                       success,
+		Input:                         "conversation compaction",
+		OutputBytes:                   opts.outputBytes,
+		InputTokens:                   opts.inputTokens,
+		OutputTokens:                  opts.outputTokens,
+		TotalTokens:                   opts.totalTokens,
+		ReasoningTokens:               opts.reasoningTokens,
+		CacheCreationTokens:           opts.cacheCreationTokens,
+		CacheReadTokens:               opts.cacheReadTokens,
+		ContextMessageCount:           opts.sourceMessages,
+		ContextBytes:                  opts.contextBytes,
+		PreflightEstimatedInputTokens: opts.preflightEstimatedInputTokens,
+		ContextWindowTokens:           opts.contextWindowTokens,
+		MaxOutputTokens:               opts.maxOutputTokens,
+	}
+	if !entry.FinishedAt.IsZero() {
+		entry.DurationMs = entry.FinishedAt.Sub(entry.StartedAt).Milliseconds()
+	}
+	if opts.err != nil {
+		entry.Error = opts.err.Error()
+	}
+	tools.AppendTraceFromContext(ctx, entry)
 }
 
 func (a *sessionAgent) getCacheControlOptions() fantasy.ProviderOptions {
@@ -1293,8 +1501,12 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 		attachmentParts = append(attachmentParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
 	}
 	parts = append(parts, attachmentParts...)
+	role := message.User
+	if call.IsSystem {
+		role = message.System
+	}
 	msg, err := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
-		Role:  message.User,
+		Role:  role,
 		Parts: parts,
 	})
 	if err != nil {
@@ -1417,7 +1629,7 @@ Always check your todo list before responding "Ready?".`
 			}
 			continue
 		}
-		aiMsgs := m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: true})
+		aiMsgs := m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: m.Role == message.Tool})
 		if !supportsImages {
 			for i := range aiMsgs {
 				if aiMsgs[i].Role == fantasy.MessageRoleUser {
@@ -1734,6 +1946,37 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	session.PromptTokens = usage.InputTokens + usage.CacheReadTokens
 }
 
+func (a *sessionAgent) shouldAutoSummarize(model Model, session session.Session) bool {
+	if a.disableAutoSummarize {
+		return false
+	}
+	contextWindow := resolvedModelContextWindow(model)
+	if contextWindow <= 0 {
+		return false
+	}
+	return autoSummarizeUsedTokens(session) >= autoSummarizeThresholdTokens(contextWindow)
+}
+
+func resolvedModelContextWindow(model Model) int64 {
+	return config.ResolveModelContextWindow(
+		int64(model.CatwalkCfg.ContextWindow),
+		model.ModelCfg.Provider,
+		string(model.ProviderType),
+		model.ModelCfg.Model,
+	)
+}
+
+func autoSummarizeUsedTokens(session session.Session) int64 {
+	return session.CompletionTokens + session.PromptTokens
+}
+
+func autoSummarizeThresholdTokens(contextWindow int64) int64 {
+	if contextWindow <= 0 {
+		return 0
+	}
+	return int64(float64(contextWindow) * autoSummarizeUsedRatio)
+}
+
 func (a *sessionAgent) Cancel(sessionID string) {
 	// Bump the cancel generation BEFORE cancelling the ctx. The Run
 	// goroutine compares against the snapshot it captured at start; if
@@ -1790,9 +2033,14 @@ func (a *sessionAgent) DrainQueue(sessionID string) []string {
 		return nil
 	}
 	a.messageQueue.Del(sessionID)
-	prompts := make([]string, len(l))
-	for i, c := range l {
-		prompts[i] = c.Prompt
+	var prompts []string
+	for _, c := range l {
+		// Only drain non-system prompts to the composer. System prompts
+		// (like background-job wake-ups) contain long history tails that
+		// would pollute the user's input area on ESC.
+		if !c.IsSystem {
+			prompts = append(prompts, c.Prompt)
+		}
 	}
 	return prompts
 }
@@ -1890,7 +2138,7 @@ func mergeDeferredTools(base []fantasy.AgentTool, reg *tools.DeferredRegistry) [
 			continue
 		}
 		seen[name] = struct{}{}
-		out = append(out, t)
+		out = append(out, newTracedTool(t))
 	}
 	for _, stub := range reg.SnapshotStubs() {
 		name := stub.Info().Name
@@ -1898,7 +2146,7 @@ func mergeDeferredTools(base []fantasy.AgentTool, reg *tools.DeferredRegistry) [
 			continue
 		}
 		seen[name] = struct{}{}
-		out = append(out, stub)
+		out = append(out, newTracedTool(stub))
 	}
 	return out
 }
@@ -2000,7 +2248,7 @@ func (a *sessionAgent) buildStopConditions(base ...fantasy.StopCondition) []fant
 // convertToToolResult converts a fantasy tool result to a message tool result.
 // maxToolResultLength caps the characters of any single tool result that
 // reaches the model. Auto-summarize is reactive (checked between steps, see
-// StopWhen), so a single oversized result — a huge file View, MCP/ptc payload —
+// StopWhen), so a single oversized result — a huge file View or MCP payload —
 // could otherwise leap the context window past its limit in one step before the
 // next summarize check runs. ~120k chars ≈ 30k tokens, generous for legitimate
 // reads while bounding the worst case to a fraction of the window. Tools with
@@ -2246,6 +2494,100 @@ func (s *speculativeToolWrapper) Run(ctx context.Context, call fantasy.ToolCall)
 	return s.inner.Run(ctx, call)
 }
 
+var readOnlyBlockedTools = map[string]struct{}{
+	tools.BashToolName:           {},
+	tools.DownloadToolName:       {},
+	tools.EditToolName:           {},
+	tools.JobKillToolName:        {},
+	tools.MultiEditToolName:      {},
+	tools.NimRestartToolName:     {},
+	tools.NuToolName:             {},
+	tools.RunToolName:            {},
+	tools.ScheduleWakeupToolName: {},
+	tools.TodosToolName:          {},
+	tools.WriteToolName:          {},
+}
+
+type readOnlyToolWrapper struct {
+	inner fantasy.AgentTool
+}
+
+func (r *readOnlyToolWrapper) Info() fantasy.ToolInfo {
+	return r.inner.Info()
+}
+
+func (r *readOnlyToolWrapper) ProviderOptions() fantasy.ProviderOptions {
+	return r.inner.ProviderOptions()
+}
+
+func (r *readOnlyToolWrapper) SetProviderOptions(opts fantasy.ProviderOptions) {
+	r.inner.SetProviderOptions(opts)
+}
+
+func (r *readOnlyToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	if call.Name == AgentToolName {
+		if resp, blocked := readOnlyAgentToolResponse(call); blocked {
+			return resp, nil
+		}
+		return r.inner.Run(ctx, call)
+	}
+	if call.Name == tools.DagRunToolName {
+		if resp, blocked := readOnlyDagRunToolResponse(call); blocked {
+			return resp, nil
+		}
+		return r.inner.Run(ctx, call)
+	}
+	if _, blocked := readOnlyBlockedTools[call.Name]; blocked {
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because this turn is read-only. Use view, ls, fd, rg, ast_grep, sourcegraph, fetch, or read-only LSP tools instead.", call.Name))
+		resp.StopTurn = true
+		return resp, nil
+	}
+	return r.inner.Run(ctx, call)
+}
+
+func readOnlyAgentToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bool) {
+	var params AgentParams
+	if err := json.Unmarshal([]byte(call.Input), &params); err != nil {
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because its input could not be parsed for read-only policy: %v", call.Name, err))
+		resp.StopTurn = true
+		return resp, true
+	}
+	profile, role, err := resolveAgentToolRole(params.Role)
+	if err != nil {
+		resp := fantasy.NewTextErrorResponse(err.Error())
+		resp.StopTurn = true
+		return resp, true
+	}
+	switch profile {
+	case scheduler.ProfileExploreAgent, scheduler.ProfilePlanAgent, scheduler.ProfileAuditorAgent:
+		return fantasy.ToolResponse{}, false
+	default:
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Agent role %s is blocked because this turn is read-only. Use explore, plan, or auditor instead.", role))
+		resp.StopTurn = true
+		return resp, true
+	}
+}
+
+func readOnlyDagRunToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bool) {
+	var params tools.DagRunParams
+	if err := json.Unmarshal([]byte(call.Input), &params); err != nil {
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because its input could not be parsed for read-only policy: %v", call.Name, err))
+		resp.StopTurn = true
+		return resp, true
+	}
+	for _, node := range params.Nodes {
+		switch strings.ToLower(strings.TrimSpace(node.Tool)) {
+		case "fd", "rg", "view":
+			continue
+		default:
+			resp := fantasy.NewTextErrorResponse(fmt.Sprintf("dag_run node %s uses %q, but read-only turns only allow fd, rg, and view nodes.", node.ID, node.Tool))
+			resp.StopTurn = true
+			return resp, true
+		}
+	}
+	return fantasy.ToolResponse{}, false
+}
+
 type memExtractToolWrapper struct {
 	inner     fantasy.AgentTool
 	memoryDir string
@@ -2265,7 +2607,7 @@ func (m *memExtractToolWrapper) SetProviderOptions(opts fantasy.ProviderOptions)
 
 func (m *memExtractToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	name := call.Name
-	if name == "view" || name == "search" || name == "rg" || name == "todos" {
+	if name == "view" || name == "fd" || name == "rg" || name == "todos" {
 		return m.inner.Run(ctx, call)
 	}
 

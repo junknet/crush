@@ -293,8 +293,37 @@ func setupAppWorkspace(cmd *cobra.Command) (*workspace.AppWorkspace, func(), err
 
 	ws := workspace.NewAppWorkspace(appInstance, store)
 	traceFile, _ := cmd.Flags().GetString("trace-file")
+	var traceCancel context.CancelFunc
+	var traceWriter *agentruntime.TraceJSONLFileWriter
+	var traceDone chan struct{}
+	if traceFile != "" {
+		traceWriter, err = agentruntime.NewTraceJSONLFileWriter(traceFile)
+		if err != nil {
+			_ = conn.Close()
+			appInstance.Shutdown()
+			return nil, nil, err
+		}
+		var traceCtx context.Context
+		traceCtx, traceCancel = context.WithCancel(ctx)
+		traceEvents := agentruntime.SubscribeTraceEvents(traceCtx)
+		traceDone = make(chan struct{})
+		go func() {
+			defer close(traceDone)
+			for ev := range traceEvents {
+				if err := traceWriter.Append(ev.Payload); err != nil {
+					slog.Error("Failed to stream runtime trace entry", "path", traceFile, "error", err)
+				}
+			}
+		}()
+	}
 	cleanup := func() {
 		appInstance.Shutdown()
+		if traceCancel != nil {
+			traceCancel()
+		}
+		if traceDone != nil {
+			<-traceDone
+		}
 		if traceFile == "" {
 			return
 		}
@@ -302,19 +331,35 @@ func setupAppWorkspace(cmd *cobra.Command) (*workspace.AppWorkspace, func(), err
 			TraceEntries() []agentruntime.TaskTrace
 		})
 		if !ok {
+			if traceWriter != nil {
+				if err := traceWriter.Close(); err != nil {
+					slog.Error("Failed to close runtime trace file", "path", traceFile, "error", err)
+				}
+			}
 			slog.Warn("Trace file requested but coordinator does not expose trace entries", "path", traceFile)
 			return
 		}
 		traces := traceSource.TraceEntries()
 		if len(traces) == 0 {
+			if traceWriter != nil {
+				if err := traceWriter.Close(); err != nil {
+					slog.Error("Failed to close runtime trace file", "path", traceFile, "error", err)
+				}
+			}
 			slog.Info("No runtime trace entries recorded", "path", traceFile)
 			return
 		}
-		if err := agentruntime.WriteTraceJSONLFile(traceFile, traces); err != nil {
-			slog.Error("Failed to write runtime trace file", "path", traceFile, "error", err)
-			return
+		if traceWriter != nil {
+			for _, trace := range traces {
+				if err := traceWriter.Append(trace); err != nil {
+					slog.Error("Failed to flush runtime trace entry", "path", traceFile, "error", err)
+				}
+			}
+			if err := traceWriter.Close(); err != nil {
+				slog.Error("Failed to close runtime trace file", "path", traceFile, "error", err)
+			}
 		}
-		slog.Info("Wrote runtime trace file", "path", traceFile, "entries", len(traces))
+		slog.Info("Runtime trace file streamed", "path", traceFile, "entries", len(traces))
 	}
 	return ws, cleanup, nil
 }

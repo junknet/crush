@@ -237,11 +237,16 @@ func messageToProto(m message.Message) proto.Message {
 				Finished: v.Finished,
 			})
 		case message.ToolResult:
+			content := v.Content
+			const maxContent = 8192 // 8KB snippet is plenty for mobile preview
+			if len(content) > maxContent {
+				content = content[:maxContent] + "\n\n... (output truncated for mobile) ..."
+			}
 			msg.Parts = append(msg.Parts, proto.ToolResult{
 				ToolCallID: v.ToolCallID,
 				Name:       v.Name,
-				Content:    v.Content,
-				Data:       v.Data,
+				Content:    content,
+				Data:       v.Data, // Data is usually small or nil for text tools
 				MIMEType:   v.MIMEType,
 				Metadata:   v.Metadata,
 				IsError:    v.IsError,

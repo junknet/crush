@@ -3,10 +3,13 @@ package model
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/message"
 )
+
+const summaryPromptHistoryPrefix = "Compress the conversation into durable memory for the next agent."
 
 // promptHistoryLoadedMsg is sent when prompt history is loaded.
 type promptHistoryLoadedMsg struct {
@@ -37,6 +40,9 @@ func (m *UI) loadPromptHistory() tea.Cmd {
 		seen := make(map[string]bool)
 		for _, msg := range messages {
 			if text := msg.Content().Text; text != "" {
+				if !shouldIncludePromptHistoryText(text) {
+					continue
+				}
 				if !seen[text] {
 					seen[text] = true
 					texts = append(texts, text)
@@ -45,6 +51,14 @@ func (m *UI) loadPromptHistory() tea.Cmd {
 		}
 		return promptHistoryLoadedMsg{messages: texts}
 	}
+}
+
+func shouldIncludePromptHistoryText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	return !strings.HasPrefix(trimmed, summaryPromptHistoryPrefix)
 }
 
 // handleHistoryUp handles up arrow for history navigation.

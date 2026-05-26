@@ -28,7 +28,6 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
-	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/commands"
@@ -40,8 +39,10 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/relay"
+	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
 	"github.com/charmbracelet/crush/internal/ui/chat"
@@ -78,6 +79,8 @@ const (
 	compactModeWidthBreakpoint  = 120
 	compactModeHeightBreakpoint = 30
 )
+
+const autoCompactContextPercent = 70
 
 // If pasted text has more than 10 newlines, treat it as a file attachment.
 const pasteLinesThreshold = 10
@@ -267,6 +270,19 @@ type UI struct {
 	// subAgents holds recent and active sub-agent events for the sidebar.
 	// Capped to subAgentHistoryMax entries; oldest gets evicted.
 	subAgents []subAgentEntry
+	// taskRuntimeEvents holds current task DAG lifecycle events for the bottom
+	// runtime line. It is updated only from scheduler pub/sub messages.
+	taskRuntimeEvents map[string]scheduler.Event
+	// toolRuntimeEvents holds current tool lifecycle traces for the bottom
+	// runtime line. It is updated from runtime trace pub/sub messages.
+	toolRuntimeEvents map[string]agentruntime.TaskTrace
+	// latestLLMContextTrace holds the newest LLM request trace with context
+	// sizing data for the current session. It drives the bottom context line
+	// while the request is still running, before session token totals persist.
+	latestLLMContextTrace agentruntime.TaskTrace
+	// runtimeActivities are updatable chat rows for non-message runtime work
+	// such as compaction and monitor watches.
+	runtimeActivities map[string]*chat.RuntimeActivityItem
 
 	// sidebarLogo keeps a cached version of the sidebar sidebarLogo.
 	sidebarLogo string
@@ -871,9 +887,26 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, handleMCPResourcesEvent(m.com.Workspace, msg.Payload.Name)
 		}
 	case pubsub.Event[scheduler.Event]:
-		m.subAgents = recordSubAgentTaskEvent(m.subAgents, msg.Payload)
-		if cmd := m.handleSchedulerEvent(msg.Payload); cmd != nil {
-			cmds = append(cmds, cmd)
+		if m.shouldHandleSchedulerEvent(msg.Payload) {
+			m.recordTaskRuntimeEvent(msg.Payload)
+			m.subAgents = recordSubAgentTaskEvent(m.subAgents, msg.Payload)
+			if cmd := m.handleSchedulerEvent(msg.Payload); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	case pubsub.Event[agentruntime.TaskTrace]:
+		if m.shouldHandleRuntimeTrace(msg.Payload) {
+			m.recordLLMContextTrace(msg.Payload)
+			m.recordToolRuntimeTrace(msg.Payload)
+			if cmd := m.handleRuntimeActivityTrace(msg.Payload); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	case pubsub.Event[shell.BackgroundJobEvent]:
+		if m.shouldHandleBackgroundJobEvent(msg.Payload) {
+			if cmd := m.handleBackgroundJobEvent(msg.Payload); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	case pubsub.Event[permission.PermissionRequest]:
 		if cmd := m.openPermissionsDialog(msg.Payload); cmd != nil {
@@ -3501,6 +3534,22 @@ func mimeOf(content []byte) string {
 	return http.DetectContentType(content[:mimeBufferSize])
 }
 
+func supportedImageMimeOf(content []byte) (string, bool) {
+	if len(content) == 0 {
+		return "", false
+	}
+	mimeType := mimeOf(content)
+	if i := strings.IndexByte(mimeType, ';'); i >= 0 {
+		mimeType = strings.TrimSpace(mimeType[:i])
+	}
+	switch mimeType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return mimeType, true
+	default:
+		return "", false
+	}
+}
+
 var readyPlaceholders = [...]string{
 	"Ready!",
 	"Ready...",
@@ -3532,8 +3581,10 @@ func (m *UI) runtimeStatusLine() string {
 		return ""
 	}
 	stats := m.com.Workspace.BackgroundShellStats()
-	parts := make([]string, 0, 4)
-	if busyStatus := m.activeRunStatusText(); busyStatus != "" {
+	parts := make([]string, 0, 6)
+	if compactStatus := m.compactionRuntimeStatusPart(); compactStatus != "" {
+		parts = append(parts, compactStatus)
+	} else if busyStatus := m.activeRunStatusText(); busyStatus != "" {
 		parts = append(parts, busyStatus)
 	} else if m.isAgentBusy() {
 		parts = append(parts, "model running")
@@ -3544,27 +3595,753 @@ func (m *UI) runtimeStatusLine() string {
 	if stats.ActiveMonitors > 0 {
 		parts = append(parts, fmt.Sprintf("monitor %d", stats.ActiveMonitors))
 	}
-	if contextPercent := m.contextUsagePercent(); contextPercent != "" {
-		parts = append(parts, "ctx "+contextPercent)
+	parts = append(parts, m.toolRuntimeStatusParts()...)
+	parts = append(parts, m.taskRuntimeStatusParts()...)
+	if contextStatus := m.contextUsageStatus(); contextStatus != "" {
+		parts = append(parts, contextStatus)
 	}
 	return strings.Join(parts, "  ·  ")
 }
 
+func (m *UI) compactionRuntimeStatusPart() string {
+	if m == nil || m.session == nil {
+		return ""
+	}
+	item := m.runtimeActivities[compactionActivityID(m.session.ID)]
+	if item == nil {
+		return ""
+	}
+	snapshot := item.Snapshot()
+	if snapshot.Kind != chat.RuntimeActivityConversationCompaction ||
+		snapshot.Status != chat.RuntimeActivityRunning {
+		return ""
+	}
+	parts := []string{"compacting"}
+	if !snapshot.StartedAt.IsZero() {
+		parts = append(parts, formatRuntimeStatusDuration(time.Since(snapshot.StartedAt)))
+	}
+	if snapshot.Tokens > 0 {
+		tokens := formatStatusTokenCount(snapshot.Tokens) + " tokens"
+		if !snapshot.TokensAreExact {
+			tokens = "~" + tokens
+		}
+		parts = append(parts, tokens)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func formatRuntimeStatusDuration(duration time.Duration) string {
+	totalSeconds := int(duration.Round(time.Second).Seconds())
+	if totalSeconds <= 0 {
+		return "0s"
+	}
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	if minutes <= 0 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	return fmt.Sprintf("%dm %ds", minutes, seconds)
+}
+
 func (m *UI) contextUsagePercent() string {
-	if m == nil || m.com == nil || m.com.Config() == nil || m.session == nil {
+	usedTokens, contextWindow, hasUsage, hasContextWindow := m.contextUsage()
+	if !hasUsage || !hasContextWindow {
 		return ""
 	}
-	agentCfg, ok := m.com.Config().Agents[config.AgentBrain]
-	if !ok {
-		return ""
-	}
-	model := m.com.Config().GetModelByType(agentCfg.Model)
-	if model == nil || model.ContextWindow <= 0 {
-		return ""
-	}
-	usedTokens := m.session.CompletionTokens + m.session.PromptTokens
-	percentage := (float64(usedTokens) / float64(model.ContextWindow)) * 100
+	percentage := (float64(usedTokens) / float64(contextWindow)) * 100
 	return fmt.Sprintf("%d%%", int(percentage))
+}
+
+func (m *UI) recordTaskRuntimeEvent(ev scheduler.Event) {
+	if ev.Kind == "" {
+		return
+	}
+	key := taskRuntimeEventKey(ev)
+	if key == "" {
+		return
+	}
+	if m.taskRuntimeEvents == nil {
+		m.taskRuntimeEvents = make(map[string]scheduler.Event)
+	}
+	m.taskRuntimeEvents[key] = ev
+	pruneTaskRuntimeEvents(m.taskRuntimeEvents)
+}
+
+func (m *UI) shouldHandleRuntimeTrace(trace agentruntime.TaskTrace) bool {
+	if m == nil || m.session == nil {
+		return true
+	}
+	if trace.ConversationSessionID == "" {
+		return true
+	}
+	return trace.ConversationSessionID == m.session.ID
+}
+
+func (m *UI) shouldHandleBackgroundJobEvent(ev shell.BackgroundJobEvent) bool {
+	if m == nil || m.session == nil {
+		return true
+	}
+	if ev.SessionID == "" {
+		return true
+	}
+	return ev.SessionID == m.session.ID
+}
+
+func (m *UI) handleRuntimeActivityTrace(trace agentruntime.TaskTrace) tea.Cmd {
+	if !isConversationCompactionTrace(trace.Kind) {
+		return nil
+	}
+	sessionID := trace.ConversationSessionID
+	if sessionID == "" {
+		sessionID = trace.SessionID
+	}
+	if sessionID == "" && m.session != nil {
+		sessionID = m.session.ID
+	}
+	if sessionID == "" {
+		return nil
+	}
+	return m.upsertRuntimeActivity(compactionActivitySnapshot(sessionID, trace))
+}
+
+func isConversationCompactionTrace(kind agentruntime.TraceKind) bool {
+	return kind == agentruntime.TraceKindConversationCompactionStarted ||
+		kind == agentruntime.TraceKindConversationCompactionProgress ||
+		kind == agentruntime.TraceKindConversationCompactionFinished ||
+		kind == agentruntime.TraceKindConversationCompactionFailed
+}
+
+func compactionActivitySnapshot(sessionID string, trace agentruntime.TaskTrace) chat.RuntimeActivitySnapshot {
+	status := chat.RuntimeActivityRunning
+	title := "Compacting conversation"
+	detail := compactionTraceDetail(trace)
+	finishedAt := trace.FinishedAt
+	switch trace.Kind {
+	case agentruntime.TraceKindConversationCompactionFinished:
+		status = chat.RuntimeActivityDone
+		title = "Compacted conversation"
+	case agentruntime.TraceKindConversationCompactionFailed:
+		status = chat.RuntimeActivityFailed
+		title = "Compaction failed"
+		if trace.Error != "" {
+			detail = trace.Error
+		}
+	}
+	tokens, exact := tokensFromTraceForRuntimeActivity(trace)
+	return chat.RuntimeActivitySnapshot{
+		ID:              compactionActivityID(sessionID),
+		Kind:            chat.RuntimeActivityConversationCompaction,
+		Status:          status,
+		Title:           title,
+		Detail:          detail,
+		StartedAt:       trace.StartedAt,
+		FinishedAt:      finishedAt,
+		Tokens:          tokens,
+		TokensAreExact:  exact,
+		ProgressPercent: -1,
+	}
+}
+
+func compactionTraceDetail(trace agentruntime.TaskTrace) string {
+	parts := make([]string, 0, 2)
+	if trace.ProviderID != "" || trace.ModelID != "" {
+		model := trace.ModelID
+		if model == "" {
+			model = "model"
+		}
+		if trace.ProviderID != "" {
+			model = trace.ProviderID + "/" + model
+		}
+		parts = append(parts, model)
+	}
+	if trace.ContextMessageCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d context messages", trace.ContextMessageCount))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func tokensFromTraceForRuntimeActivity(trace agentruntime.TaskTrace) (int64, bool) {
+	switch {
+	case trace.TotalTokens > 0:
+		return trace.TotalTokens, true
+	case trace.InputTokens+trace.OutputTokens > 0:
+		return trace.InputTokens + trace.OutputTokens, true
+	case trace.PreflightEstimatedInputTokens > 0:
+		return trace.PreflightEstimatedInputTokens, false
+	default:
+		return 0, false
+	}
+}
+
+func (m *UI) handleBackgroundJobEvent(ev shell.BackgroundJobEvent) tea.Cmd {
+	if ev.ID == "" || !isMonitorRuntimeEvent(ev.Kind) {
+		return nil
+	}
+	sessionID := m.sessionIDForRuntimeActivity(ev.SessionID)
+	id := monitorActivityID(sessionID, ev.ID)
+	if ev.Kind == shell.BackgroundKindMonitorLine &&
+		m.chat != nil &&
+		m.chat.MessageItem(id) == nil {
+		stats := m.com.Workspace.BackgroundShellStats()
+		if stats.ActiveMonitors <= 0 {
+			return nil
+		}
+	}
+	lineCount := m.existingMonitorLineCount(id)
+	startedAt := time.Now()
+	if item := m.runtimeActivities[id]; item != nil && !item.Snapshot().StartedAt.IsZero() {
+		startedAt = item.Snapshot().StartedAt
+	}
+	return m.upsertRuntimeActivity(monitorActivitySnapshot(sessionID, ev, startedAt, lineCount+1))
+}
+
+func isMonitorRuntimeEvent(kind shell.BackgroundEventKind) bool {
+	return kind == shell.BackgroundKindMonitorLine ||
+		kind == shell.BackgroundKindMonitorHit ||
+		kind == shell.BackgroundKindMonitorEOF ||
+		kind == shell.BackgroundKindMonitorTimeout
+}
+
+func (m *UI) sessionIDForRuntimeActivity(eventSessionID string) string {
+	if eventSessionID != "" {
+		return eventSessionID
+	}
+	if m != nil && m.session != nil {
+		return m.session.ID
+	}
+	return ""
+}
+
+func (m *UI) existingMonitorLineCount(id string) int {
+	if m == nil {
+		return 0
+	}
+	if item := m.runtimeActivities[id]; item != nil {
+		return item.Snapshot().LineCount
+	}
+	return 0
+}
+
+func monitorActivitySnapshot(sessionID string, ev shell.BackgroundJobEvent, startedAt time.Time, lineCount int) chat.RuntimeActivitySnapshot {
+	status := chat.RuntimeActivityRunning
+	title := "monitor " + ev.ID
+	detail := strings.TrimSpace(ev.MatchLine)
+	if detail == "" {
+		detail = strings.TrimSpace(ev.Description)
+	}
+	if detail == "" {
+		detail = strings.TrimSpace(ev.Command)
+	}
+	switch ev.Kind {
+	case shell.BackgroundKindMonitorHit:
+		status = chat.RuntimeActivityDone
+		title = "monitor hit " + ev.ID
+	case shell.BackgroundKindMonitorEOF:
+		status = chat.RuntimeActivityFailed
+		title = "monitor ended " + ev.ID
+		if detail == "" {
+			detail = strings.TrimSpace(ev.OutputTail)
+		}
+	case shell.BackgroundKindMonitorTimeout:
+		status = chat.RuntimeActivityFailed
+		title = "monitor timeout " + ev.ID
+		if detail == "" {
+			detail = strings.TrimSpace(ev.OutputTail)
+		}
+	}
+	if ev.Pattern != "" && detail != "" {
+		detail = fmt.Sprintf("pattern %q · %s", ev.Pattern, detail)
+	} else if ev.Pattern != "" {
+		detail = fmt.Sprintf("pattern %q", ev.Pattern)
+	}
+	return chat.RuntimeActivitySnapshot{
+		ID:              monitorActivityID(sessionID, ev.ID),
+		Kind:            chat.RuntimeActivityMonitor,
+		Status:          status,
+		Title:           title,
+		Detail:          detail,
+		StartedAt:       startedAt,
+		FinishedAt:      monitorFinishedAt(status),
+		ProgressPercent: -1,
+		LineCount:       max(0, lineCount),
+	}
+}
+
+func monitorFinishedAt(status chat.RuntimeActivityStatus) time.Time {
+	if status == chat.RuntimeActivityRunning {
+		return time.Time{}
+	}
+	return time.Now()
+}
+
+func (m *UI) upsertRuntimeActivity(snapshot chat.RuntimeActivitySnapshot) tea.Cmd {
+	if m == nil || m.chat == nil || snapshot.ID == "" {
+		return nil
+	}
+	if m.runtimeActivities == nil {
+		m.runtimeActivities = make(map[string]*chat.RuntimeActivityItem)
+	}
+	item := m.runtimeActivities[snapshot.ID]
+	if item == nil {
+		item = chat.NewRuntimeActivityItem(m.com.Styles, snapshot)
+		m.runtimeActivities[snapshot.ID] = item
+	}
+	return m.chat.UpsertRuntimeActivity(item, snapshot)
+}
+
+func compactionActivityID(sessionID string) string {
+	return "runtime:compaction:" + sessionID
+}
+
+func monitorActivityID(sessionID string, jobID string) string {
+	return "runtime:monitor:" + sessionID + ":" + jobID
+}
+
+func (m *UI) recordToolRuntimeTrace(trace agentruntime.TaskTrace) {
+	if !isToolRuntimeTrace(trace.Kind) {
+		return
+	}
+	key := toolRuntimeTraceKey(trace)
+	if key == "" {
+		return
+	}
+	if m.toolRuntimeEvents == nil {
+		m.toolRuntimeEvents = make(map[string]agentruntime.TaskTrace)
+	}
+	m.toolRuntimeEvents[key] = trace
+	pruneToolRuntimeTraces(m.toolRuntimeEvents)
+}
+
+func (m *UI) recordLLMContextTrace(trace agentruntime.TaskTrace) {
+	if !isLLMContextTrace(trace.Kind) {
+		return
+	}
+	if trace.PreflightEstimatedInputTokens <= 0 &&
+		trace.TotalTokens <= 0 &&
+		trace.InputTokens+trace.OutputTokens <= 0 {
+		return
+	}
+	if m.latestLLMContextTrace.Sequence > trace.Sequence && trace.Sequence > 0 {
+		return
+	}
+	m.latestLLMContextTrace = trace
+}
+
+func isLLMContextTrace(kind agentruntime.TraceKind) bool {
+	return kind == agentruntime.TraceKindLLMStarted ||
+		kind == agentruntime.TraceKindLLMFirstEvent ||
+		kind == agentruntime.TraceKindLLMFirstText ||
+		kind == agentruntime.TraceKindLLMRetry ||
+		kind == agentruntime.TraceKindLLMFinished ||
+		kind == agentruntime.TraceKindLLMFailed
+}
+
+func isToolRuntimeTrace(kind agentruntime.TraceKind) bool {
+	return kind == agentruntime.TraceKindToolStarted ||
+		kind == agentruntime.TraceKindToolFinished ||
+		kind == agentruntime.TraceKindToolFailed
+}
+
+func toolRuntimeTraceKey(trace agentruntime.TaskTrace) string {
+	if trace.ToolCallID != "" {
+		return trace.ToolCallID
+	}
+	if trace.ToolName != "" && trace.Sequence > 0 {
+		return fmt.Sprintf("%s:%d", trace.ToolName, trace.Sequence)
+	}
+	if trace.TraceKey() != "" {
+		return trace.TraceKey()
+	}
+	return ""
+}
+
+func pruneToolRuntimeTraces(events map[string]agentruntime.TaskTrace) {
+	const maxToolRuntimeEvents = 128
+	if len(events) <= maxToolRuntimeEvents {
+		return
+	}
+	type keyedTrace struct {
+		key   string
+		trace agentruntime.TaskTrace
+	}
+	entries := make([]keyedTrace, 0, len(events))
+	for key, trace := range events {
+		entries = append(entries, keyedTrace{key: key, trace: trace})
+	}
+	slices.SortFunc(entries, func(left, right keyedTrace) int {
+		return left.trace.RecordedAt.Compare(right.trace.RecordedAt)
+	})
+	for len(events) > maxToolRuntimeEvents && len(entries) > 0 {
+		entry := entries[0]
+		entries = entries[1:]
+		if isTerminalToolTrace(entry.trace.Kind) {
+			delete(events, entry.key)
+		}
+	}
+	for len(events) > maxToolRuntimeEvents && len(entries) > 0 {
+		entry := entries[0]
+		entries = entries[1:]
+		delete(events, entry.key)
+	}
+}
+
+func (m *UI) toolRuntimeStatusParts() []string {
+	if m == nil || len(m.toolRuntimeEvents) == 0 {
+		return nil
+	}
+	summary := summarizeToolRuntimeTraces(m.toolRuntimeEvents)
+	if summary.running == 0 && summary.failed == 0 {
+		return nil
+	}
+	parts := make([]string, 0, 2)
+	if summary.running > 0 {
+		parts = append(parts, fmt.Sprintf("tools %d running", summary.running))
+		parts = append(parts, fmt.Sprintf("tool-parallel %d", summary.running))
+	}
+	if summary.failed > 0 {
+		parts = append(parts, fmt.Sprintf("tool-failed %d", summary.failed))
+	}
+	if names := summary.activeToolNames(); names != "" {
+		parts = append(parts, names)
+	}
+	return parts
+}
+
+type toolRuntimeSummary struct {
+	running int
+	failed  int
+	names   map[string]int
+}
+
+func summarizeToolRuntimeTraces(events map[string]agentruntime.TaskTrace) toolRuntimeSummary {
+	summary := toolRuntimeSummary{names: make(map[string]int)}
+	for _, trace := range events {
+		switch trace.Kind {
+		case agentruntime.TraceKindToolStarted:
+			summary.running++
+			name := trace.ToolName
+			if name == "" {
+				name = "tool"
+			}
+			summary.names[name]++
+		case agentruntime.TraceKindToolFailed:
+			summary.failed++
+		}
+	}
+	return summary
+}
+
+func (s toolRuntimeSummary) activeToolNames() string {
+	if len(s.names) == 0 {
+		return ""
+	}
+	type namedCount struct {
+		name  string
+		count int
+	}
+	entries := make([]namedCount, 0, len(s.names))
+	for name, count := range s.names {
+		entries = append(entries, namedCount{name: name, count: count})
+	}
+	slices.SortFunc(entries, func(left, right namedCount) int {
+		if left.count != right.count {
+			return right.count - left.count
+		}
+		return strings.Compare(left.name, right.name)
+	})
+	const maxToolNames = 3
+	if len(entries) > maxToolNames {
+		entries = entries[:maxToolNames]
+	}
+	parts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.count > 1 {
+			parts = append(parts, fmt.Sprintf("%s %d", entry.name, entry.count))
+		} else {
+			parts = append(parts, entry.name)
+		}
+	}
+	return "active " + strings.Join(parts, "/")
+}
+
+func taskRuntimeEventKey(ev scheduler.Event) string {
+	switch {
+	case ev.NodeID != "":
+		return ev.NodeID
+	case ev.SessionID != "":
+		return ev.SessionID
+	case ev.TraceID != "":
+		return ev.TraceID
+	case ev.Goal != "":
+		return string(ev.Profile) + ":" + ev.Goal
+	default:
+		return ""
+	}
+}
+
+func pruneTaskRuntimeEvents(events map[string]scheduler.Event) {
+	const maxTaskRuntimeEvents = 64
+	if len(events) <= maxTaskRuntimeEvents {
+		return
+	}
+	type keyedEvent struct {
+		key string
+		ev  scheduler.Event
+	}
+	entries := make([]keyedEvent, 0, len(events))
+	for key, ev := range events {
+		entries = append(entries, keyedEvent{key: key, ev: ev})
+	}
+	slices.SortFunc(entries, func(left, right keyedEvent) int {
+		return left.ev.RecordedAt.Compare(right.ev.RecordedAt)
+	})
+	for len(events) > maxTaskRuntimeEvents && len(entries) > 0 {
+		entry := entries[0]
+		entries = entries[1:]
+		if isTerminalTaskEvent(entry.ev.Kind) {
+			delete(events, entry.key)
+		}
+	}
+	for len(events) > maxTaskRuntimeEvents && len(entries) > 0 {
+		entry := entries[0]
+		entries = entries[1:]
+		delete(events, entry.key)
+	}
+}
+
+func (m *UI) taskRuntimeStatusParts() []string {
+	if m == nil || len(m.taskRuntimeEvents) == 0 {
+		return nil
+	}
+	summary := summarizeTaskRuntimeEvents(m.taskRuntimeEvents)
+	if summary.total == 0 {
+		return nil
+	}
+
+	parts := make([]string, 0, 3)
+	switch {
+	case summary.running > 0:
+		parts = append(parts, fmt.Sprintf("dag %d running/%d", summary.running, summary.total))
+	case summary.planned > 0:
+		parts = append(parts, fmt.Sprintf("dag %d planned/%d", summary.planned, summary.total))
+	case summary.failed > 0:
+		parts = append(parts, fmt.Sprintf("dag %d failed/%d", summary.failed, summary.total))
+	default:
+		parts = append(parts, fmt.Sprintf("dag %d done", summary.done))
+	}
+	if summary.running > 0 {
+		parts = append(parts, fmt.Sprintf("parallel %d", summary.running))
+	}
+	if profileStatus := summary.profileStatus(); profileStatus != "" {
+		parts = append(parts, profileStatus)
+	}
+	return parts
+}
+
+type taskRuntimeSummary struct {
+	total   int
+	planned int
+	running int
+	done    int
+	failed  int
+	brain   int
+	plan    int
+	explore int
+	worker  int
+	auditor int
+}
+
+func summarizeTaskRuntimeEvents(events map[string]scheduler.Event) taskRuntimeSummary {
+	var summary taskRuntimeSummary
+	for _, ev := range events {
+		if ev.Kind == "" {
+			continue
+		}
+		summary.total++
+		switch ev.Kind {
+		case scheduler.EventTaskPlanned:
+			summary.planned++
+		case scheduler.EventTaskStarted, scheduler.EventTaskProgress:
+			summary.running++
+			summary.countActiveProfile(ev.Profile)
+		case scheduler.EventTaskFinished:
+			summary.done++
+		case scheduler.EventTaskFailed:
+			summary.failed++
+		}
+	}
+	return summary
+}
+
+func (s *taskRuntimeSummary) countActiveProfile(profile scheduler.WorkerProfile) {
+	switch profile {
+	case scheduler.ProfileBrainAgent:
+		s.brain++
+	case scheduler.ProfilePlanAgent:
+		s.plan++
+	case scheduler.ProfileExploreAgent:
+		s.explore++
+	case scheduler.ProfileWorkerAgent:
+		s.worker++
+	case scheduler.ProfileAuditorAgent:
+		s.auditor++
+	}
+}
+
+func (s taskRuntimeSummary) profileStatus() string {
+	if s.brain+s.plan+s.explore+s.worker+s.auditor == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 5)
+	if s.running > 0 {
+		parts = append(parts, fmt.Sprintf("explore %d", s.explore))
+	}
+	if s.worker > 0 {
+		parts = append(parts, fmt.Sprintf("worker %d", s.worker))
+	}
+	if s.plan > 0 {
+		parts = append(parts, fmt.Sprintf("plan %d", s.plan))
+	}
+	if s.auditor > 0 {
+		parts = append(parts, fmt.Sprintf("auditor %d", s.auditor))
+	}
+	if s.brain > 0 {
+		parts = append(parts, fmt.Sprintf("brain %d", s.brain))
+	}
+	return "agents " + strings.Join(parts, "/")
+}
+
+func isTerminalTaskEvent(kind scheduler.EventKind) bool {
+	return kind == scheduler.EventTaskFinished || kind == scheduler.EventTaskFailed
+}
+
+func isTerminalToolTrace(kind agentruntime.TraceKind) bool {
+	return kind == agentruntime.TraceKindToolFinished || kind == agentruntime.TraceKindToolFailed
+}
+
+func (m *UI) contextUsageStatus() string {
+	usedTokens, contextWindow, hasUsage, hasContextWindow := m.contextUsage()
+	if !hasUsage {
+		return ""
+	}
+	if !hasContextWindow {
+		return fmt.Sprintf(
+			"ctx -- %s/unknown auto@%d%%",
+			formatStatusTokenCount(usedTokens),
+			autoCompactContextPercent,
+		)
+	}
+	percentage := (float64(usedTokens) / float64(contextWindow)) * 100
+	status := fmt.Sprintf(
+		"ctx %d%% %s/%s auto@%d%%",
+		int(percentage),
+		formatStatusTokenCount(usedTokens),
+		formatStatusTokenCount(contextWindow),
+		autoCompactContextPercent,
+	)
+	if int(percentage) >= autoCompactContextPercent {
+		status += " compact"
+	}
+	return status
+}
+
+func (m *UI) contextUsage() (usedTokens int64, contextWindow int64, hasUsage bool, hasContextWindow bool) {
+	if m == nil || m.com == nil || m.session == nil {
+		return 0, 0, false, false
+	}
+	contextWindow = contextWindowForBrain(m.com)
+	usedTokens = m.session.CompletionTokens + m.session.PromptTokens
+	if trace, ok := m.latestLLMContextTraceForSession(); ok {
+		if trace.ContextWindowTokens > 0 {
+			contextWindow = trace.ContextWindowTokens
+		}
+		if traceUsedTokens := contextUsedTokensFromTrace(trace); traceUsedTokens > usedTokens {
+			usedTokens = traceUsedTokens
+		}
+	}
+	return usedTokens, contextWindow, true, contextWindow > 0
+}
+
+func (m *UI) latestLLMContextTraceForSession() (agentruntime.TaskTrace, bool) {
+	if m == nil || m.session == nil {
+		return agentruntime.TaskTrace{}, false
+	}
+	trace := m.latestLLMContextTrace
+	if trace.Kind == "" {
+		return agentruntime.TaskTrace{}, false
+	}
+	if trace.ConversationSessionID != "" && trace.ConversationSessionID != m.session.ID {
+		return agentruntime.TaskTrace{}, false
+	}
+	return trace, true
+}
+
+func contextUsedTokensFromTrace(trace agentruntime.TaskTrace) int64 {
+	switch {
+	case trace.TotalTokens > 0:
+		return trace.TotalTokens
+	case trace.InputTokens+trace.OutputTokens > 0:
+		return trace.InputTokens + trace.OutputTokens
+	case trace.PreflightEstimatedInputTokens > 0:
+		return trace.PreflightEstimatedInputTokens
+	default:
+		return 0
+	}
+}
+
+func contextWindowForBrain(com *common.Common) int64 {
+	if com == nil {
+		return 0
+	}
+	if com.Workspace != nil && com.Workspace.AgentIsReady() {
+		model := com.Workspace.AgentModel()
+		if contextWindow := config.ResolveModelContextWindow(
+			int64(model.CatwalkCfg.ContextWindow),
+			model.ModelCfg.Provider,
+			"",
+			model.ModelCfg.Model,
+		); contextWindow > 0 {
+			return contextWindow
+		}
+	}
+	cfg := com.Config()
+	if cfg == nil {
+		return 0
+	}
+	agentCfg, ok := cfg.Agents[config.AgentBrain]
+	if !ok {
+		return 0
+	}
+	model := cfg.GetModelByType(agentCfg.Model)
+	if model != nil && model.ContextWindow > 0 {
+		return model.ContextWindow
+	}
+	selectedModel, ok := cfg.Models[agentCfg.Model]
+	if !ok {
+		return 0
+	}
+	providerType := ""
+	if providerCfg, ok := cfg.Providers.Get(selectedModel.Provider); ok {
+		providerType = string(providerCfg.Type)
+	}
+	return config.ResolveModelContextWindow(0, selectedModel.Provider, providerType, selectedModel.Model)
+}
+
+func formatStatusTokenCount(tokens int64) string {
+	switch {
+	case tokens >= 1_000_000:
+		return trimTokenUnit(fmt.Sprintf("%.1fM", float64(tokens)/1_000_000))
+	case tokens >= 1_000:
+		return trimTokenUnit(fmt.Sprintf("%.1fK", float64(tokens)/1_000))
+	default:
+		return fmt.Sprintf("%d", tokens)
+	}
+}
+
+func trimTokenUnit(value string) string {
+	value = strings.Replace(value, ".0K", "K", 1)
+	value = strings.Replace(value, ".0M", "M", 1)
+	return value
 }
 
 func statusMessageTTL(msg util.InfoMsg) time.Duration {
@@ -4246,7 +5023,6 @@ func (m *UI) newSession() tea.Cmd {
 	m.promptQueue = 0
 	m.pillsView = ""
 	m.historyReset()
-	agenttools.ResetCache()
 	return tea.Batch(
 		func() tea.Msg {
 			m.com.Workspace.LSPStopAll(context.Background())
@@ -4369,8 +5145,10 @@ func (m *UI) handleFilePathPaste(path string) tea.Cmd {
 			return util.ReportError(err)
 		}
 
-		mimeBufferSize := min(512, len(content))
-		mimeType := http.DetectContentType(content[:mimeBufferSize])
+		mimeType, ok := supportedImageMimeOf(content)
+		if !ok {
+			return util.ReportWarn("File is not a supported image")
+		}
 		fileName := filepath.Base(path)
 		return message.Attachment{
 			FilePath: path,
@@ -4393,11 +5171,15 @@ func (m *UI) pasteImageFromClipboard() tea.Msg {
 		}
 	}
 	name := fmt.Sprintf("paste_%d.png", m.pasteIdx())
-	if err == nil {
+	if err == nil && len(imageData) > 0 {
+		mimeType, ok := supportedImageMimeOf(imageData)
+		if !ok {
+			return util.NewInfoMsg("Clipboard image is not a supported image format")
+		}
 		return message.Attachment{
 			FilePath: name,
 			FileName: name,
-			MimeType: mimeOf(imageData),
+			MimeType: mimeType,
 			Content:  imageData,
 		}
 	}
@@ -4447,10 +5229,15 @@ func (m *UI) pasteImageFromClipboard() tea.Msg {
 		}
 	}
 
+	mimeType, ok := supportedImageMimeOf(content)
+	if !ok {
+		return util.NewInfoMsg("File type is not a supported image format")
+	}
+
 	return message.Attachment{
 		FilePath: path,
 		FileName: filepath.Base(path),
-		MimeType: mimeOf(content),
+		MimeType: mimeType,
 		Content:  content,
 	}
 }

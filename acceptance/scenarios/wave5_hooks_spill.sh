@@ -20,16 +20,42 @@ trap 'rm -f "$HOOK_LOG"; rm -rf "$CFG_DIR"' EXIT
 export CRUSH_GLOBAL_CONFIG="$CFG_DIR"
 mkdir -p "$CFG_DIR"
 
-# Copy the user's existing crush.yaml so providers/models stay valid, then
-# append hooks. Falls back to an empty YAML when the user has no config.
-USER_CFG="$HOME/.config/crush/crush.yaml"
-if [[ -f "$USER_CFG" ]]; then
-  cp "$USER_CFG" "$CFG_DIR/crush.yaml"
-else
-  echo "providers: {}" > "$CFG_DIR/crush.yaml"
-fi
-
-cat >> "$CFG_DIR/crush.yaml" <<EOF
+cat > "$CFG_DIR/crush.yaml" <<EOF
+agents:
+  explore:
+    allowed_mcp: null
+  auditor:
+    allowed_mcp: null
+models:
+  brain:
+    model: claude-sonnet-4-6
+    provider: waitai-anthropic
+  explore:
+    model: claude-haiku-4-5-20251001
+    provider: waitai-anthropic
+  worker:
+    model: claude-sonnet-4-6
+    provider: waitai-anthropic
+  plan:
+    model: claude-sonnet-4-6
+    provider: waitai-anthropic
+  auditor:
+    model: claude-sonnet-4-6
+    provider: waitai-anthropic
+providers:
+  waitai-anthropic:
+    api_key: \${WAITAI_API_KEY:-\${NCODER_WAITAI_KEY:-test}}
+    base_url: \${WAITAI_CRUSH_BASE:-http://127.0.0.1:43917/v1}
+    models:
+      - id: claude-opus-4-7
+        name: Claude Opus 4.7
+        can_reason: true
+      - id: claude-sonnet-4-6
+        name: Claude Sonnet 4.6
+        can_reason: true
+      - id: claude-haiku-4-5-20251001
+        name: Claude Haiku 4.5
+        can_reason: false
 hooks:
   PreToolUse:
     - command: 'echo "\$CRUSH_EVENT \$CRUSH_TOOL_NAME" >> $HOOK_LOG; exit 0'
@@ -47,18 +73,25 @@ trap 'rm -f "$HOOK_LOG"; rm -rf "$CFG_DIR" "$DATA_DIR"' EXIT
 
 log "starting crush in tmux"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && CRUSH_GLOBAL_CONFIG=$CFG_DIR CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --trace-file $TRACE" \
+  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CFG_DIR CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $DATA_DIR --trace-file $TRACE" \
   | tee -a "$LOG"
 
-"$TUI" expect "$SESS" 'Ready for instructions' 15 || fail "TUI not ready"
+"$TUI" expect "$SESS" 'Ready' 15 || fail "TUI not ready"
 
 # Spiller probe: a bash command whose stdout exceeds BashSpillThreshold
 # (30 KiB). 5_000 numbered lines is ~60 KiB.
 log "submitting Spiller-trigger prompt"
-"$TUI" type "$SESS" 'Run "seq 1 5000" and report the last number.'
+"$TUI" send "$SESS" 'You must use the bash tool to run "seq 1 $((2000+3000))", and then report the last number of its stdout. Your final reply must contain the exact prefix "ANSWER: " followed by the number.'
 "$TUI" key  "$SESS" Enter
 
-"$TUI" expect "$SESS" '5000' 60 || fail "agent did not produce expected answer"
+"$TUI" expect "$SESS" 'ANSWER: 5000' 60 || {
+  log "TUI Screen content on failure:"
+  "$TUI" text "$SESS" >> "$LOG" 2>&1
+  fail "agent did not produce expected answer"
+}
+
+# Wait a short moment to ensure the Stop hook has completed executing.
+sleep 3
 
 log "graceful quit"
 "$TUI" quit "$SESS"

@@ -101,6 +101,21 @@ func TestBashTool_CustomAutoBackgroundThreshold(t *testing.T) {
 	require.NoError(t, bgManager.Kill(meta.ShellID))
 }
 
+func TestBashTool_BlocksForegroundSleepPolling(t *testing.T) {
+	workingDir := t.TempDir()
+	tool, _ := newBashToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "sleep polling",
+		Command:     "sleep 2 && echo done",
+	})
+
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "foreground sleep polling is blocked")
+	require.Contains(t, resp.Content, "monitor tool")
+}
+
 func TestBashTool_LargeOutputSpillsToFile(t *testing.T) {
 	workingDir := t.TempDir()
 	dataDir := filepath.Join(workingDir, ".crush")
