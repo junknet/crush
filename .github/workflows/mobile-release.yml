@@ -40,7 +40,6 @@ jobs:
       EXPO_PUBLIC_CRUSH_UPDATE_ASSET_PATTERN: "^crush-mobile-android-v.*\\.apk$"
       EXPO_PUBLIC_CRUSH_UPDATE_GITHUB_TOKEN: ${{ secrets.CRUSH_MOBILE_UPDATE_GITHUB_TOKEN }}
       GH_TOKEN: ${{ github.token }}
-      NODE_ENV: production
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -64,10 +63,10 @@ jobs:
             exit 2
           }
 
-      - run: npm ci
+      - run: npm ci --include=dev
       - run: npx tsc --noEmit
       - run: npm run lint
-      - run: npm run release:android:private
+      - run: NODE_ENV=production npm run release:android:private
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
