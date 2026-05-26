@@ -1,6 +1,7 @@
 import { Feather } from '@expo/vector-icons'
+import * as Application from 'expo-application'
 import { useLocalSearchParams } from 'expo-router'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
     ActivityIndicator,
     Animated,
@@ -22,7 +23,7 @@ import {
     UIManager,
     View,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import {
     AgentEvent,
@@ -34,6 +35,11 @@ import {
     PermissionRequest,
     Session,
 } from '@lib/crush/api'
+import {
+    checkForMobileUpdate,
+    downloadAndOpenAndroidUpdate,
+    MobileUpdateRelease,
+} from '@lib/crush/mobile_update'
 
 type ActivityEntry = {
     id: string
@@ -44,6 +50,15 @@ type ActivityEntry = {
     error?: string
     updatedAt: number
 }
+
+type MobileUpdateStatus =
+    | 'idle'
+    | 'checking'
+    | 'latest'
+    | 'available'
+    | 'downloading'
+    | 'opening'
+    | 'error'
 
 const DEFAULT_SERVER_URL = process.env.EXPO_PUBLIC_CRUSH_SERVER_URL || 'ws://47.110.255.240:8443'
 
@@ -65,7 +80,7 @@ if (Platform.OS === 'android') {
 }
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
-const DRAWER_WIDTH = Math.min(SCREEN_WIDTH * 0.82, 320)
+const DRAWER_WIDTH = Math.min(SCREEN_WIDTH * 0.72, 280)
 
 function parseJson(str?: string) {
     if (!str) return null
@@ -74,6 +89,10 @@ function parseJson(str?: string) {
     } catch {
         return null
     }
+}
+
+function describeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
 }
 
 function parseServerUrlFromDeepLink(rawUrl: string | null): string | null {
@@ -101,8 +120,38 @@ function looksLikeInternalSessionTitle(title: string, sessionID: string): boolea
     const cleaned = title.trim()
     if (!cleaned) return true
     if (cleaned === sessionID) return true
+    if (cleaned === 'Untitled Session' || cleaned === '未命名会话') return true
     if (cleaned.startsWith('title-') || cleaned.includes('$$')) return true
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleaned)
+}
+
+function getMessageFinishReason(message?: Message): string {
+    return message?.parts?.find((part) => part.type === 'finish')?.data?.reason?.trim() || ''
+}
+
+function isMessageFinished(message?: Message): boolean {
+    return getMessageFinishReason(message) !== ''
+}
+
+function isMessageCanceled(message?: Message): boolean {
+    return getMessageFinishReason(message) === 'canceled'
+}
+
+function messageHasVisibleContent(message: Message): boolean {
+    if (message.role !== 'assistant') return true
+    if (message.id === 'typing-indicator') return true
+    if (isMessageCanceled(message)) return true
+    return (
+        message.parts?.some((part) => {
+            if (part.type === 'text') return !!part.data?.text?.trim()
+            if (part.type === 'reasoning') {
+                return !!part.data?.thinking?.trim() || !part.data?.finished_at
+            }
+            if (part.type === 'tool_call' || part.type === 'tool_result') return true
+            if (part.type === 'finish') return false
+            return true
+        }) || false
+    )
 }
 
 function getToolCallSummary(name?: string, input?: string): { action: string; details?: string } {
@@ -797,195 +846,284 @@ const MarkdownCodeBlock = ({
 }
 
 // Sub-component for lightweight Markdown rendering
-const MarkdownText = ({ text, style, flat }: { text: string; style?: any; flat?: boolean }) => {
-    // Split by code blocks
-    const blocks = text.split(/(```[\s\S]*?```)/g)
+const preprocessHtmlToMarkdown = (rawText: string): string => {
+    if (!rawText) return ''
+    return rawText
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/?b>/gi, '**')
+        .replace(/<\/?strong>/gi, '**')
+        .replace(/<\/?i>/gi, '*')
+        .replace(/<\/?em>/gi, '*')
+        .replace(/<\/?code>/gi, '`')
+}
 
-    const renderInline = (inlineText: string) => {
-        if (!inlineText) return ''
-        const tokens = inlineText.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`|\[[^\]]+\]\([^)]+\))/g)
-        return tokens.map((token, idx) => {
-            if (token.startsWith('**') && token.endsWith('**')) {
-                return (
-                    <Text key={idx} style={{ fontWeight: 'bold', color: '#f8fafc' }}>
-                        {token.slice(2, -2)}
-                    </Text>
-                )
-            }
-            if (token.startsWith('*') && token.endsWith('*')) {
-                return (
-                    <Text key={idx} style={{ fontStyle: 'italic', color: '#cbd5e1' }}>
-                        {token.slice(1, -1)}
-                    </Text>
-                )
-            }
-            if (token.startsWith('`') && token.endsWith('`')) {
+const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
+    if (!inlineText) return ''
+    const tokens = inlineText.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`|\[[^\]]+\]\([^)]+\))/g)
+    return tokens.map((token, idx) => {
+        if (token.startsWith('**') && token.endsWith('**')) {
+            return (
+                <Text key={idx} style={{ fontWeight: 'bold', color: '#f8fafc' }}>
+                    {token.slice(2, -2)}
+                </Text>
+            )
+        }
+        if (token.startsWith('*') && token.endsWith('*')) {
+            return (
+                <Text key={idx} style={{ fontStyle: 'italic', color: '#cbd5e1' }}>
+                    {token.slice(1, -1)}
+                </Text>
+            )
+        }
+        if (token.startsWith('`') && token.endsWith('`')) {
+            return (
+                <Text
+                    key={idx}
+                    style={[
+                        styles.markdownInlineCode,
+                        flat && {
+                            backgroundColor: 'transparent',
+                            borderWidth: 0,
+                            paddingHorizontal: 0,
+                        },
+                    ]}>
+                    {token.slice(1, -1)}
+                </Text>
+            )
+        }
+        if (token.startsWith('[') && token.includes('](')) {
+            const match = token.match(/\[([^\]]+)\]\(([^)]+)\)/)
+            if (match) {
+                const linkText = match[1]
+                const url = match[2]
                 return (
                     <Text
                         key={idx}
-                        style={[
-                            styles.markdownInlineCode,
-                            flat && {
-                                backgroundColor: 'transparent',
-                                borderWidth: 0,
-                                paddingHorizontal: 0,
-                            },
-                        ]}>
-                        {token.slice(1, -1)}
+                        style={{ color: '#38bdf8', textDecorationLine: 'underline' }}
+                        onPress={() => {
+                            Linking.openURL(url).catch((err) =>
+                                console.error('Failed to open URL', err)
+                            )
+                        }}>
+                        {linkText}
                     </Text>
                 )
             }
-            if (token.startsWith('[') && token.includes('](')) {
-                const match = token.match(/\[([^\]]+)\]\(([^)]+)\)/)
-                if (match) {
-                    const linkText = match[1]
-                    const url = match[2]
-                    return (
-                        <Text
-                            key={idx}
-                            style={{ color: '#38bdf8', textDecorationLine: 'underline' }}
-                            onPress={() => {
-                                Linking.openURL(url).catch((err) =>
-                                    console.error('Failed to open URL', err)
-                                )
-                            }}>
-                            {linkText}
-                        </Text>
-                    )
-                }
-            }
-            return token
-        })
+        }
+        return token
+    })
+}
+
+const MarkdownDetails = ({
+    block,
+    style,
+    flat,
+}: {
+    block: string
+    style?: any
+    flat?: boolean
+}) => {
+    const [expanded, setExpanded] = useState(false)
+
+    const detailsMatch = block.match(/<details[^>]*>([\s\S]*?)<\/details>/i)
+    if (!detailsMatch) return null
+
+    const innerContent = detailsMatch[1]
+    const summaryMatch = innerContent.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i)
+    let summaryText = 'Details'
+    let bodyText = innerContent
+    if (summaryMatch) {
+        summaryText = summaryMatch[1].trim()
+        bodyText = innerContent.replace(/<summary[^>]*>[\s\S]*?<\/summary>/i, '')
+    }
+
+    const toggle = () => {
+        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
+        setExpanded(!expanded)
     }
 
     return (
-        <View style={styles.markdownContainer}>
-            {blocks.map((block, blockIdx) => {
-                if (block.startsWith('```') && block.endsWith('```')) {
-                    const lines = block.slice(3, -3).trim().split('\n')
-                    let lang = ''
-                    let codeLines = lines
-                    if (lines.length > 0 && /^[a-zA-Z0-9_-]+$/.test(lines[0])) {
-                        lang = lines[0]
-                        codeLines = lines.slice(1)
-                    }
-                    const code = codeLines.join('\n')
-                    return <MarkdownCodeBlock key={blockIdx} lang={lang} code={code} flat={flat} />
-                }
-
-                const lines = block.split('\n')
-                return (
-                    <View key={blockIdx} style={styles.markdownTextBlock}>
-                        {lines.map((line, lineIdx) => {
-                            const headingMatch = line.match(/^(#{1,6})\s+(.*)$/)
-                            if (headingMatch) {
-                                const level = headingMatch[1].length
-                                const content = headingMatch[2]
-                                const headingStyle =
-                                    level === 1
-                                        ? styles.markdownH1
-                                        : level === 2
-                                          ? styles.markdownH2
-                                          : level === 3
-                                            ? styles.markdownH3
-                                            : styles.markdownH4
-                                return (
-                                    <Text key={lineIdx} style={[headingStyle, style]}>
-                                        {renderInline(content)}
-                                    </Text>
-                                )
-                            }
-
-                            const blockquoteMatch = line.match(/^>\s*(.*)$/)
-                            if (blockquoteMatch) {
-                                const content = blockquoteMatch[1]
-                                return (
-                                    <View
-                                        key={lineIdx}
-                                        style={[
-                                            styles.markdownBlockquote,
-                                            flat && {
-                                                backgroundColor: 'transparent',
-                                                borderLeftWidth: 0,
-                                                paddingHorizontal: 0,
-                                                paddingVertical: 0,
-                                                marginVertical: 2,
-                                            },
-                                        ]}>
-                                        <Text style={styles.markdownBlockquoteText}>
-                                            {renderInline(content)}
-                                        </Text>
-                                    </View>
-                                )
-                            }
-
-                            if (line === '---' || line === '***' || line === '___') {
-                                return (
-                                    <View
-                                        key={lineIdx}
-                                        style={[
-                                            styles.markdownHR,
-                                            flat && {
-                                                backgroundColor: 'transparent',
-                                                height: 0,
-                                                marginVertical: 4,
-                                            },
-                                        ]}
-                                    />
-                                )
-                            }
-
-                            const listMatch = line.match(/^(\s*)[-*+]\s+(.*)$/)
-                            if (listMatch) {
-                                const indent = listMatch[1].length * 4
-                                const content = listMatch[2]
-                                return (
-                                    <View
-                                        key={lineIdx}
-                                        style={[
-                                            styles.markdownListItemRow,
-                                            { paddingLeft: Math.max(8, indent) },
-                                        ]}>
-                                        <Text style={styles.markdownListBullet}>•</Text>
-                                        <Text style={[styles.markdownListItemText, style]}>
-                                            {renderInline(content)}
-                                        </Text>
-                                    </View>
-                                )
-                            }
-
-                            const numListMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/)
-                            if (numListMatch) {
-                                const indent = numListMatch[1].length * 4
-                                const num = numListMatch[2]
-                                const content = numListMatch[3]
-                                return (
-                                    <View
-                                        key={lineIdx}
-                                        style={[
-                                            styles.markdownListItemRow,
-                                            { paddingLeft: Math.max(8, indent) },
-                                        ]}>
-                                        <Text style={styles.markdownListNum}>{num}.</Text>
-                                        <Text style={[styles.markdownListItemText, style]}>
-                                            {renderInline(content)}
-                                        </Text>
-                                    </View>
-                                )
-                            }
-
-                            return (
-                                <Text key={lineIdx} style={[styles.markdownParagraph, style]}>
-                                    {renderInline(line)}
-                                </Text>
-                            )
-                        })}
-                    </View>
-                )
-            })}
+        <View style={styles.detailsBubble}>
+            <Pressable
+                onPress={toggle}
+                style={({ pressed }) => [styles.detailsHeader, pressed && styles.pressed]}>
+                <Feather
+                    name={expanded ? 'chevron-down' : 'chevron-right'}
+                    size={12}
+                    color="#a78bfa"
+                />
+                <Text style={styles.detailsHeaderText}>
+                    {renderMarkdownInline(summaryText, flat)}
+                </Text>
+            </Pressable>
+            {expanded && (
+                <View style={styles.detailsBody}>
+                    <MarkdownText text={bodyText} style={style} flat={flat} />
+                </View>
+            )}
         </View>
     )
 }
+
+// Sub-component for lightweight Markdown rendering
+const MarkdownText = React.memo(
+    ({ text, style, flat }: { text: string; style?: any; flat?: boolean }) => {
+        const preprocessedText = preprocessHtmlToMarkdown(text)
+        // Split by code blocks and details blocks
+        const blocks = preprocessedText.split(
+            /(```[\s\S]*?```|<details[^>]*>[\s\S]*?<\/details>)/gi
+        )
+
+        const renderInline = (inlineText: string) => renderMarkdownInline(inlineText, flat)
+
+        return (
+            <View style={styles.markdownContainer}>
+                {blocks.map((block, blockIdx) => {
+                    if (block.startsWith('```') && block.endsWith('```')) {
+                        const lines = block.slice(3, -3).trim().split('\n')
+                        let lang = ''
+                        let codeLines = lines
+                        if (lines.length > 0 && /^[a-zA-Z0-9_-]+$/.test(lines[0])) {
+                            lang = lines[0]
+                            codeLines = lines.slice(1)
+                        }
+                        const code = codeLines.join('\n')
+                        return (
+                            <MarkdownCodeBlock key={blockIdx} lang={lang} code={code} flat={flat} />
+                        )
+                    }
+
+                    const trimmedBlock = block.trim()
+                    if (
+                        trimmedBlock.toLowerCase().startsWith('<details') &&
+                        trimmedBlock.toLowerCase().endsWith('</details>')
+                    ) {
+                        return (
+                            <MarkdownDetails
+                                key={blockIdx}
+                                block={trimmedBlock}
+                                style={style}
+                                flat={flat}
+                            />
+                        )
+                    }
+
+                    const lines = block.split('\n')
+                    return (
+                        <View key={blockIdx} style={styles.markdownTextBlock}>
+                            {lines.map((line, lineIdx) => {
+                                const headingMatch = line.match(/^(#{1,6})\s+(.*)$/)
+                                if (headingMatch) {
+                                    const level = headingMatch[1].length
+                                    const content = headingMatch[2]
+                                    const headingStyle =
+                                        level === 1
+                                            ? styles.markdownH1
+                                            : level === 2
+                                              ? styles.markdownH2
+                                              : level === 3
+                                                ? styles.markdownH3
+                                                : styles.markdownH4
+                                    return (
+                                        <Text key={lineIdx} style={[headingStyle, style]}>
+                                            {renderInline(content)}
+                                        </Text>
+                                    )
+                                }
+
+                                const blockquoteMatch = line.match(/^>\s*(.*)$/)
+                                if (blockquoteMatch) {
+                                    const content = blockquoteMatch[1]
+                                    return (
+                                        <View
+                                            key={lineIdx}
+                                            style={[
+                                                styles.markdownBlockquote,
+                                                flat && {
+                                                    backgroundColor: 'transparent',
+                                                    borderLeftWidth: 0,
+                                                    paddingHorizontal: 0,
+                                                    paddingVertical: 0,
+                                                    marginVertical: 2,
+                                                },
+                                            ]}>
+                                            <Text style={styles.markdownBlockquoteText}>
+                                                {renderInline(content)}
+                                            </Text>
+                                        </View>
+                                    )
+                                }
+
+                                if (line === '---' || line === '***' || line === '___') {
+                                    return (
+                                        <View
+                                            key={lineIdx}
+                                            style={[
+                                                styles.markdownHR,
+                                                flat && {
+                                                    backgroundColor: 'transparent',
+                                                    height: 0,
+                                                    marginVertical: 4,
+                                                },
+                                            ]}
+                                        />
+                                    )
+                                }
+
+                                const listMatch = line.match(/^(\s*)[-*+]\s+(.*)$/)
+                                if (listMatch) {
+                                    const indent = listMatch[1].length * 4
+                                    const content = listMatch[2]
+                                    return (
+                                        <View
+                                            key={lineIdx}
+                                            style={[
+                                                styles.markdownListItemRow,
+                                                { paddingLeft: Math.max(8, indent) },
+                                            ]}>
+                                            <Text style={styles.markdownListBullet}>•</Text>
+                                            <Text style={[styles.markdownListItemText, style]}>
+                                                {renderInline(content)}
+                                            </Text>
+                                        </View>
+                                    )
+                                }
+
+                                const numListMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/)
+                                if (numListMatch) {
+                                    const indent = numListMatch[1].length * 4
+                                    const num = numListMatch[2]
+                                    const content = numListMatch[3]
+                                    return (
+                                        <View
+                                            key={lineIdx}
+                                            style={[
+                                                styles.markdownListItemRow,
+                                                { paddingLeft: Math.max(8, indent) },
+                                            ]}>
+                                            <Text style={styles.markdownListNum}>{num}.</Text>
+                                            <Text style={[styles.markdownListItemText, style]}>
+                                                {renderInline(content)}
+                                            </Text>
+                                        </View>
+                                    )
+                                }
+
+                                return (
+                                    <Text key={lineIdx} style={[styles.markdownParagraph, style]}>
+                                        {renderInline(line)}
+                                    </Text>
+                                )
+                            })}
+                        </View>
+                    )
+                })}
+            </View>
+        )
+    },
+    (prev, next) => prev.text === next.text && prev.flat === next.flat
+)
+MarkdownText.displayName = 'MarkdownText'
 
 // Sub-component for Collapsible Thinking Process
 const ThinkingPart = ({ thinking, finishedAt }: { thinking: string; finishedAt?: number }) => {
@@ -1207,7 +1345,6 @@ function groupMessageParts(parts: MessagePart[]): RenderablePart[] {
                           is_error: toolResult.is_error || (toolResult as any).isError,
                       }
                     : undefined,
-
             })
             i += 1
         } else if (part.type === 'tool_result') {
@@ -1723,9 +1860,15 @@ const TerminalSessionCard = ({
 
             <View style={styles.terminalCommandRow}>
                 <Text style={styles.terminalPrompt}>crush ❯</Text>
-                <Text style={styles.terminalCommandText} selectable>
-                    {summary.details || name}
-                </Text>
+                {(name === 'bash' || name === 'run_command') && summary.details ? (
+                    <Text style={styles.terminalCommandText} selectable numberOfLines={0}>
+                        {renderHighlightedCode(summary.details, 'bash')}
+                    </Text>
+                ) : (
+                    <Text style={styles.terminalCommandText} selectable>
+                        {summary.details || name}
+                    </Text>
+                )}
             </View>
 
             {viewType !== 'raw' && viewType !== 'none' && (
@@ -1774,10 +1917,12 @@ const TerminalSessionCard = ({
             {hasOutput && (
                 <View style={styles.terminalOutputContainer}>
                     {activeTab === 'formatted' && viewType !== 'raw' ? (
-                        <View style={[
-                            { paddingVertical: 4 },
-                            needsTruncation && !expanded && { maxHeight: 220, overflow: 'hidden' }
-                        ]}>
+                        <View
+                            style={[
+                                { paddingVertical: 4 },
+                                needsTruncation &&
+                                    !expanded && { maxHeight: 220, overflow: 'hidden' },
+                            ]}>
                             {viewType === 'ls' && (
                                 <DirectoryTreeViewer
                                     nodes={parseDirectoryTree(displayableContent)}
@@ -1806,7 +1951,10 @@ const TerminalSessionCard = ({
                             <View style={{ flexDirection: 'column' }}>
                                 <AnsiText
                                     text={displayContent}
-                                    style={[styles.terminalOutputText, isError && { color: '#f87171' }]}
+                                    style={[
+                                        styles.terminalOutputText,
+                                        isError && { color: '#f87171' },
+                                    ]}
                                 />
                             </View>
                         </ScrollView>
@@ -1814,15 +1962,13 @@ const TerminalSessionCard = ({
 
                     {needsTruncation && (
                         <View style={styles.terminalFoldOverlay}>
-                            <Pressable
-                                onPress={toggleExpand}
-                                style={styles.terminalExpandButton}>
+                            <Pressable onPress={toggleExpand} style={styles.terminalExpandButton}>
                                 <Text style={styles.terminalExpandText}>
                                     {expanded
                                         ? '收起输出'
                                         : activeTab === 'formatted' && viewType !== 'raw'
-                                        ? '展开全部输出...'
-                                        : `展开余下 ${lines.length - 12} 行...`}
+                                          ? '展开全部输出...'
+                                          : `展开余下 ${lines.length - 12} 行...`}
                                 </Text>
                             </Pressable>
                         </View>
@@ -1989,7 +2135,11 @@ const FullTerminalModal = ({
                             <ScrollView horizontal contentContainerStyle={{ minWidth: '100%' }}>
                                 <AnsiText
                                     text={content}
-                                    style={[styles.modalLogText, { fontSize }, isError && { color: '#f87171' }]}
+                                    style={[
+                                        styles.modalLogText,
+                                        { fontSize },
+                                        isError && { color: '#f87171' },
+                                    ]}
                                 />
                             </ScrollView>
                         )}
@@ -2023,90 +2173,91 @@ const BlinkingCursor = ({ color, size = 10 }: { color: string; size?: number }) 
     }, [fadeAnim])
 
     return (
-        <Animated.Text style={{ color, fontSize: size, fontWeight: 'bold', fontFamily: 'FiraCode-Regular', opacity: fadeAnim }}>
+        <Animated.Text
+            style={{
+                color,
+                fontSize: size,
+                fontWeight: 'bold',
+                fontFamily: 'FiraCode-Regular',
+                opacity: fadeAnim,
+            }}>
             _
         </Animated.Text>
     )
 }
 
+const SPIN_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+
+const BrailleSpinner = ({ color, size = 12 }: { color: string; size?: number }) => {
+    const [frameIndex, setFrameIndex] = useState(0)
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setFrameIndex((prev) => (prev + 1) % SPIN_FRAMES.length)
+        }, 80)
+        return () => clearInterval(interval)
+    }, [])
+
+    return (
+        <Text
+            style={{
+                color,
+                fontSize: size,
+                fontWeight: 'bold',
+                fontFamily: 'FiraCode-Regular',
+            }}>
+            {SPIN_FRAMES[frameIndex]}
+        </Text>
+    )
+}
+
+const InterruptDivider = () => (
+    <View style={styles.interruptDivider}>
+        <View style={styles.interruptDividerLine} />
+        <Text style={styles.interruptDividerText}>interrupted</Text>
+        <View style={styles.interruptDividerLine} />
+    </View>
+)
+
 // Sub-component for Message Render
-const MessageItem = ({
-    message,
-    isUser,
-    showHeader,
-    isBusy,
-    onMaximize,
-}: {
-    message: Message
-    isUser: boolean
-    showHeader: boolean
-    isBusy?: boolean
-    onMaximize?: (name: string, input: string, content: string, isError?: boolean) => void
-}) => {
-    const renderableParts = useMemo(() => {
-        return message.parts ? groupMessageParts(message.parts) : []
-    }, [message.parts])
+const MessageItem = React.memo(
+    ({
+        message,
+        isUser,
+        showHeader,
+        isBusy,
+        onMaximize,
+    }: {
+        message: Message
+        isUser: boolean
+        showHeader: boolean
+        isBusy?: boolean
+        onMaximize?: (name: string, input: string, content: string, isError?: boolean) => void
+    }) => {
+        const renderableParts = useMemo(() => {
+            return message.parts ? groupMessageParts(message.parts) : []
+        }, [message.parts])
+        const isCanceled = isMessageCanceled(message)
+        const finishMessage =
+            message.parts?.find((part) => part.type === 'finish')?.data?.message || 'Canceled'
 
-    const hasComplexParts = useMemo(() => {
-        return (
-            !isUser &&
-            renderableParts.some((p) => p.type === 'terminal_session' || p.type === 'reasoning')
-        )
-    }, [isUser, renderableParts])
+        const hasComplexParts = useMemo(() => {
+            return (
+                !isUser &&
+                renderableParts.some((p) => p.type === 'terminal_session' || p.type === 'reasoning')
+            )
+        }, [isUser, renderableParts])
 
-    const isAgentReasoning = useMemo(() => {
-        if (!isBusy) return false
-        if (renderableParts.length === 0) return true
-        return renderableParts.some((p) => p.type === 'reasoning' && !p.data?.finished_at)
-    }, [renderableParts, isBusy])
+        const isAgentReasoning = useMemo(() => {
+            if (!isBusy || isMessageFinished(message)) return false
+            if (renderableParts.length === 0) return true
+            return renderableParts.some((p) => p.type === 'reasoning' && !p.data?.finished_at)
+        }, [message, renderableParts, isBusy])
 
-    if (isUser) {
-        return (
-            <View style={[styles.messageRowContainer, styles.userRowContainer]}>
-                {showHeader && (
-                    <View style={styles.userMessageHeader}>
-                        <Feather name="user" size={10} color="#93c5fd" />
-                        <Text style={[styles.messageRoleText, styles.userRoleText]}>你</Text>
-                    </View>
-                )}
-                <View style={styles.userBubble}>
-                    {renderableParts.map((part, index) => {
-                        if (part.type === 'text') {
-                            return (
-                                <MarkdownText
-                                    key={index}
-                                    text={part.data.text || ''}
-                                    style={styles.messageText}
-                                />
-                            )
-                        }
-                        return null
-                    })}
-                </View>
-            </View>
-        )
-    }
-
-    if (!hasComplexParts) {
-        return (
-            <View style={[styles.messageRowContainer, styles.assistantRowContainer]}>
-                {showHeader && (
-                    <View style={styles.assistantMessageHeader}>
-                        {isBusy ? (
-                            <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 1 }}>
-                                <Text style={{ color: '#c084fc', fontSize: 10, fontWeight: 'bold', fontFamily: 'FiraCode-Regular' }}>❯</Text>
-                                <BlinkingCursor color="#c084fc" size={10} />
-                            </View>
-                        ) : (
-                            <Feather name="terminal" size={10} color="#c084fc" />
-                        )}
-                        <Text style={[styles.messageRoleText, styles.assistantRoleText]}>
-                            Agent
-                        </Text>
-                    </View>
-                )}
-                {renderableParts.length > 0 ? (
-                    <View style={styles.assistantBubble}>
+        if (isUser) {
+            return (
+                <View style={[styles.messageRowContainer, styles.userRowContainer]}>
+                    <View style={styles.userBubble}>
                         {renderableParts.map((part, index) => {
                             if (part.type === 'text') {
                                 return (
@@ -2119,102 +2270,246 @@ const MessageItem = ({
                             }
                             return null
                         })}
-                        {isBusy && (
-                            <View style={[styles.typingIndicatorContainer, { marginTop: 6, flexDirection: 'row', alignItems: 'center', columnGap: 6 }]}>
-                                <ActivityIndicator size="small" color="#c084fc" />
-                                <Text style={[styles.typingText, { fontSize: 12 }]}>
-                                    {isAgentReasoning ? '正在思考... 🧠' : '运行中... ⚙️'}
-                                </Text>
-                            </View>
-                        )}
                     </View>
-                ) : (
-                    isBusy && (
-                        <View style={styles.assistantBubble}>
-                            <View style={styles.typingIndicatorContainer}>
-                                <ActivityIndicator size="small" color="#c084fc" />
-                                <Text style={styles.typingText}>
-                                    {isAgentReasoning ? '正在思考... 🧠' : '运行中... ⚙️'}
-                                </Text>
-                            </View>
-                        </View>
-                    )
-                )}
-            </View>
-        )
-    }
+                </View>
+            )
+        }
 
-    return (
-        <View style={[styles.messageRowContainer, styles.assistantRowContainer]}>
-            {showHeader && (
-                <View style={styles.assistantMessageHeader}>
-                    {isBusy ? (
-                        <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 1 }}>
-                            <Text style={{ color: '#c084fc', fontSize: 10, fontWeight: 'bold', fontFamily: 'FiraCode-Regular' }}>❯</Text>
-                            <BlinkingCursor color="#c084fc" size={10} />
+        if (!hasComplexParts) {
+            const hasVisibleContent = renderableParts.length > 0 || isCanceled || isBusy
+            if (!hasVisibleContent) {
+                return null
+            }
+            return (
+                <View style={[styles.messageRowContainer, styles.assistantRowContainer]}>
+                    {showHeader && (
+                        <View style={styles.assistantMessageHeader}>
+                            {isBusy ? (
+                                <View
+                                    style={{
+                                        flexDirection: 'row',
+                                        alignItems: 'center',
+                                        columnGap: 1,
+                                    }}>
+                                    <Text
+                                        style={{
+                                            color: '#c084fc',
+                                            fontSize: 10,
+                                            fontWeight: 'bold',
+                                            fontFamily: 'FiraCode-Regular',
+                                        }}>
+                                        ❯
+                                    </Text>
+                                    <BlinkingCursor color="#c084fc" size={10} />
+                                </View>
+                            ) : (
+                                <Feather name="terminal" size={10} color="#c084fc" />
+                            )}
+                            <Text style={[styles.messageRoleText, styles.assistantRoleText]}>
+                                Agent
+                            </Text>
+                        </View>
+                    )}
+                    {renderableParts.length > 0 ? (
+                        <View style={styles.assistantBubble}>
+                            {renderableParts.map((part, index) => {
+                                if (part.type === 'text') {
+                                    return (
+                                        <MarkdownText
+                                            key={index}
+                                            text={part.data.text || ''}
+                                            style={styles.messageText}
+                                        />
+                                    )
+                                }
+                                return null
+                            })}
+                            {isCanceled && (
+                                <View style={styles.canceledContainer}>
+                                    <Text style={styles.canceledText}>{finishMessage}</Text>
+                                </View>
+                            )}
+                            {isBusy && !isCanceled && (
+                                <View
+                                    style={[
+                                        styles.typingIndicatorContainer,
+                                        {
+                                            marginTop: 6,
+                                            flexDirection: 'row',
+                                            alignItems: 'center',
+                                            columnGap: 6,
+                                        },
+                                    ]}>
+                                    {isAgentReasoning ? (
+                                        <View
+                                            style={{
+                                                flexDirection: 'row',
+                                                alignItems: 'center',
+                                                columnGap: 4,
+                                            }}>
+                                            <Text style={[styles.typingText, { fontSize: 12 }]}>
+                                                正在思考...{' '}
+                                            </Text>
+                                            <BrailleSpinner color="#c084fc" size={12} />
+                                        </View>
+                                    ) : (
+                                        <Text style={[styles.typingText, { fontSize: 12 }]}>
+                                            运行中... ⚙️
+                                        </Text>
+                                    )}
+                                </View>
+                            )}
+                        </View>
+                    ) : isCanceled ? (
+                        <View style={styles.assistantBubble}>
+                            <View style={styles.canceledContainer}>
+                                <Text style={styles.canceledText}>{finishMessage}</Text>
+                            </View>
                         </View>
                     ) : (
-                        <Feather name="terminal" size={10} color="#c084fc" />
+                        isBusy && (
+                            <View style={styles.assistantBubble}>
+                                <View style={styles.typingIndicatorContainer}>
+                                    {isAgentReasoning ? (
+                                        <View
+                                            style={{
+                                                flexDirection: 'row',
+                                                alignItems: 'center',
+                                                columnGap: 4,
+                                            }}>
+                                            <Text style={styles.typingText}>正在思考... </Text>
+                                            <BrailleSpinner color="#c084fc" size={12} />
+                                        </View>
+                                    ) : (
+                                        <Text style={styles.typingText}>运行中... ⚙️</Text>
+                                    )}
+                                </View>
+                            </View>
+                        )
                     )}
-                    <Text style={[styles.messageRoleText, styles.assistantRoleText]}>Agent</Text>
+                    {isCanceled && <InterruptDivider />}
                 </View>
-            )}
-            {renderableParts.map((part, index) => {
-                if (part.type === 'reasoning') {
-                    return (
-                        <ThinkingPart
-                            key={index}
-                            thinking={part.data.thinking || ''}
-                            finishedAt={part.data.finished_at}
-                        />
-                    )
-                }
-                if (part.type === 'terminal_session') {
-                    return (
-                        <View key={index} style={styles.terminalSessionCardWrapper}>
-                            <TerminalSessionCard
-                                name={part.toolCall.name}
-                                input={part.toolCall.input}
-                                finished={part.toolCall.finished}
-                                result={part.toolResult}
-                                onMaximize={onMaximize}
+            )
+        }
+
+        return (
+            <View style={[styles.messageRowContainer, styles.assistantRowContainer]}>
+                {showHeader && (
+                    <View style={styles.assistantMessageHeader}>
+                        {isBusy ? (
+                            <View
+                                style={{
+                                    flexDirection: 'row',
+                                    alignItems: 'center',
+                                    columnGap: 1,
+                                }}>
+                                <Text
+                                    style={{
+                                        color: '#c084fc',
+                                        fontSize: 10,
+                                        fontWeight: 'bold',
+                                        fontFamily: 'FiraCode-Regular',
+                                    }}>
+                                    ❯
+                                </Text>
+                                <BlinkingCursor color="#c084fc" size={10} />
+                            </View>
+                        ) : (
+                            <Feather name="terminal" size={10} color="#c084fc" />
+                        )}
+                        <Text style={[styles.messageRoleText, styles.assistantRoleText]}>
+                            Agent
+                        </Text>
+                    </View>
+                )}
+                {renderableParts.map((part, index) => {
+                    if (part.type === 'reasoning') {
+                        return (
+                            <ThinkingPart
+                                key={index}
+                                thinking={part.data.thinking || ''}
+                                finishedAt={part.data.finished_at}
                             />
-                        </View>
-                    )
-                }
-                if (part.type === 'text') {
-                    const prevPart = index > 0 ? renderableParts[index - 1] : null
-                    const isAfterTerminal = prevPart?.type === 'terminal_session'
-                    return (
-                        <View
-                            key={index}
-                            style={[
-                                styles.compoundTextContainer,
-                                isAfterTerminal && { marginTop: 8 },
-                            ]}>
-                            <MarkdownText
-                                text={part.data.text || ''}
-                                style={styles.messageText}
-                                flat={true}
-                            />
-                        </View>
-                    )
-                }
-                return null
-            })}
-            {isBusy && (
-                <View style={styles.compoundTypingContainer}>
-                    <ActivityIndicator size="small" color="#c084fc" style={{ marginRight: 6 }} />
-                    <Text style={styles.compoundTypingText}>
-                        {isAgentReasoning ? '正在思考... 🧠' : '运行中... ⚙️'}
-                    </Text>
-                </View>
-            )}
-        </View>
-    )
-}
+                        )
+                    }
+                    if (part.type === 'terminal_session') {
+                        return (
+                            <View key={index} style={styles.terminalSessionCardWrapper}>
+                                <TerminalSessionCard
+                                    name={part.toolCall.name}
+                                    input={part.toolCall.input}
+                                    finished={part.toolCall.finished}
+                                    result={part.toolResult}
+                                    onMaximize={onMaximize}
+                                />
+                            </View>
+                        )
+                    }
+                    if (part.type === 'text') {
+                        const prevPart = index > 0 ? renderableParts[index - 1] : null
+                        const isAfterTerminal = prevPart?.type === 'terminal_session'
+                        return (
+                            <View
+                                key={index}
+                                style={[
+                                    styles.compoundTextContainer,
+                                    isAfterTerminal && { marginTop: 8 },
+                                ]}>
+                                <MarkdownText
+                                    text={part.data.text || ''}
+                                    style={styles.messageText}
+                                    flat={true}
+                                />
+                            </View>
+                        )
+                    }
+                    return null
+                })}
+                {isCanceled && (
+                    <View style={styles.canceledContainer}>
+                        <Text style={styles.canceledText}>{finishMessage}</Text>
+                    </View>
+                )}
+                {isBusy && !isCanceled && (
+                    <View style={styles.compoundTypingContainer}>
+                        {isAgentReasoning ? (
+                            <View
+                                style={{
+                                    flexDirection: 'row',
+                                    alignItems: 'center',
+                                    columnGap: 4,
+                                }}>
+                                <Text style={styles.compoundTypingText}>正在思考... </Text>
+                                <BrailleSpinner color="#c084fc" size={12} />
+                            </View>
+                        ) : (
+                            <Text style={styles.compoundTypingText}>运行中... ⚙️</Text>
+                        )}
+                    </View>
+                )}
+                {isCanceled && <InterruptDivider />}
+            </View>
+        )
+    },
+    (prev, next) => {
+        // Stream tokens mutate message.parts in place, but our reducer in
+        // handleEvent always replaces the message object via map.set() — so a
+        // changed message has a new object ref. Compare by ref + cheap props.
+        // This makes the historical messages (which never change) skip render
+        // entirely while the trailing streaming one still updates per flush.
+        if (prev.message !== next.message) return false
+        if (prev.isUser !== next.isUser) return false
+        if (prev.showHeader !== next.showHeader) return false
+        if (prev.isBusy !== next.isBusy) return false
+        if (prev.onMaximize !== next.onMaximize) return false
+        return true
+    }
+)
+MessageItem.displayName = 'MessageItem'
 
 const CrushMobile = () => {
+    const insets = useSafeAreaInsets()
+    const sendingRef = useRef(false)
     const searchParams = useLocalSearchParams<{ serverUrl?: string | string[] }>()
     const searchServerUrl = useMemo(
         () => parseServerUrlFromSearchParam(searchParams.serverUrl),
@@ -2228,6 +2523,12 @@ const CrushMobile = () => {
     const [sessionID, setSessionID] = useState('')
     const sessionIDRef = useRef(sessionID)
     sessionIDRef.current = sessionID
+    // O(1) dedupe + insertion ordering. Source of truth; setMessages array
+    // is only a render projection refreshed on a 50ms tick so a 10k-event
+    // history replay no longer triggers 10k React renders.
+    const messagesMapRef = useRef<Map<string, Message>>(new Map())
+    const messagesFlushScheduledRef = useRef(false)
+    const localCancelMessageIdsRef = useRef<Set<string>>(new Set())
     const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null)
     const [sessionAccessTimes, setSessionAccessTimes] = useState<Record<string, number>>({})
 
@@ -2245,12 +2546,22 @@ const CrushMobile = () => {
 
     const [messages, setMessages] = useState<Message[]>([])
     const [agentInfo, setAgentInfo] = useState<AgentInfo>({ is_busy: false, is_ready: true })
+    const activeRunVisible = useMemo(() => {
+        if (!agentInfo.is_busy) return false
+        if (messages.length === 0) return false
+        const lastMessage = messages[messages.length - 1]
+        if (lastMessage.role === 'user') return true
+        return messages.some(
+            (message) => message.role === 'assistant' && !isMessageFinished(message)
+        )
+    }, [messages, agentInfo.is_busy])
     const isAgentReasoning = useMemo(() => {
-        if (!agentInfo.is_busy || messages.length === 0) return false
+        if (!activeRunVisible || messages.length === 0) return false
         const lastMsg = messages[messages.length - 1]
         if (lastMsg.role !== 'assistant') return false
-        return lastMsg.parts?.some(p => p.type === 'reasoning' && !p.data?.finished_at) || false
-    }, [messages, agentInfo.is_busy])
+        if (isMessageFinished(lastMsg)) return false
+        return lastMsg.parts?.some((p) => p.type === 'reasoning' && !p.data?.finished_at) || false
+    }, [messages, activeRunVisible])
     const [pendingPermissions, setPendingPermissions] = useState<PermissionRequest[]>([])
     const [activities, setActivities] = useState<ActivityEntry[]>([])
     const [input, setInput] = useState('')
@@ -2274,9 +2585,15 @@ const CrushMobile = () => {
     const [modelRole, setModelRole] = useState<'brain' | 'worker' | 'explore'>('brain')
     const [modelProvider, setModelProvider] = useState('')
     const [modelId, setModelId] = useState('')
-    const [modelSaveStatus, setModelSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+    const [modelSaveStatus, setModelSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>(
+        'idle'
+    )
     const [quickSelectRole, setQuickSelectRole] = useState<'brain' | 'worker' | null>(null)
     const [switchingModelRole, setSwitchingModelRole] = useState<'brain' | 'worker' | null>(null)
+    const [mobileUpdateStatus, setMobileUpdateStatus] = useState<MobileUpdateStatus>('idle')
+    const [mobileUpdateRelease, setMobileUpdateRelease] = useState<MobileUpdateRelease | null>(null)
+    const [mobileUpdateError, setMobileUpdateError] = useState('')
+    const [mobileUpdateProgress, setMobileUpdateProgress] = useState(0)
     // Collapsed cwd groups in the drawer. A path here means its sessions
     // are hidden. Default empty = all groups expanded. Persisted only in
     // memory; on app relaunch everything is shown.
@@ -2409,34 +2726,37 @@ const CrushMobile = () => {
     ).current
 
     const api = useMemo(() => new CrushApi(connectedUrl), [connectedUrl])
-    const handleDeleteSession = useCallback(async (id: string) => {
-        try {
-            // Optimistically update UI
-            setSessions((prev) => prev.filter((s) => s.id !== id))
-            setDeletingSessionId(null)
-            
-            await api.deleteSession(id)
-            
-            if (sessionIDRef.current === id) {
-                setSessions((currentSessions) => {
-                    const aliveSorted = currentSessions
-                        .filter((s) => s.id !== id && s.alive !== false)
-                        .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
-                    if (aliveSorted.length > 0) {
-                        setSessionID(aliveSorted[0].id)
-                    } else if (currentSessions.length > 0) {
-                        const fallback = currentSessions.find((s) => s.id !== id)
-                        setSessionID(fallback?.id || '')
-                    } else {
-                        setSessionID('')
-                    }
-                    return currentSessions
-                })
+    const handleDeleteSession = useCallback(
+        async (id: string) => {
+            try {
+                // Optimistically update UI
+                setSessions((prev) => prev.filter((s) => s.id !== id))
+                setDeletingSessionId(null)
+
+                await api.deleteSession(id)
+
+                if (sessionIDRef.current === id) {
+                    setSessions((currentSessions) => {
+                        const aliveSorted = currentSessions
+                            .filter((s) => s.id !== id && s.alive !== false)
+                            .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+                        if (aliveSorted.length > 0) {
+                            setSessionID(aliveSorted[0].id)
+                        } else if (currentSessions.length > 0) {
+                            const fallback = currentSessions.find((s) => s.id !== id)
+                            setSessionID(fallback?.id || '')
+                        } else {
+                            setSessionID('')
+                        }
+                        return currentSessions
+                    })
+                }
+            } catch (err) {
+                console.error('Failed to delete session', err)
             }
-        } catch (err) {
-            console.error('Failed to delete session', err)
-        }
-    }, [api])
+        },
+        [api]
+    )
     const handleQuickSwitchModel = useCallback(
         async (role: 'brain' | 'worker', provider: string, model: string) => {
             if (!api || !sessionID) return
@@ -2452,19 +2772,136 @@ const CrushMobile = () => {
         },
         [api, sessionID]
     )
+
+    const handleCheckMobileUpdate = useCallback(async () => {
+        setMobileUpdateStatus('checking')
+        setMobileUpdateError('')
+        setMobileUpdateProgress(0)
+        try {
+            const result = await checkForMobileUpdate()
+            setMobileUpdateRelease(result.release)
+            setMobileUpdateStatus(result.updateAvailable ? 'available' : 'latest')
+        } catch (error) {
+            console.error('Failed to check mobile update', error)
+            setMobileUpdateError(describeError(error))
+            setMobileUpdateStatus('error')
+        }
+    }, [])
+
+    const handleInstallMobileUpdate = useCallback(async () => {
+        const release = mobileUpdateRelease
+        if (!release) {
+            await handleCheckMobileUpdate()
+            return
+        }
+        setMobileUpdateStatus('downloading')
+        setMobileUpdateError('')
+        setMobileUpdateProgress(0)
+        try {
+            await downloadAndOpenAndroidUpdate(release, (progressRatio) => {
+                setMobileUpdateProgress(Math.max(0, Math.min(1, progressRatio)))
+            })
+            setMobileUpdateStatus('opening')
+        } catch (error) {
+            console.error('Failed to install mobile update', error)
+            setMobileUpdateError(describeError(error))
+            setMobileUpdateStatus('error')
+        }
+    }, [handleCheckMobileUpdate, mobileUpdateRelease])
+
+    useEffect(() => {
+        const timeout = setTimeout(() => {
+            void handleCheckMobileUpdate()
+        }, 1200)
+        return () => clearTimeout(timeout)
+    }, [handleCheckMobileUpdate])
+
     const unsubscribeRef = useRef<null | (() => void)>(null)
     const sessionsUnsubRef = useRef<null | (() => void)>(null)
     const cancelRequestedRef = useRef(false)
 
     const flatListRef = useRef<FlatList>(null)
     const isCloseToBottom = useRef(true)
+    const [loadingOlder, setLoadingOlder] = useState(false)
+    const [exhaustedHistory, setExhaustedHistory] = useState(false)
+    const oldestLoadedTsRef = useRef<number>(0)
+    const loadingOlderRef = useRef(false)
+    // True iff the user is the one actively dragging the scroll view.
+    // Lazy-load only fires on user-initiated scrolls so SSE-driven
+    // scrollToEnd animations (which pass through y=0 briefly) cannot
+    // trick us into pulling history.
+    const userScrollRef = useRef(false)
 
     const handleScroll = useCallback((event: any) => {
         const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent
         const paddingToBottom = 80
         isCloseToBottom.current =
             layoutMeasurement.height + contentOffset.y >= contentSize.height - paddingToBottom
+        // Lazy-load only when the user is actively dragging upward and we
+        // are near the top. Auto scroll-to-end animations from SSE bursts
+        // briefly cross y<200 too, which used to spam loadOlderHistory and
+        // freeze isCloseToBottom to false, killing auto-scroll.
+        if (userScrollRef.current && contentOffset.y < 200 && !loadingOlderRef.current) {
+            void loadOlderHistoryRef.current?.()
+        }
     }, [])
+
+    const handleScrollBeginDrag = useCallback(() => {
+        userScrollRef.current = true
+    }, [])
+    const handleMomentumScrollEnd = useCallback(() => {
+        userScrollRef.current = false
+    }, [])
+
+    // Forward ref so loadOlderHistory (declared early) can call the live
+    // handleEvent (declared later) without TDZ. Set on every render.
+    const handleEventRef = useRef<((env: CrushEnvelope) => void) | null>(null)
+    const loadOlderHistoryRef = useRef<(() => Promise<void>) | null>(null)
+
+    // Infinite-scroll-up: pull another 30 min of older history into the
+    // existing message Map when the user reaches the top of the list. The
+    // Map auto-dedupes (so re-pulling never adds duplicates) and the flush
+    // sorts by created_at so back-fills land in chronological position.
+    const loadOlderHistory = useCallback(async () => {
+        if (loadingOlderRef.current || exhaustedHistory) return
+        if (!sessionID) return
+        if (messagesMapRef.current.size === 0) return
+        let oldestTs = Number.POSITIVE_INFINITY
+        for (const m of messagesMapRef.current.values()) {
+            const t = m.created_at || 0
+            if (t > 0 && t < oldestTs) oldestTs = t
+        }
+        if (!isFinite(oldestTs)) return
+        const oldestTsMs = oldestTs * 1000
+        if (oldestLoadedTsRef.current && oldestTsMs >= oldestLoadedTsRef.current) {
+            return
+        }
+        oldestLoadedTsRef.current = oldestTsMs
+        loadingOlderRef.current = true
+        setLoadingOlder(true)
+        try {
+            const sizeBefore = messagesMapRef.current.size
+            await api.loadOlderHistory(sessionID, oldestTsMs, 30 * 60 * 1000, (env) => {
+                try {
+                    handleEventRef.current?.(env)
+                } catch (err) {
+                    console.log('loadOlderHistory event handler error:', err)
+                }
+            })
+            const out = Array.from(messagesMapRef.current.values())
+            out.sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
+            setMessages(out)
+            if (messagesMapRef.current.size === sizeBefore) {
+                setExhaustedHistory(true)
+            }
+        } catch (err) {
+            console.log('loadOlderHistory failed:', err)
+        } finally {
+            loadingOlderRef.current = false
+            setLoadingOlder(false)
+        }
+    }, [api, sessionID, exhaustedHistory])
+    loadOlderHistoryRef.current = loadOlderHistory
 
     const handleContentSizeChange = useCallback(() => {
         if (isCloseToBottom.current) {
@@ -2472,10 +2909,13 @@ const CrushMobile = () => {
         }
     }, [])
 
-    const lastMessagePartsString = useMemo(() => {
+    // Cheap scroll trigger: last message id + part count. JSON.stringify on
+    // the whole parts array would re-serialize every streaming token
+    // (parts mutates each token), wasting CPU and forcing a sort.
+    const lastMessageSig = useMemo(() => {
         if (messages.length === 0) return ''
-        const lastMsg = messages[messages.length - 1]
-        return JSON.stringify(lastMsg.parts)
+        const last = messages[messages.length - 1]
+        return `${last.id}:${last.parts?.length ?? 0}`
     }, [messages])
 
     useEffect(() => {
@@ -2485,19 +2925,31 @@ const CrushMobile = () => {
             }, 50)
             return () => clearTimeout(timer)
         }
-    }, [lastMessagePartsString])
+    }, [lastMessageSig])
 
     const activeSession = useMemo(() => {
         return sessions.find((s) => s.id === sessionID)
     }, [sessions, sessionID])
 
+    // Sync is_busy from the heartbeat ONLY when the active session changes.
+    // Otherwise the 5s presence poll would race with the real-time
+    // agent_event stream: stream sets is_busy=true on turn_started,
+    // then 50-2000ms later the heartbeat (carrying a stale snapshot)
+    // flips it back to false — visible as the send/stop button flicker.
+    // agent_event is the source of truth while a session is open.
     useEffect(() => {
         if (activeSession) {
             setAgentInfo((prev) => ({ ...prev, is_busy: !!activeSession.is_busy }))
         }
-    }, [activeSession?.id, activeSession?.is_busy])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeSession?.id])
 
-    const lastSyncedRef = useRef<{ sessionId: string; role: string; provider: string; model: string } | null>(null)
+    const lastSyncedRef = useRef<{
+        sessionId: string
+        role: string
+        provider: string
+        model: string
+    } | null>(null)
 
     // Sync selected role's current model/provider when activeSession or modelRole changes
     useEffect(() => {
@@ -2508,13 +2960,20 @@ const CrushMobile = () => {
             return
         }
 
-        const currentProvider = activeSession.models?.[modelRole]?.provider || (modelRole === 'brain' ? activeSession.provider : '') || ''
-        const currentModel = activeSession.models?.[modelRole]?.model || (modelRole === 'brain' ? activeSession.model : '') || ''
+        const currentProvider =
+            activeSession.models?.[modelRole]?.provider ||
+            (modelRole === 'brain' ? activeSession.provider : '') ||
+            ''
+        const currentModel =
+            activeSession.models?.[modelRole]?.model ||
+            (modelRole === 'brain' ? activeSession.model : '') ||
+            ''
 
         // Only overwrite if the active session ID changed, the selected role changed,
         // or the TUI actually updated to a new model for this role.
-        const needsSync = !lastSyncedRef.current || 
-            lastSyncedRef.current.sessionId !== activeSession.id || 
+        const needsSync =
+            !lastSyncedRef.current ||
+            lastSyncedRef.current.sessionId !== activeSession.id ||
             lastSyncedRef.current.role !== modelRole ||
             lastSyncedRef.current.provider !== currentProvider ||
             lastSyncedRef.current.model !== currentModel
@@ -2526,7 +2985,7 @@ const CrushMobile = () => {
                 sessionId: activeSession.id,
                 role: modelRole,
                 provider: currentProvider,
-                model: currentModel
+                model: currentModel,
             }
         }
     }, [activeSession, modelRole])
@@ -2535,17 +2994,9 @@ const CrushMobile = () => {
     //   2. session presence record (session.model) — survives reconnect
     //   3. fallback when nothing is known yet
     const modelName =
-        agentInfo.model_cfg?.model ||
-        agentInfo.model?.id ||
-        activeSession?.model ||
-        '未就绪'
-    const brainModel =
-        activeSession?.models?.brain?.model ||
-        activeSession?.model ||
-        '未就绪'
-    const workerModel =
-        activeSession?.models?.worker?.model ||
-        '未设定'
+        agentInfo.model_cfg?.model || agentInfo.model?.id || activeSession?.model || '未就绪'
+    const brainModel = activeSession?.models?.brain?.model || activeSession?.model || '未就绪'
+    const workerModel = activeSession?.models?.worker?.model || '未设定'
 
     const shortPath = (path: string) => {
         const parts = path.split('/').filter(Boolean)
@@ -2617,6 +3068,13 @@ const CrushMobile = () => {
             const [item] = merged.splice(index, 1)
             return [item, ...merged].slice(0, 20)
         })
+        // Auto-remove finished/failed activities after 4 seconds so the bar
+        // doesn't accumulate stale cards.
+        if (status === 'done' || status === 'failed') {
+            setTimeout(() => {
+                setActivities((prev) => prev.filter((a) => a.id !== entry.id))
+            }, 4000)
+        }
     }, [])
 
     const handleEvent = useCallback(
@@ -2626,22 +3084,63 @@ const CrushMobile = () => {
                 if (nextMessage.session_id && nextMessage.session_id !== sessionIDRef.current) {
                     return
                 }
-                setMessages((prev) => {
-                    const index = prev.findIndex((m) => m.id === nextMessage.id)
-                    if (envelope.payload.type === 'deleted') {
-                        return prev.filter((m) => m.id !== nextMessage.id)
+                const map = messagesMapRef.current
+                if (envelope.payload.type === 'deleted') {
+                    if (!map.delete(nextMessage.id)) return
+                } else {
+                    // Map preserves insertion order; setting an existing key
+                    // does NOT reorder, so streaming token updates land in
+                    // place — same semantics as the old findIndex update.
+                    if (nextMessage.role === 'assistant' && isMessageCanceled(nextMessage)) {
+                        for (const id of Array.from(localCancelMessageIdsRef.current)) {
+                            if (map.get(id)?.session_id === nextMessage.session_id) {
+                                map.delete(id)
+                                localCancelMessageIdsRef.current.delete(id)
+                            }
+                        }
                     }
-                    if (index < 0) return [...prev, nextMessage]
-                    const updated = [...prev]
-                    updated[index] = nextMessage
-                    return updated
-                })
+                    map.set(nextMessage.id, nextMessage)
+                    if (nextMessage.role === 'assistant' && isMessageFinished(nextMessage)) {
+                        setAgentInfo((prev) => ({ ...prev, is_busy: false }))
+                    }
+                }
+                if (!messagesFlushScheduledRef.current) {
+                    messagesFlushScheduledRef.current = true
+                    setTimeout(() => {
+                        messagesFlushScheduledRef.current = false
+                        const out = Array.from(messagesMapRef.current.values())
+                        out.sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
+                        const g = globalThis as any
+                        const isFirstFlush = !g.__perfFirstFlush && g.__perfTap
+                        if (isFirstFlush) {
+                            g.__perfFirstFlush = Date.now()
+                            console.log(
+                                `[PERF] T3 first_flush +${g.__perfFirstFlush - g.__perfTap}ms count=${out.length}`
+                            )
+                        }
+                        setMessages(out)
+                        // First flush after switching to a session with
+                        // history: stick to bottom synchronously so the
+                        // user sees the newest content, not the oldest.
+                        if (isFirstFlush) {
+                            isCloseToBottom.current = true
+                            requestAnimationFrame(() => {
+                                requestAnimationFrame(() => {
+                                    flatListRef.current?.scrollToEnd({ animated: false })
+                                })
+                            })
+                        }
+                    }, 100)
+                }
                 return
             }
             if (envelope.type === 'agent_event') {
                 const ev = envelope.payload.payload
-                recordActivity(ev)
-                if (ev.type === 'is_busy' || ev.type === 'turn_started' || ev.type === 'agent_started') {
+                if (
+                    ev.type === 'is_busy' ||
+                    ev.type === 'turn_started' ||
+                    ev.type === 'agent_started'
+                ) {
                     setAgentInfo((prev) => ({ ...prev, is_busy: true }))
                 } else if (
                     ev.type === 'agent_finished' ||
@@ -2671,6 +3170,7 @@ const CrushMobile = () => {
         },
         [recordActivity]
     )
+    handleEventRef.current = handleEvent
 
     const connect = useCallback(async () => {
         setIsLoading(true)
@@ -2727,24 +3227,23 @@ const CrushMobile = () => {
             try {
                 const unsub = await api.listSessions((next) => {
                     if (!active) return
+                    console.log(
+                        `[PERF] listSessions cb: ${next.length} sessions, alive=${next.filter((s) => s.alive !== false).length}, first=${next[0]?.id?.slice(0, 8)}/${next[0]?.alive}`
+                    )
                     setSessions(next)
                     setStatus('在线')
                     setSessionID((prev) => {
-                        // Keep current session iff it's still alive. If
-                        // the TUI behind it died (alive=false or removed
-                        // by reconcile), jump to the most-recently-updated
-                        // alive session so the screen tracks the real
-                        // live TUI instead of a stale ghost.
                         const aliveSorted = next
                             .filter((s) => s.alive !== false)
                             .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
-                        if (
-                            prev &&
-                            aliveSorted.some((s) => s.id === prev)
-                        ) {
+                        if (prev && aliveSorted.some((s) => s.id === prev)) {
                             return prev
                         }
-                        return aliveSorted[0]?.id || next[0]?.id || ''
+                        const picked = aliveSorted[0]?.id || next[0]?.id || ''
+                        console.log(
+                            `[PERF] setSessionID prev=${prev?.slice(0, 8) || '(empty)'} -> ${picked?.slice(0, 8) || '(empty)'}`
+                        )
+                        return picked
                     })
                 })
                 if (!active) {
@@ -2787,18 +3286,45 @@ const CrushMobile = () => {
         unsubscribeRef.current = null
 
         if (!sessionID) {
+            messagesMapRef.current.clear()
             setMessages([])
             return
         }
 
+        // PERF: T0 = sessionID-change moment.
+        const g = globalThis as any
+        g.__perfTap = Date.now()
+        g.__perfFirstEvent = 0
+        g.__perfFirstFlush = 0
+        g.__perfRendered = 0
+        console.log(`[PERF] T0 session_change session=${sessionID}`)
+
         // Events replay full history via deliverPolicy: 'all'; start fresh.
+        messagesMapRef.current.clear()
+        localCancelMessageIdsRef.current.clear()
         setMessages([])
+        // Sync ref BEFORE subscribe so the first envelope (which may
+        // arrive in <50ms, before the next React commit) doesn't get
+        // filtered out by handleEvent's sessionIDRef.current check.
+        sessionIDRef.current = sessionID
+        oldestLoadedTsRef.current = 0
+        setExhaustedHistory(false)
+        userScrollRef.current = false
+        loadingOlderRef.current = false
         ;(async () => {
             try {
+                console.log(`[PERF] T1 subscribe_begin +${Date.now() - g.__perfTap}ms`)
                 const unsub = await api.subscribeSessionEvents(
                     sessionID,
                     (envelope) => {
                         if (!active) return
+                        const g2 = globalThis as any
+                        if (!g2.__perfFirstEvent && g2.__perfTap) {
+                            g2.__perfFirstEvent = Date.now()
+                            console.log(
+                                `[PERF] T2 first_event +${g2.__perfFirstEvent - g2.__perfTap}ms type=${envelope.type}`
+                            )
+                        }
                         setStatus('在线')
                         handleEvent(envelope)
                     },
@@ -2838,7 +3364,8 @@ const CrushMobile = () => {
 
     const sendMessage = async () => {
         const prompt = input.trim()
-        if (!prompt || !sessionID) return
+        if (!prompt || !sessionID || sendingRef.current) return
+        sendingRef.current = true
         try {
             cancelRequestedRef.current = false
             setInput('')
@@ -2862,6 +3389,8 @@ const CrushMobile = () => {
             console.error(error)
             setInput(prompt)
             setErrorText(error instanceof Error ? error.message : String(error))
+        } finally {
+            sendingRef.current = false
         }
     }
 
@@ -2876,6 +3405,33 @@ const CrushMobile = () => {
         setErrorText('')
         try {
             await api.cancelSession(sessionID)
+            const nowMs = Date.now()
+            const localCancelID = `local-cancel-${sessionID}-${nowMs}`
+            const localCancelMessage: Message = {
+                id: localCancelID,
+                role: 'assistant',
+                session_id: sessionID,
+                created_at: nowMs / 1000,
+                parts: [
+                    {
+                        type: 'finish',
+                        data: {
+                            reason: 'canceled',
+                            message: 'Canceled',
+                            time: Math.floor(nowMs / 1000),
+                        },
+                    },
+                ],
+            }
+            localCancelMessageIdsRef.current.add(localCancelID)
+            messagesMapRef.current.set(localCancelID, localCancelMessage)
+            const out = Array.from(messagesMapRef.current.values())
+            out.sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
+            setMessages(out)
+            isCloseToBottom.current = true
+            requestAnimationFrame(() => {
+                flatListRef.current?.scrollToEnd({ animated: true })
+            })
             setAgentInfo((prev) => ({ ...prev, is_busy: false }))
         } catch (error) {
             console.error(error)
@@ -2931,7 +3487,7 @@ const CrushMobile = () => {
             .map((item) => item.msg)
 
         let baseMessages = sorted
-        if (agentInfo.is_busy && sorted.length > 0 && sorted[sorted.length - 1].role === 'user') {
+        if (activeRunVisible && sorted.length > 0 && sorted[sorted.length - 1].role === 'user') {
             baseMessages = [
                 ...sorted,
                 {
@@ -2980,15 +3536,52 @@ const CrushMobile = () => {
                 parts: msg.parts ? [...msg.parts] : [],
             })
         }
-        return aggregated
-    }, [messages, agentInfo.is_busy])
+        return aggregated.filter(messageHasVisibleContent)
+    }, [messages, activeRunVisible])
 
     const isConnected = status === '在线'
+    const nativeVersion = Application.nativeApplicationVersion || '0.0.0'
+    const nativeBuildVersion = Application.nativeBuildVersion || '0'
+    const mobileUpdateButtonDisabled =
+        mobileUpdateStatus === 'checking' ||
+        mobileUpdateStatus === 'downloading' ||
+        mobileUpdateStatus === 'opening'
+    const mobileUpdateButtonText =
+        mobileUpdateStatus === 'checking'
+            ? '检查中'
+            : mobileUpdateStatus === 'downloading'
+              ? `${Math.round(mobileUpdateProgress * 100)}%`
+              : mobileUpdateStatus === 'opening'
+                ? '安装器'
+                : mobileUpdateStatus === 'available'
+                  ? '安装'
+                  : '检查'
+    const mobileUpdateStateText =
+        mobileUpdateStatus === 'available' && mobileUpdateRelease
+            ? `发现 v${mobileUpdateRelease.version}`
+            : mobileUpdateStatus === 'latest'
+              ? '已是最新'
+              : mobileUpdateStatus === 'error'
+                ? mobileUpdateError || '更新检查失败'
+                : mobileUpdateStatus === 'downloading'
+                  ? `下载 ${Math.round(mobileUpdateProgress * 100)}%`
+                  : mobileUpdateStatus === 'opening'
+                    ? '已打开安装器'
+                    : '等待检查'
 
     return (
-        <SafeAreaView style={styles.safeArea} {...panResponder.panHandlers}>
+        <View
+            style={[
+                styles.safeArea,
+                {
+                    paddingTop: insets.top,
+                    paddingBottom: insets.bottom,
+                },
+            ]}
+            {...panResponder.panHandlers}>
             <KeyboardAvoidingView
-                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 54}
                 style={styles.root}>
                 <View style={styles.header}>
                     <View style={styles.headerTop}>
@@ -3006,7 +3599,10 @@ const CrushMobile = () => {
                             />
                             <Text style={styles.title}>Crush</Text>
                             {activeSession?.path ? (
-                                <Text style={styles.titlePath} numberOfLines={1} ellipsizeMode="tail">
+                                <Text
+                                    style={styles.titlePath}
+                                    numberOfLines={1}
+                                    ellipsizeMode="tail">
                                     {shortPath(activeSession.path)}
                                 </Text>
                             ) : null}
@@ -3016,22 +3612,29 @@ const CrushMobile = () => {
                                     isConnected ? styles.statusDotOnline : styles.statusDotOffline,
                                     {
                                         opacity: isConnected
-                                            ? agentInfo.is_busy
+                                            ? activeRunVisible
                                                 ? blinkAnim
                                                 : 1.0
                                             : 1.0,
                                     },
                                 ]}
                             />
-                            <Text style={styles.statusText}>
-                                {agentInfo.is_busy
-                                    ? isAgentReasoning
-                                        ? '正在思考... 🧠'
-                                        : '运行中... ⚙️'
-                                    : status}
-                            </Text>
+                            {activeRunVisible && isAgentReasoning ? (
+                                <View
+                                    style={{
+                                        flexDirection: 'row',
+                                        alignItems: 'center',
+                                        columnGap: 3,
+                                    }}>
+                                    <Text style={styles.statusText}>正在思考... </Text>
+                                    <BrailleSpinner color="#64748b" size={11} />
+                                </View>
+                            ) : (
+                                <Text style={styles.statusText}>
+                                    {activeRunVisible ? '运行中... ⚙️' : status}
+                                </Text>
+                            )}
                         </Pressable>
-
                     </View>
 
                     {showConnectionSettings && (
@@ -3063,7 +3666,9 @@ const CrushMobile = () => {
 
                             {sessionID ? (
                                 <View style={styles.modelPicker}>
-                                    <Text style={styles.modelPickerLabel}>切换模型 (写入 state.yaml)</Text>
+                                    <Text style={styles.modelPickerLabel}>
+                                        切换模型 (写入 state.yaml)
+                                    </Text>
                                     <View style={styles.modelRoleRow}>
                                         {(['brain', 'worker', 'explore'] as const).map((r) => (
                                             <Pressable
@@ -3084,11 +3689,16 @@ const CrushMobile = () => {
                                             </Pressable>
                                         ))}
                                     </View>
-                                    {activeSession?.available_models && activeSession.available_models.length > 0 ? (
+                                    {activeSession?.available_models &&
+                                    activeSession.available_models.length > 0 ? (
                                         <View style={styles.availableModelsList}>
-                                            <ScrollView style={styles.modelsScrollView} nestedScrollEnabled={true}>
+                                            <ScrollView
+                                                style={styles.modelsScrollView}
+                                                nestedScrollEnabled={true}>
                                                 {activeSession.available_models.map((m) => {
-                                                    const isSelected = modelProvider === m.provider && modelId === m.model
+                                                    const isSelected =
+                                                        modelProvider === m.provider &&
+                                                        modelId === m.model
                                                     return (
                                                         <Pressable
                                                             key={`${m.provider}/${m.model}`}
@@ -3098,18 +3708,33 @@ const CrushMobile = () => {
                                                             }}
                                                             style={[
                                                                 styles.modelOptionRow,
-                                                                isSelected && styles.modelOptionRowActive,
+                                                                isSelected &&
+                                                                    styles.modelOptionRowActive,
                                                             ]}>
                                                             <View style={styles.modelOptionInfo}>
-                                                                <Text style={[styles.modelOptionProvider, isSelected && styles.modelOptionTextActive]}>
+                                                                <Text
+                                                                    style={[
+                                                                        styles.modelOptionProvider,
+                                                                        isSelected &&
+                                                                            styles.modelOptionTextActive,
+                                                                    ]}>
                                                                     {m.provider}
                                                                 </Text>
-                                                                <Text style={[styles.modelOptionName, isSelected && styles.modelOptionTextActive]}>
+                                                                <Text
+                                                                    style={[
+                                                                        styles.modelOptionName,
+                                                                        isSelected &&
+                                                                            styles.modelOptionTextActive,
+                                                                    ]}>
                                                                     {m.model}
                                                                 </Text>
                                                             </View>
                                                             {isSelected && (
-                                                                <Feather name="check" size={14} color="#38bdf8" />
+                                                                <Feather
+                                                                    name="check"
+                                                                    size={14}
+                                                                    color="#38bdf8"
+                                                                />
                                                             )}
                                                         </Pressable>
                                                     )
@@ -3122,7 +3747,10 @@ const CrushMobile = () => {
                                         onChangeText={setModelProvider}
                                         autoCapitalize="none"
                                         autoCorrect={false}
-                                        style={[styles.serverInput, { flex: 0, width: '100%', paddingVertical: 0 }]}
+                                        style={[
+                                            styles.serverInput,
+                                            { flex: 0, width: '100%', paddingVertical: 0 },
+                                        ]}
                                         placeholder="provider id (例 wecode)"
                                         placeholderTextColor="#4b5563"
                                     />
@@ -3131,7 +3759,10 @@ const CrushMobile = () => {
                                         onChangeText={setModelId}
                                         autoCapitalize="none"
                                         autoCorrect={false}
-                                        style={[styles.serverInput, { flex: 0, width: '100%', paddingVertical: 0 }]}
+                                        style={[
+                                            styles.serverInput,
+                                            { flex: 0, width: '100%', paddingVertical: 0 },
+                                        ]}
                                         placeholder="model id (例 gpt-5.4-mini)"
                                         placeholderTextColor="#4b5563"
                                     />
@@ -3211,39 +3842,6 @@ const CrushMobile = () => {
                 </View>
 
                 <View style={styles.content}>
-                    {activities.length > 0 && (
-                        <View style={styles.activitiesSection}>
-                            <ScrollView
-                                style={styles.activityPanel}
-                                horizontal
-                                showsHorizontalScrollIndicator={false}>
-                                {activities.map((item) => (
-                                    <View
-                                        key={item.id}
-                                        style={[
-                                            styles.activityCard,
-                                            activityStatusStyle(item.status),
-                                        ]}>
-                                        <View style={styles.activityCardHeader}>
-                                            <Feather
-                                                name="message-square"
-                                                size={10}
-                                                color="#38bdf8"
-                                            />
-                                            <Text style={styles.activityRole}>{item.profile}</Text>
-                                        </View>
-                                        <Text style={styles.activityTitle} numberOfLines={1}>
-                                            {item.title}
-                                        </Text>
-                                        <Text style={styles.activityText} numberOfLines={1}>
-                                            {item.error || item.prompt || item.status}
-                                        </Text>
-                                    </View>
-                                ))}
-                            </ScrollView>
-                        </View>
-                    )}
-
                     <FlatList
                         ref={flatListRef}
                         style={styles.messages}
@@ -3251,8 +3849,24 @@ const CrushMobile = () => {
                         data={displayMessages}
                         keyExtractor={(item) => item.id}
                         onScroll={handleScroll}
+                        onScrollBeginDrag={handleScrollBeginDrag}
+                        onMomentumScrollEnd={handleMomentumScrollEnd}
                         scrollEventThrottle={16}
                         onContentSizeChange={handleContentSizeChange}
+                        initialNumToRender={8}
+                        maxToRenderPerBatch={5}
+                        windowSize={5}
+                        removeClippedSubviews={true}
+                        updateCellsBatchingPeriod={50}
+                        ListHeaderComponent={
+                            displayMessages.length === 0 ? null : exhaustedHistory ? (
+                                <Text style={styles.loadOlderText}>—— 没有更早的消息 ——</Text>
+                            ) : loadingOlder ? (
+                                <Text style={styles.loadOlderText}>加载更早...</Text>
+                            ) : (
+                                <Text style={styles.loadOlderText}>向上滑动加载更早</Text>
+                            )
+                        }
                         renderItem={({ item, index }) => {
                             const prevMessage = index > 0 ? displayMessages[index - 1] : null
                             const isAgent = (role: string) => role !== 'user'
@@ -3264,7 +3878,7 @@ const CrushMobile = () => {
                                     isUser={item.role === 'user'}
                                     showHeader={showHeader}
                                     isBusy={
-                                        agentInfo.is_busy && index === displayMessages.length - 1
+                                        activeRunVisible && index === displayMessages.length - 1
                                     }
                                     onMaximize={handleMaximizeTerminal}
                                 />
@@ -3327,10 +3941,17 @@ const CrushMobile = () => {
                         value={input}
                         onChangeText={setInput}
                         multiline
+                        returnKeyType="send"
+                        blurOnSubmit={true}
+                        onSubmitEditing={() => {
+                            if (input.trim()) {
+                                sendMessage()
+                            }
+                        }}
                         autoCapitalize="none"
                         autoCorrect={false}
                         autoComplete="off"
-                        keyboardType="visible-password"
+                        keyboardType="default"
                         spellCheck={false}
                         disableFullscreenUI
                         importantForAutofill="no"
@@ -3354,9 +3975,10 @@ const CrushMobile = () => {
                                 // back so a future ArrowDown past the newest
                                 // entry restores it.
                                 if (historyIndex === -1) inputDraftRef.current = input
-                                const next = historyIndex === -1
-                                    ? inputHistory.length - 1
-                                    : Math.max(0, historyIndex - 1)
+                                const next =
+                                    historyIndex === -1
+                                        ? inputHistory.length - 1
+                                        : Math.max(0, historyIndex - 1)
                                 setHistoryIndex(next)
                                 setInput(inputHistory[next])
                             } else {
@@ -3373,7 +3995,7 @@ const CrushMobile = () => {
                             }
                         }}
                     />
-                    {agentInfo.is_busy ? (
+                    {activeRunVisible ? (
                         <Pressable
                             style={({ pressed }) => [styles.stopButton, pressed && styles.pressed]}
                             onPress={cancelRun}>
@@ -3415,7 +4037,7 @@ const CrushMobile = () => {
                                     isConnected ? styles.statusDotOnline : styles.statusDotOffline,
                                     {
                                         opacity: isConnected
-                                            ? agentInfo.is_busy
+                                            ? activeRunVisible
                                                 ? blinkAnim
                                                 : 1.0
                                             : 1.0,
@@ -3454,9 +4076,21 @@ const CrushMobile = () => {
                                 // under the same workspace collapse into one
                                 // expandable header (two-level drawer).
                                 const sortedSessions = [...sessions].sort((a, b) => {
-                                    const timeA = sessionAccessTimes[a.id] || a.updated_at || 0
-                                    const timeB = sessionAccessTimes[b.id] || b.updated_at || 0
-                                    return timeB - timeA
+                                    // Stable order: user-touched access time wins;
+                                    // otherwise fall back to created_at (set once)
+                                    // not updated_at (rewritten every heartbeat).
+                                    const timeA =
+                                        sessionAccessTimes[a.id] ||
+                                        a.created_at ||
+                                        a.updated_at ||
+                                        0
+                                    const timeB =
+                                        sessionAccessTimes[b.id] ||
+                                        b.created_at ||
+                                        b.updated_at ||
+                                        0
+                                    if (timeB !== timeA) return timeB - timeA
+                                    return (a.id || '').localeCompare(b.id || '')
                                 })
                                 const groups = new Map<string, typeof sessions>()
                                 for (const s of sortedSessions) {
@@ -3466,298 +4100,355 @@ const CrushMobile = () => {
                                     if (arr) arr.push(s)
                                     else groups.set(key, [s])
                                 }
-                                return Array.from(groups.entries()).map(
-                                    ([cwd, groupSessions]) => {
-                                        if (groupSessions.length === 1) {
-                                            const session = groupSessions[0]
-                                            const isActiveSession = session.id === sessionID
-                                            const isSessionBusy = isActiveSession && agentInfo.is_busy
-                                            const isSessionOnline = isConnected && session.alive !== false
-                                            const display = describeSession(session)
-                                            return (
-                                                <Pressable
-                                                    key={session.id}
-                                                    style={({ pressed }) => [
-                                                        styles.sessionNode,
-                                                        isActiveSession && styles.sessionNodeActive,
-                                                        pressed && styles.sessionNodePressed,
-                                                    ]}
-                                                    onPress={() => {
-                                                        if (deletingSessionId) {
-                                                            setDeletingSessionId(null)
-                                                        } else {
-                                                            setSessionID(session.id)
-                                                            setSessionAccessTimes((prev) => ({
-                                                                ...prev,
-                                                                [session.id]: Date.now(),
-                                                            }))
-                                                            closeDrawer()
-                                                        }
-                                                    }}
-                                                    onLongPress={() => {
-                                                        setDeletingSessionId(session.id)
-                                                    }}>
-                                                    <View style={styles.sessionNodeBody}>
-                                                        <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 8 }}>
-                                                            <Animated.View
+                                return Array.from(groups.entries()).map(([cwd, groupSessions]) => {
+                                    if (groupSessions.length === 1) {
+                                        const session = groupSessions[0]
+                                        const isActiveSession = session.id === sessionID
+                                        const isSessionBusy = isActiveSession
+                                            ? activeRunVisible
+                                            : !!session.is_busy
+                                        const isSessionOnline =
+                                            isConnected && session.alive !== false
+                                        const display = describeSession(session)
+                                        return (
+                                            <Pressable
+                                                key={session.id}
+                                                style={({ pressed }) => [
+                                                    styles.sessionNode,
+                                                    isActiveSession && styles.sessionNodeActive,
+                                                    pressed && styles.sessionNodePressed,
+                                                ]}
+                                                onPress={() => {
+                                                    if (deletingSessionId) {
+                                                        setDeletingSessionId(null)
+                                                    } else {
+                                                        setSessionID(session.id)
+                                                        setSessionAccessTimes((prev) => ({
+                                                            ...prev,
+                                                            [session.id]: Date.now(),
+                                                        }))
+                                                        closeDrawer()
+                                                    }
+                                                }}
+                                                onLongPress={() => {
+                                                    setDeletingSessionId(session.id)
+                                                }}>
+                                                <View style={styles.sessionNodeBody}>
+                                                    <View
+                                                        style={{
+                                                            flexDirection: 'row',
+                                                            alignItems: 'center',
+                                                            columnGap: 8,
+                                                        }}>
+                                                        <Animated.View
+                                                            style={[
+                                                                styles.statusDot,
+                                                                isSessionOnline
+                                                                    ? styles.statusDotOnline
+                                                                    : styles.statusDotOffline,
+                                                                {
+                                                                    opacity: isSessionOnline
+                                                                        ? isSessionBusy
+                                                                            ? blinkAnim
+                                                                            : 1.0
+                                                                        : 1.0,
+                                                                },
+                                                            ]}
+                                                        />
+                                                        <Feather
+                                                            name="message-square"
+                                                            size={11}
+                                                            color={
+                                                                isActiveSession
+                                                                    ? '#38bdf8'
+                                                                    : '#4b5563'
+                                                            }
+                                                        />
+                                                        <View
+                                                            style={{
+                                                                flexDirection: 'column',
+                                                                flex: 1,
+                                                            }}>
+                                                            <Text
                                                                 style={[
-                                                                    styles.statusDot,
-                                                                    isSessionOnline ? styles.statusDotOnline : styles.statusDotOffline,
-                                                                    {
-                                                                        opacity: isSessionOnline ? (isSessionBusy ? blinkAnim : 1.0) : 1.0,
-                                                                    },
+                                                                    styles.sessionNodeText,
+                                                                    isActiveSession &&
+                                                                        styles.sessionNodeTextActive,
                                                                 ]}
-                                                            />
-                                                            <Feather
-                                                                name="message-square"
-                                                                size={11}
-                                                                color={isActiveSession ? '#38bdf8' : '#4b5563'}
-                                                            />
-                                                            <View style={{ flexDirection: 'column', flex: 1 }}>
+                                                                numberOfLines={1}>
+                                                                {display.primary}
+                                                            </Text>
+                                                            {display.secondary ? (
                                                                 <Text
-                                                                    style={[
-                                                                        styles.sessionNodeText,
-                                                                        isActiveSession && styles.sessionNodeTextActive,
-                                                                    ]}
+                                                                    style={
+                                                                        styles.sessionNodeSubtext
+                                                                    }
                                                                     numberOfLines={1}>
-                                                                    {display.primary}
+                                                                    {display.secondary}
                                                                 </Text>
-                                                                {display.secondary ? (
-                                                                    <Text style={styles.sessionNodeSubtext} numberOfLines={1}>
-                                                                        {display.secondary}
-                                                                    </Text>
-                                                                ) : null}
-                                                            </View>
+                                                            ) : null}
                                                         </View>
                                                     </View>
-                                                    {deletingSessionId === session.id ? (
-                                                        <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 6 }}>
-                                                            <Pressable
-                                                                style={({ pressed }) => [
-                                                                    styles.deleteConfirmBtn,
-                                                                    pressed && { opacity: 0.7 }
-                                                                ]}
-                                                                onPress={async (e) => {
-                                                                    e.stopPropagation()
-                                                                    await handleDeleteSession(session.id)
-                                                                }}
-                                                            >
-                                                                <Text style={styles.deleteConfirmText}>移除</Text>
-                                                            </Pressable>
-                                                            <Pressable
-                                                                style={({ pressed }) => [
-                                                                    styles.deleteCancelBtn,
-                                                                    pressed && { opacity: 0.7 }
-                                                                ]}
-                                                                onPress={(e) => {
-                                                                    e.stopPropagation()
-                                                                    setDeletingSessionId(null)
-                                                                }}
-                                                            >
-                                                                <Feather name="x" size={14} color="#94a3b8" />
-                                                            </Pressable>
-                                                        </View>
-                                                    ) : (
-                                                        isActiveSession && (
+                                                </View>
+                                                {deletingSessionId === session.id ? (
+                                                    <View
+                                                        style={{
+                                                            flexDirection: 'row',
+                                                            alignItems: 'center',
+                                                            columnGap: 6,
+                                                        }}>
+                                                        <Pressable
+                                                            style={({ pressed }) => [
+                                                                styles.deleteConfirmBtn,
+                                                                pressed && { opacity: 0.7 },
+                                                            ]}
+                                                            onPress={async (e) => {
+                                                                e.stopPropagation()
+                                                                await handleDeleteSession(
+                                                                    session.id
+                                                                )
+                                                            }}>
+                                                            <Text style={styles.deleteConfirmText}>
+                                                                移除
+                                                            </Text>
+                                                        </Pressable>
+                                                        <Pressable
+                                                            style={({ pressed }) => [
+                                                                styles.deleteCancelBtn,
+                                                                pressed && { opacity: 0.7 },
+                                                            ]}
+                                                            onPress={(e) => {
+                                                                e.stopPropagation()
+                                                                setDeletingSessionId(null)
+                                                            }}>
                                                             <Feather
-                                                                name="check"
-                                                                size={12}
-                                                                color="#38bdf8"
+                                                                name="x"
+                                                                size={14}
+                                                                color="#94a3b8"
                                                             />
-                                                        )
-                                                    )}
-                                                </Pressable>
-                                            )
-                                        }
-
-                                        const isCollapsed = collapsedCwdGroups.has(cwd)
-                                        const containsActive = groupSessions.some(
-                                            (s) => s.id === sessionID
-                                        )
-                                        const aliveCount = groupSessions.filter(
-                                            (s) => s.alive !== false
-                                        ).length
-                                        return (
-                                            <View key={cwd} style={styles.cwdGroup}>
-                                                <Pressable
-                                                    style={({ pressed }) => [
-                                                        styles.cwdGroupHeader,
-                                                        containsActive &&
-                                                            styles.cwdGroupHeaderActive,
-                                                        pressed && styles.sessionNodePressed,
-                                                    ]}
-                                                    onPress={() => {
-                                                        setCollapsedCwdGroups((prev) => {
-                                                            const next = new Set(prev)
-                                                            if (next.has(cwd)) next.delete(cwd)
-                                                            else next.add(cwd)
-                                                            return next
-                                                        })
-                                                    }}>
-                                                    <Feather
-                                                        name={
-                                                            isCollapsed
-                                                                ? 'chevron-right'
-                                                                : 'chevron-down'
-                                                        }
-                                                        size={12}
-                                                        color="#94a3b8"
-                                                    />
-                                                    <Feather
-                                                        name="folder"
-                                                        size={11}
-                                                        color={
-                                                            containsActive
-                                                                ? '#38bdf8'
-                                                                : '#94a3b8'
-                                                        }
-                                                    />
-                                                    <Text
-                                                        style={[
-                                                            styles.cwdGroupTitle,
-                                                            containsActive &&
-                                                                styles.cwdGroupTitleActive,
-                                                        ]}
-                                                        numberOfLines={1}>
-                                                        {shortPath(cwd)}
-                                                    </Text>
-                                                    <Text style={styles.cwdGroupCount}>
-                                                        {aliveCount}/{groupSessions.length}
-                                                    </Text>
-                                                </Pressable>
-                                                {!isCollapsed &&
-                                                    groupSessions.map((session) => {
-                                                        const isActiveSession =
-                                                            session.id === sessionID
-                                                        const isSessionBusy =
-                                                            isActiveSession &&
-                                                            agentInfo.is_busy
-                                                        const isSessionOnline =
-                                                            isConnected &&
-                                                            session.alive !== false
-                                                        const display = describeSession(session)
-                                                        return (
-                                                            <Pressable
-                                                                key={session.id}
-                                                                style={({ pressed }) => [
-                                                                    styles.sessionNode,
-                                                                    styles.sessionNodeIndented,
-                                                                    isActiveSession &&
-                                                                        styles.sessionNodeActive,
-                                                                    pressed &&
-                                                                        styles.sessionNodePressed,
-                                                                ]}
-                                                                onPress={() => {
-                                                                    if (deletingSessionId) {
-                                                                        setDeletingSessionId(null)
-                                                                    } else {
-                                                                        setSessionID(session.id)
-                                                                        setSessionAccessTimes((prev) => ({
-                                                                            ...prev,
-                                                                            [session.id]: Date.now(),
-                                                                        }))
-                                                                        closeDrawer()
-                                                                    }
-                                                                }}
-                                                                onLongPress={() => {
-                                                                    setDeletingSessionId(session.id)
-                                                                }}>
-                                                                <View
-                                                                    style={
-                                                                        styles.sessionNodeBody
-                                                                    }>
-                                                                    <View
-                                                                        style={{
-                                                                            flexDirection: 'row',
-                                                                            alignItems: 'center',
-                                                                            columnGap: 8,
-                                                                        }}>
-                                                                        <Animated.View
-                                                                            style={[
-                                                                                styles.statusDot,
-                                                                                isSessionOnline
-                                                                                    ? styles.statusDotOnline
-                                                                                    : styles.statusDotOffline,
-                                                                                {
-                                                                                    opacity:
-                                                                                        isSessionOnline
-                                                                                            ? isSessionBusy
-                                                                                                ? blinkAnim
-                                                                                                : 1.0
-                                                                                            : 1.0,
-                                                                                },
-                                                                            ]}
-                                                                        />
-                                                                        <Feather
-                                                                            name="message-square"
-                                                                            size={11}
-                                                                            color={
-                                                                                isActiveSession
-                                                                                    ? '#38bdf8'
-                                                                                    : '#4b5563'
-                                                                            }
-                                                                        />
-                                                                        <View style={{ flexDirection: 'column', flex: 1 }}>
-                                                                            <Text
-                                                                                style={[
-                                                                                    styles.sessionNodeText,
-                                                                                    isActiveSession &&
-                                                                                        styles.sessionNodeTextActive,
-                                                                                ]}
-                                                                                numberOfLines={1}>
-                                                                                {display.primary}
-                                                                            </Text>
-                                                                            {display.secondary ? (
-                                                                                <Text style={styles.sessionNodeSubtext} numberOfLines={1}>
-                                                                                    {display.secondary}
-                                                                                </Text>
-                                                                            ) : null}
-                                                                        </View>
-                                                                    </View>
-                                                                </View>
-                                                                {deletingSessionId === session.id ? (
-                                                                    <View style={{ flexDirection: 'row', alignItems: 'center', columnGap: 6 }}>
-                                                                        <Pressable
-                                                                            style={({ pressed }) => [
-                                                                                styles.deleteConfirmBtn,
-                                                                                pressed && { opacity: 0.7 }
-                                                                            ]}
-                                                                            onPress={async (e) => {
-                                                                                e.stopPropagation()
-                                                                                await handleDeleteSession(session.id)
-                                                                            }}
-                                                                        >
-                                                                            <Text style={styles.deleteConfirmText}>移除</Text>
-                                                                        </Pressable>
-                                                                        <Pressable
-                                                                            style={({ pressed }) => [
-                                                                                styles.deleteCancelBtn,
-                                                                                pressed && { opacity: 0.7 }
-                                                                            ]}
-                                                                            onPress={(e) => {
-                                                                                e.stopPropagation()
-                                                                                setDeletingSessionId(null)
-                                                                            }}
-                                                                        >
-                                                                            <Feather name="x" size={14} color="#94a3b8" />
-                                                                        </Pressable>
-                                                                    </View>
-                                                                ) : (
-                                                                    isActiveSession && (
-                                                                        <Feather
-                                                                            name="check"
-                                                                            size={12}
-                                                                            color="#38bdf8"
-                                                                        />
-                                                                    )
-                                                                )}
-                                                            </Pressable>
-                                                        )
-                                                    })}
-                                            </View>
+                                                        </Pressable>
+                                                    </View>
+                                                ) : (
+                                                    isActiveSession && (
+                                                        <Feather
+                                                            name="check"
+                                                            size={12}
+                                                            color="#38bdf8"
+                                                        />
+                                                    )
+                                                )}
+                                            </Pressable>
                                         )
                                     }
-                                )
+
+                                    const isCollapsed = collapsedCwdGroups.has(cwd)
+                                    const containsActive = groupSessions.some(
+                                        (s) => s.id === sessionID
+                                    )
+                                    const aliveCount = groupSessions.filter(
+                                        (s) => s.alive !== false
+                                    ).length
+                                    return (
+                                        <View key={cwd} style={styles.cwdGroup}>
+                                            <Pressable
+                                                style={({ pressed }) => [
+                                                    styles.cwdGroupHeader,
+                                                    containsActive && styles.cwdGroupHeaderActive,
+                                                    pressed && styles.sessionNodePressed,
+                                                ]}
+                                                onPress={() => {
+                                                    setCollapsedCwdGroups((prev) => {
+                                                        const next = new Set(prev)
+                                                        if (next.has(cwd)) next.delete(cwd)
+                                                        else next.add(cwd)
+                                                        return next
+                                                    })
+                                                }}>
+                                                <Feather
+                                                    name={
+                                                        isCollapsed
+                                                            ? 'chevron-right'
+                                                            : 'chevron-down'
+                                                    }
+                                                    size={12}
+                                                    color="#94a3b8"
+                                                />
+                                                <Feather
+                                                    name="folder"
+                                                    size={11}
+                                                    color={containsActive ? '#38bdf8' : '#94a3b8'}
+                                                />
+                                                <Text
+                                                    style={[
+                                                        styles.cwdGroupTitle,
+                                                        containsActive &&
+                                                            styles.cwdGroupTitleActive,
+                                                    ]}
+                                                    numberOfLines={1}>
+                                                    {shortPath(cwd)}
+                                                </Text>
+                                                <Text style={styles.cwdGroupCount}>
+                                                    {aliveCount}/{groupSessions.length}
+                                                </Text>
+                                            </Pressable>
+                                            {!isCollapsed &&
+                                                groupSessions.map((session) => {
+                                                    const isActiveSession = session.id === sessionID
+                                                    const isSessionBusy = isActiveSession
+                                                        ? activeRunVisible
+                                                        : !!session.is_busy
+                                                    const isSessionOnline =
+                                                        isConnected && session.alive !== false
+                                                    const display = describeSession(session)
+                                                    return (
+                                                        <Pressable
+                                                            key={session.id}
+                                                            style={({ pressed }) => [
+                                                                styles.sessionNode,
+                                                                styles.sessionNodeIndented,
+                                                                isActiveSession &&
+                                                                    styles.sessionNodeActive,
+                                                                pressed &&
+                                                                    styles.sessionNodePressed,
+                                                            ]}
+                                                            onPress={() => {
+                                                                if (deletingSessionId) {
+                                                                    setDeletingSessionId(null)
+                                                                } else {
+                                                                    setSessionID(session.id)
+                                                                    setSessionAccessTimes(
+                                                                        (prev) => ({
+                                                                            ...prev,
+                                                                            [session.id]:
+                                                                                Date.now(),
+                                                                        })
+                                                                    )
+                                                                    closeDrawer()
+                                                                }
+                                                            }}
+                                                            onLongPress={() => {
+                                                                setDeletingSessionId(session.id)
+                                                            }}>
+                                                            <View style={styles.sessionNodeBody}>
+                                                                <View
+                                                                    style={{
+                                                                        flexDirection: 'row',
+                                                                        alignItems: 'center',
+                                                                        columnGap: 8,
+                                                                    }}>
+                                                                    <Animated.View
+                                                                        style={[
+                                                                            styles.statusDot,
+                                                                            isSessionOnline
+                                                                                ? styles.statusDotOnline
+                                                                                : styles.statusDotOffline,
+                                                                            {
+                                                                                opacity:
+                                                                                    isSessionOnline
+                                                                                        ? isSessionBusy
+                                                                                            ? blinkAnim
+                                                                                            : 1.0
+                                                                                        : 1.0,
+                                                                            },
+                                                                        ]}
+                                                                    />
+                                                                    <Feather
+                                                                        name="message-square"
+                                                                        size={11}
+                                                                        color={
+                                                                            isActiveSession
+                                                                                ? '#38bdf8'
+                                                                                : '#4b5563'
+                                                                        }
+                                                                    />
+                                                                    <View
+                                                                        style={{
+                                                                            flexDirection: 'column',
+                                                                            flex: 1,
+                                                                        }}>
+                                                                        <Text
+                                                                            style={[
+                                                                                styles.sessionNodeText,
+                                                                                isActiveSession &&
+                                                                                    styles.sessionNodeTextActive,
+                                                                            ]}
+                                                                            numberOfLines={1}>
+                                                                            {display.primary}
+                                                                        </Text>
+                                                                        {display.secondary ? (
+                                                                            <Text
+                                                                                style={
+                                                                                    styles.sessionNodeSubtext
+                                                                                }
+                                                                                numberOfLines={1}>
+                                                                                {display.secondary}
+                                                                            </Text>
+                                                                        ) : null}
+                                                                    </View>
+                                                                </View>
+                                                            </View>
+                                                            {deletingSessionId === session.id ? (
+                                                                <View
+                                                                    style={{
+                                                                        flexDirection: 'row',
+                                                                        alignItems: 'center',
+                                                                        columnGap: 6,
+                                                                    }}>
+                                                                    <Pressable
+                                                                        style={({ pressed }) => [
+                                                                            styles.deleteConfirmBtn,
+                                                                            pressed && {
+                                                                                opacity: 0.7,
+                                                                            },
+                                                                        ]}
+                                                                        onPress={async (e) => {
+                                                                            e.stopPropagation()
+                                                                            await handleDeleteSession(
+                                                                                session.id
+                                                                            )
+                                                                        }}>
+                                                                        <Text
+                                                                            style={
+                                                                                styles.deleteConfirmText
+                                                                            }>
+                                                                            移除
+                                                                        </Text>
+                                                                    </Pressable>
+                                                                    <Pressable
+                                                                        style={({ pressed }) => [
+                                                                            styles.deleteCancelBtn,
+                                                                            pressed && {
+                                                                                opacity: 0.7,
+                                                                            },
+                                                                        ]}
+                                                                        onPress={(e) => {
+                                                                            e.stopPropagation()
+                                                                            setDeletingSessionId(
+                                                                                null
+                                                                            )
+                                                                        }}>
+                                                                        <Feather
+                                                                            name="x"
+                                                                            size={14}
+                                                                            color="#94a3b8"
+                                                                        />
+                                                                    </Pressable>
+                                                                </View>
+                                                            ) : (
+                                                                isActiveSession && (
+                                                                    <Feather
+                                                                        name="check"
+                                                                        size={12}
+                                                                        color="#38bdf8"
+                                                                    />
+                                                                )
+                                                            )}
+                                                        </Pressable>
+                                                    )
+                                                })}
+                                        </View>
+                                    )
+                                })
                             })()
                         )}
                     </ScrollView>
@@ -3766,6 +4457,55 @@ const CrushMobile = () => {
                         <Text style={styles.drawerFooterLabel}>当前大语言模型</Text>
                         <Text style={styles.drawerFooterVal} numberOfLines={1}>
                             {modelName}
+                        </Text>
+                        <View style={styles.drawerFooterDivider} />
+                        <View style={styles.drawerVersionRow}>
+                            <View style={styles.drawerVersionInfo}>
+                                <Text style={styles.drawerFooterLabel}>移动端版本</Text>
+                                <Text style={styles.drawerFooterVal} numberOfLines={1}>
+                                    v{nativeVersion} ({nativeBuildVersion})
+                                </Text>
+                            </View>
+                            <Pressable
+                                disabled={mobileUpdateButtonDisabled}
+                                onPress={() => {
+                                    if (mobileUpdateStatus === 'available') {
+                                        void handleInstallMobileUpdate()
+                                    } else {
+                                        void handleCheckMobileUpdate()
+                                    }
+                                }}
+                                style={[
+                                    styles.drawerUpdateButton,
+                                    mobileUpdateButtonDisabled && styles.drawerUpdateButtonDisabled,
+                                ]}>
+                                {mobileUpdateButtonDisabled ? (
+                                    <ActivityIndicator size="small" color="#93c5fd" />
+                                ) : (
+                                    <Feather
+                                        name={
+                                            mobileUpdateStatus === 'available'
+                                                ? 'download'
+                                                : 'refresh-cw'
+                                        }
+                                        size={13}
+                                        color="#bfdbfe"
+                                    />
+                                )}
+                                <Text style={styles.drawerUpdateButtonText}>
+                                    {mobileUpdateButtonText}
+                                </Text>
+                            </Pressable>
+                        </View>
+                        <Text
+                            style={[
+                                styles.drawerUpdateStatusText,
+                                mobileUpdateStatus === 'error' && styles.drawerUpdateErrorText,
+                                mobileUpdateStatus === 'available' &&
+                                    styles.drawerUpdateAvailableText,
+                            ]}
+                            numberOfLines={2}>
+                            {mobileUpdateStateText}
                         </Text>
                     </View>
                 </Animated.View>
@@ -3785,10 +4525,10 @@ const CrushMobile = () => {
                 animationType="fade"
                 transparent={true}
                 onRequestClose={() => setQuickSelectRole(null)}>
-                <Pressable
-                    style={styles.modalBg}
-                    onPress={() => setQuickSelectRole(null)}>
-                    <Pressable style={styles.quickModelModalContent} onPress={(e) => e.stopPropagation()}>
+                <Pressable style={styles.modalBg} onPress={() => setQuickSelectRole(null)}>
+                    <Pressable
+                        style={styles.quickModelModalContent}
+                        onPress={(e) => e.stopPropagation()}>
                         <View style={styles.quickModelModalHeader}>
                             <Text style={styles.quickModelModalTitle}>
                                 切换 {quickSelectRole === 'brain' ? 'Brain' : 'Worker'} 模型
@@ -3800,18 +4540,37 @@ const CrushMobile = () => {
                             </Pressable>
                         </View>
                         <View style={{ padding: 12 }}>
-                            {activeSession?.available_models && activeSession.available_models.length > 0 ? (
+                            {activeSession?.available_models &&
+                            activeSession.available_models.length > 0 ? (
                                 <ScrollView style={{ maxHeight: 300 }} nestedScrollEnabled={true}>
                                     {activeSession.available_models.map((m) => {
-                                        const currentProvider = activeSession.models?.[quickSelectRole || 'brain']?.provider || (quickSelectRole === 'brain' ? activeSession.provider : '') || ''
-                                        const currentModel = activeSession.models?.[quickSelectRole || 'brain']?.model || (quickSelectRole === 'brain' ? activeSession.model : '') || ''
-                                        const isSelected = currentProvider === m.provider && currentModel === m.model
+                                        const currentProvider =
+                                            activeSession.models?.[quickSelectRole || 'brain']
+                                                ?.provider ||
+                                            (quickSelectRole === 'brain'
+                                                ? activeSession.provider
+                                                : '') ||
+                                            ''
+                                        const currentModel =
+                                            activeSession.models?.[quickSelectRole || 'brain']
+                                                ?.model ||
+                                            (quickSelectRole === 'brain'
+                                                ? activeSession.model
+                                                : '') ||
+                                            ''
+                                        const isSelected =
+                                            currentProvider === m.provider &&
+                                            currentModel === m.model
                                         return (
                                             <Pressable
                                                 key={`${m.provider}/${m.model}`}
                                                 onPress={() => {
                                                     if (quickSelectRole) {
-                                                        handleQuickSwitchModel(quickSelectRole, m.provider, m.model)
+                                                        handleQuickSwitchModel(
+                                                            quickSelectRole,
+                                                            m.provider,
+                                                            m.model
+                                                        )
                                                     }
                                                 }}
                                                 style={[
@@ -3819,15 +4578,29 @@ const CrushMobile = () => {
                                                     isSelected && styles.modelOptionRowActive,
                                                 ]}>
                                                 <View style={styles.modelOptionInfo}>
-                                                    <Text style={[styles.modelOptionProvider, isSelected && styles.modelOptionTextActive]}>
+                                                    <Text
+                                                        style={[
+                                                            styles.modelOptionProvider,
+                                                            isSelected &&
+                                                                styles.modelOptionTextActive,
+                                                        ]}>
                                                         {m.provider}
                                                     </Text>
-                                                    <Text style={[styles.modelOptionName, isSelected && styles.modelOptionTextActive]}>
+                                                    <Text
+                                                        style={[
+                                                            styles.modelOptionName,
+                                                            isSelected &&
+                                                                styles.modelOptionTextActive,
+                                                        ]}>
                                                         {m.model}
                                                     </Text>
                                                 </View>
                                                 {isSelected && (
-                                                    <Feather name="check" size={14} color="#38bdf8" />
+                                                    <Feather
+                                                        name="check"
+                                                        size={14}
+                                                        color="#38bdf8"
+                                                    />
                                                 )}
                                             </Pressable>
                                         )
@@ -3835,14 +4608,16 @@ const CrushMobile = () => {
                                 </ScrollView>
                             ) : (
                                 <View style={{ paddingVertical: 20, alignItems: 'center' }}>
-                                    <Text style={{ color: '#64748b', fontSize: 12 }}>无可用模型</Text>
+                                    <Text style={{ color: '#64748b', fontSize: 12 }}>
+                                        无可用模型
+                                    </Text>
                                 </View>
                             )}
                         </View>
                     </Pressable>
                 </Pressable>
             </Modal>
-        </SafeAreaView>
+        </View>
     )
 }
 
@@ -3944,7 +4719,7 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
         borderRadius: 6,
-        backgroundColor: '#2563eb',
+        backgroundColor: '#6366f1',
     },
     buttonText: {
         color: '#ffffff',
@@ -4031,12 +4806,12 @@ const styles = StyleSheet.create({
         flex: 1,
         flexDirection: 'row',
         alignItems: 'center',
-        columnGap: 5,
-        height: 26,
-        borderRadius: 6,
+        columnGap: 6,
+        height: 36,
+        borderRadius: 8,
         borderWidth: 1,
         borderColor: '#1e293b',
-        paddingHorizontal: 8,
+        paddingHorizontal: 12,
         backgroundColor: '#0b0f19',
     },
     metaBadgeText: {
@@ -4157,8 +4932,16 @@ const styles = StyleSheet.create({
         backgroundColor: '#07090e',
     },
     messagesContent: {
-        padding: 12,
-        rowGap: 14,
+        paddingHorizontal: 16,
+        paddingTop: 16,
+        paddingBottom: 24,
+        rowGap: 18,
+    },
+    loadOlderText: {
+        textAlign: 'center',
+        color: '#6b7280',
+        fontSize: 12,
+        paddingVertical: 8,
     },
     messageRow: {
         flexDirection: 'row',
@@ -4176,7 +4959,7 @@ const styles = StyleSheet.create({
     userBubble: {
         maxWidth: '80%',
         alignSelf: 'flex-end',
-        backgroundColor: '#4f46e5', // Premium indigo for user
+        backgroundColor: '#6366f1', // Premium indigo for user
         paddingHorizontal: 16,
         paddingVertical: 11,
         borderTopLeftRadius: 20,
@@ -4193,6 +4976,8 @@ const styles = StyleSheet.create({
         maxWidth: '80%',
         alignSelf: 'flex-start',
         backgroundColor: '#1e293b', // Premium deep slate for agent
+        borderWidth: 1,
+        borderColor: '#242f41',
         paddingHorizontal: 16,
         paddingVertical: 11,
         borderTopLeftRadius: 20,
@@ -4215,6 +5000,33 @@ const styles = StyleSheet.create({
     typingText: {
         color: '#94a3b8',
         fontSize: 13.5,
+    },
+    canceledContainer: {
+        paddingVertical: 2,
+    },
+    canceledText: {
+        color: '#cbd5e1',
+        fontSize: 13.5,
+        fontStyle: 'italic',
+        fontFamily: 'FiraCode-Regular',
+    },
+    interruptDivider: {
+        width: '100%',
+        flexDirection: 'row',
+        alignItems: 'center',
+        columnGap: 8,
+        paddingVertical: 8,
+    },
+    interruptDividerLine: {
+        flex: 1,
+        height: 1,
+        backgroundColor: '#64748b',
+        opacity: 0.55,
+    },
+    interruptDividerText: {
+        color: '#cbd5e1',
+        fontSize: 12,
+        fontFamily: 'FiraCode-Regular',
     },
     messageHeader: {
         flexDirection: 'row',
@@ -4414,16 +5226,26 @@ const styles = StyleSheet.create({
     },
     messageText: {
         color: '#f8fafc',
-        fontSize: 13.5,
-        lineHeight: 19,
+        fontSize: 14.2,
+        lineHeight: 21.5,
     },
     compoundTextContainer: {
-        marginTop: 0,
-        marginBottom: 4,
-        paddingHorizontal: 0,
-        paddingVertical: 4,
-        width: '100%',
-        alignSelf: 'stretch',
+        maxWidth: '85%',
+        alignSelf: 'flex-start',
+        backgroundColor: '#131b2e88',
+        borderWidth: 1,
+        borderColor: '#242f41',
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        borderRadius: 16,
+        borderBottomLeftRadius: 4,
+        marginTop: 6,
+        marginBottom: 10,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1.5 },
+        shadowOpacity: 0.1,
+        shadowRadius: 3,
+        elevation: 1,
     },
     compoundTypingContainer: {
         flexDirection: 'row',
@@ -4484,6 +5306,37 @@ const styles = StyleSheet.create({
         fontSize: 11.5,
         lineHeight: 16.5,
         fontStyle: 'italic',
+    },
+    detailsBubble: {
+        width: '100%',
+        alignSelf: 'stretch',
+        backgroundColor: '#1e293b22', // Slate translucent background
+        borderWidth: 1,
+        borderColor: '#33415555',
+        borderLeftWidth: 3,
+        borderLeftColor: '#8b5cf6', // Purple accent
+        borderRadius: 8,
+        marginVertical: 6,
+        overflow: 'hidden',
+    },
+    detailsHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 10,
+        paddingHorizontal: 12,
+        columnGap: 8,
+    },
+    detailsHeaderText: {
+        color: '#e2e8f0',
+        fontSize: 13,
+        fontWeight: '600',
+    },
+    detailsBody: {
+        paddingHorizontal: 12,
+        paddingBottom: 12,
+        borderTopWidth: 1,
+        borderTopColor: '#33415533',
+        backgroundColor: '#0f172a22',
     },
     toolCallContainer: {
         borderLeftWidth: 3,
@@ -4621,9 +5474,9 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         alignItems: 'flex-end',
         columnGap: 8,
-        paddingHorizontal: 12,
+        paddingHorizontal: 16,
         paddingTop: 8,
-        paddingBottom: 12,
+        paddingBottom: 16,
         borderTopWidth: 1,
         borderTopColor: '#161f30',
         backgroundColor: '#0a0d14',
@@ -4634,12 +5487,12 @@ const styles = StyleSheet.create({
         maxHeight: 100,
         borderRadius: 19,
         borderWidth: 1,
-        borderColor: '#1e293b',
+        borderColor: '#242f41',
         color: '#f8fafc',
         backgroundColor: '#0f131a',
-        paddingHorizontal: 14,
+        paddingHorizontal: 16,
         paddingVertical: 8,
-        fontSize: 13.5,
+        fontSize: 14,
     },
     sendButton: {
         width: 38,
@@ -4647,7 +5500,7 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
         borderRadius: 19,
-        backgroundColor: '#2563eb',
+        backgroundColor: '#6366f1',
     },
     stopButton: {
         width: 38,
@@ -4671,70 +5524,77 @@ const styles = StyleSheet.create({
     },
     markdownParagraph: {
         color: '#f8fafc',
-        fontSize: 13.5,
-        lineHeight: 20,
-        marginBottom: 6,
+        fontSize: 14.2,
+        lineHeight: 21.5,
+        marginBottom: 8,
     },
     markdownH1: {
         color: '#f8fafc',
-        fontSize: 17,
+        fontSize: 20,
+        lineHeight: 27,
         fontWeight: '800',
-        marginTop: 10,
-        marginBottom: 6,
+        marginTop: 14,
+        marginBottom: 8,
     },
     markdownH2: {
         color: '#f8fafc',
-        fontSize: 15,
+        fontSize: 17.5,
+        lineHeight: 24,
         fontWeight: '700',
-        marginTop: 8,
-        marginBottom: 4,
+        marginTop: 12,
+        marginBottom: 6,
     },
     markdownH3: {
         color: '#f8fafc',
-        fontSize: 14,
+        fontSize: 15.5,
+        lineHeight: 22,
         fontWeight: '700',
-        marginTop: 6,
-        marginBottom: 4,
+        marginTop: 10,
+        marginBottom: 6,
     },
     markdownH4: {
         color: '#f8fafc',
-        fontSize: 13.5,
+        fontSize: 14.5,
+        lineHeight: 20,
         fontWeight: '600',
-        marginTop: 6,
+        marginTop: 8,
         marginBottom: 4,
     },
     markdownListItemRow: {
         flexDirection: 'row',
         alignItems: 'flex-start',
-        marginBottom: 4,
+        marginBottom: 7,
     },
     markdownListBullet: {
         color: '#a78bfa',
         fontSize: 14,
         marginRight: 6,
-        lineHeight: 18,
+        lineHeight: 21.5,
     },
     markdownListNum: {
         color: '#a78bfa',
-        fontSize: 12.5,
+        fontSize: 13,
         fontWeight: '700',
         marginRight: 6,
-        lineHeight: 18,
+        lineHeight: 21.5,
     },
     markdownListItemText: {
         flex: 1,
         color: '#e2e8f0',
-        fontSize: 13.5,
-        lineHeight: 18,
+        fontSize: 14.2,
+        lineHeight: 21.5,
     },
     markdownInlineCode: {
         fontFamily: 'FiraCode-Regular',
-        backgroundColor: '#1e293b',
-        color: '#f43f5e',
-        fontSize: 11,
+        backgroundColor: '#131224',
+        color: '#a78bfa',
+        fontSize: 11.5,
         fontWeight: '600',
-        paddingHorizontal: 4,
-        borderRadius: 3,
+        paddingHorizontal: 6,
+        paddingVertical: 1.5,
+        borderRadius: 4,
+        borderWidth: 1,
+        borderColor: '#2e264d',
     },
     markdownCodeBlockContainer: {
         backgroundColor: '#020617',
@@ -5022,26 +5882,76 @@ const styles = StyleSheet.create({
         marginTop: 2,
         fontWeight: '600',
     },
+    drawerFooterDivider: {
+        height: 1,
+        backgroundColor: '#162033',
+        marginVertical: 10,
+    },
+    drawerVersionRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        columnGap: 10,
+    },
+    drawerVersionInfo: {
+        flex: 1,
+        minWidth: 0,
+    },
+    drawerUpdateButton: {
+        height: 30,
+        minWidth: 72,
+        paddingHorizontal: 10,
+        borderRadius: 6,
+        borderWidth: 1,
+        borderColor: '#1d4ed8',
+        backgroundColor: '#0f172a',
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        columnGap: 5,
+    },
+    drawerUpdateButtonDisabled: {
+        opacity: 0.68,
+    },
+    drawerUpdateButtonText: {
+        color: '#bfdbfe',
+        fontSize: 10.5,
+        fontWeight: '800',
+    },
+    drawerUpdateStatusText: {
+        color: '#64748b',
+        fontSize: 10,
+        lineHeight: 14,
+        marginTop: 7,
+    },
+    drawerUpdateErrorText: {
+        color: '#fca5a5',
+    },
+    drawerUpdateAvailableText: {
+        color: '#93c5fd',
+    },
     // Segmented tab styles for Terminal Card
     terminalTabsRow: {
         flexDirection: 'row',
-        backgroundColor: '#090d16',
-        borderBottomWidth: 1,
-        borderBottomColor: '#1e293b',
+        backgroundColor: '#0a0d14',
         paddingHorizontal: 8,
-        columnGap: 4,
+        paddingVertical: 6,
+        columnGap: 6,
+        borderBottomWidth: 1,
+        borderBottomColor: '#161f30',
     },
     terminalTabButton: {
         flexDirection: 'row',
         alignItems: 'center',
-        columnGap: 4,
-        paddingVertical: 8,
+        columnGap: 5,
+        paddingVertical: 6,
         paddingHorizontal: 12,
-        borderBottomWidth: 2,
-        borderBottomColor: 'transparent',
+        borderRadius: 6,
+        backgroundColor: 'transparent',
     },
     terminalTabButtonActive: {
-        borderBottomColor: '#38bdf8',
+        backgroundColor: '#1e293b',
+        borderWidth: 1,
+        borderColor: '#242f41',
     },
     terminalTabText: {
         color: '#64748b',
@@ -5049,7 +5959,7 @@ const styles = StyleSheet.create({
         fontWeight: '600',
     },
     terminalTabTextActive: {
-        color: '#38bdf8',
+        color: '#f8fafc',
     },
 
     // Directory Tree Viewer Styles

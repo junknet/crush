@@ -4,6 +4,7 @@ import { connect, consumerOpts, JSONCodec, NatsConnection } from 'nats.ws'
 export type Session = {
     id: string
     title: string
+    message_count?: number
     updated_at?: number
     created_at?: number
     path?: string
@@ -15,15 +16,19 @@ export type Session = {
     /** Model id (e.g. "gpt-5.4-mini") for the brain agent. */
     model?: string
     models?: Record<string, { provider: string; model: string }>
-    available_models?: Array<{ provider: string; model: string }>
+    available_models?: { provider: string; model: string }[]
     is_busy?: boolean
 }
 
 export type MessagePart = {
-    type: 'text' | 'reasoning' | 'tool_call' | 'tool_result' | string
+    type: 'text' | 'reasoning' | 'tool_call' | 'tool_result' | 'finish' | string
     data: {
         text?: string
         thinking?: string
+        reason?: string
+        message?: string
+        details?: string
+        time?: number
         id?: string
         name?: string
         input?: string
@@ -82,6 +87,22 @@ export type CrushEnvelope =
     | { type: string; payload: any }
 
 const jc = JSONCodec<any>()
+
+function looksLikeEmptySessionTitle(title: string | undefined, sessionID: string): boolean {
+    const cleaned = (title || '').trim()
+    if (!cleaned) return true
+    if (cleaned === sessionID) return true
+    if (cleaned === 'Untitled Session' || cleaned === '未命名会话') return true
+    if (cleaned.startsWith('title-') || cleaned.includes('$$')) return true
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleaned)
+}
+
+function shouldShowSession(session: Session): boolean {
+    if (!session.id) return false
+    if (!looksLikeEmptySessionTitle(session.title, session.id)) return true
+    return !!session.is_busy || (session.message_count || 0) > 0
+}
+
 export class CrushApi {
     private nc: NatsConnection | null = null
     readonly url: string
@@ -112,8 +133,18 @@ export class CrushApi {
         const sessionsMap: Record<string, Session> = {}
 
         const emit = () => {
+            // Sort by created_at (stable, set once at session birth) instead
+            // of updated_at — otherwise every 5s heartbeat reorders the list
+            // and visually swaps neighbouring sessions back and forth.
             onUpdate(
-                Object.values(sessionsMap).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+                Object.values(sessionsMap)
+                    .filter(shouldShowSession)
+                    .sort((a, b) => {
+                        const ta = a.created_at || a.updated_at || 0
+                        const tb = b.created_at || b.updated_at || 0
+                        if (tb !== ta) return tb - ta
+                        return (a.id || '').localeCompare(b.id || '')
+                    })
             )
         }
 
@@ -129,9 +160,11 @@ export class CrushApi {
                         sessionsMap[e.key] = {
                             id: meta.session_id,
                             title: meta.title || meta.session_id,
+                            message_count: meta.message_count,
                             path: meta.path,
                             alive: meta.alive,
                             updated_at: meta.updated_at,
+                            created_at: meta.created_at,
                             provider: meta.provider,
                             model: meta.model,
                             models: meta.models,
@@ -193,7 +226,8 @@ export class CrushApi {
     async subscribeSessionEvents(
         sessionID: string,
         onEvent: (envelope: CrushEnvelope) => void,
-        onError?: (err: Error) => void
+        onError?: (err: Error) => void,
+        opts2?: { historyMs?: number }
     ): Promise<() => void> {
         const nc = await this.connect()
         const js = nc.jetstream()
@@ -202,6 +236,19 @@ export class CrushApi {
         try {
             const opts = consumerOpts()
             opts.orderedConsumer().filterSubject(subject)
+            // Default = full session history (deliverAll). A time window
+            // looks attractive ("cap to last N min") but breaks the common
+            // case where the user opens a paused session whose last event
+            // is older than the window — the ordered consumer then sits
+            // empty forever and the UI stays blank. Map dedupe + 100ms
+            // batch + FlatList virtualization already handle the volume
+            // (tested up to 11k events / 78MB). Pass historyMs explicitly
+            // only if the caller really wants to cap.
+            if (opts2?.historyMs && opts2.historyMs > 0) {
+                opts.startAtTimeDelta(opts2.historyMs)
+            } else {
+                opts.deliverAll()
+            }
             const sub = await js.subscribe(subject, opts)
 
             ;(async () => {
@@ -226,6 +273,60 @@ export class CrushApi {
         }
     }
 
+    /**
+     * One-shot pull of older history for infinite-scroll. Creates a temporary
+     * ordered consumer starting at (untilTs - durationMs) and drains every
+     * message whose stream timestamp is strictly before `untilTs`. Returns
+     * once the historical window is exhausted (info.pending === 0) or a
+     * message has crossed into the already-loaded range. Messages are pushed
+     * through `onEvent` exactly like the live subscription so the caller's
+     * existing Map dedupe + flush path handles ordering.
+     *
+     * untilTs is a unix-millis cutoff — typically the created_at of the
+     * currently-oldest message on screen. durationMs is how far back to
+     * extend (default 30 min, matching the initial live window).
+     */
+    async loadOlderHistory(
+        sessionID: string,
+        untilTs: number,
+        durationMs: number,
+        onEvent: (envelope: CrushEnvelope) => void
+    ): Promise<number> {
+        const nc = await this.connect()
+        const js = nc.jetstream()
+        const subject = `crush.sess.${sessionID}.events`
+        const opts = consumerOpts()
+        opts.orderedConsumer().filterSubject(subject)
+        const startTs = Math.max(0, untilTs - durationMs)
+        opts.startTime(new Date(startTs))
+        const sub = await js.subscribe(subject, opts)
+        let count = 0
+        try {
+            for await (const m of sub) {
+                try {
+                    const tsNanos = m.info?.timestampNanos ?? 0
+                    const tsMs = tsNanos / 1e6
+                    if (tsMs > 0 && tsMs >= untilTs) break
+                    try {
+                        onEvent(jc.decode(m.data))
+                        count++
+                    } catch (err) {
+                        console.error('Failed to decode older event', err)
+                    }
+                    if (m.info?.pending === 0) break
+                } catch (err) {
+                    // m.info getter parses ack-subject; malformed reply
+                    // tokens can throw. Skip the message rather than crash
+                    // the RN bridge with an unhandled rejection.
+                    console.log('loadOlderHistory msg info parse failed:', err)
+                }
+            }
+        } finally {
+            sub.unsubscribe()
+        }
+        return count
+    }
+
     async sendMessage(sessionID: string, prompt: string): Promise<void> {
         const nc = await this.connect()
         nc.publish(`crush.sess.${sessionID}.cmd`, jc.encode({ type: 'prompt', text: prompt }))
@@ -247,7 +348,11 @@ export class CrushApi {
         }
     }
 
-    async grantPermission(sessionID: string, toolCallID: string, action: 'allow' | 'deny'): Promise<void> {
+    async grantPermission(
+        sessionID: string,
+        toolCallID: string,
+        action: 'allow' | 'deny'
+    ): Promise<void> {
         const nc = await this.connect()
         nc.publish(
             `crush.sess.${sessionID}.cmd`,
@@ -261,7 +366,12 @@ export class CrushApi {
      * state.yaml (auto-routed by isStateKey), so the next dispatch picks up
      * the new model. Role is one of "brain" / "worker" / "explore".
      */
-    async setModel(sessionID: string, role: 'brain' | 'worker' | 'explore', provider: string, model: string): Promise<void> {
+    async setModel(
+        sessionID: string,
+        role: 'brain' | 'worker' | 'explore',
+        provider: string,
+        model: string
+    ): Promise<void> {
         const nc = await this.connect()
         nc.publish(
             `crush.sess.${sessionID}.cmd`,

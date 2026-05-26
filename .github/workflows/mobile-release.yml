@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: mobile-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_channel:
+        description: "Mobile release channel/tag prefix."
+        required: false
+        default: "crush-mobile"
+      android_version_code:
+        description: "Android versionCode for this APK."
+        required: false
+        default: "1"
+  push:
+    tags:
+      - "crush-mobile-v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobile-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile/crush_mobile
+    env:
+      CRUSH_MOBILE_CONFIRM_RELEASE: "1"
+      CRUSH_MOBILE_GITHUB_REPO: ${{ github.repository }}
+      CRUSH_MOBILE_RELEASE_CHANNEL: ${{ inputs.release_channel || 'crush-mobile' }}
+      CRUSH_MOBILE_ANDROID_VERSION_CODE: ${{ inputs.android_version_code || '1' }}
+      EXPO_PUBLIC_CRUSH_UPDATE_REPO: ${{ github.repository }}
+      EXPO_PUBLIC_CRUSH_UPDATE_CHANNEL: ${{ inputs.release_channel || 'crush-mobile' }}
+      EXPO_PUBLIC_CRUSH_UPDATE_ASSET_PATTERN: "^crush-mobile-android-v.*\\.apk$"
+      EXPO_PUBLIC_CRUSH_UPDATE_GITHUB_TOKEN: ${{ secrets.CRUSH_MOBILE_UPDATE_GITHUB_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mobile/crush_mobile/package-lock.json
+
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Validate update token
+        run: |
+          test -n "$EXPO_PUBLIC_CRUSH_UPDATE_GITHUB_TOKEN" || {
+            echo "Missing secret CRUSH_MOBILE_UPDATE_GITHUB_TOKEN" >&2
+            exit 2
+          }
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm run release:android:private
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: crush-mobile-android
+          path: mobile/crush_mobile/dist/*.apk
+          if-no-files-found: error
