@@ -37,6 +37,10 @@ DIST_APK="$DIST_DIR/$ASSET_NAME"
 
 mkdir -p "$DIST_DIR"
 
+if [[ ! -x "$ROOT_DIR/android/gradlew" ]]; then
+    npx expo prebuild --platform android --no-install
+fi
+
 (cd android && ./gradlew assembleRelease)
 cp "$APK_PATH" "$DIST_APK"
 
