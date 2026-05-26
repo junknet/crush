@@ -47,6 +47,7 @@ func init() {
 	rootCmd.MarkFlagsMutuallyExclusive("session", "continue")
 
 	rootCmd.AddCommand(
+		resumeCmd,
 		runCmd,
 		dirsCmd,
 		projectsCmd,
@@ -82,6 +83,7 @@ crush --data-dir /path/to/custom/.crush
 
 # Continue a previous session
 crush --session {session-id}
+crush resume {session-id}
 
 # Continue the most recent session
 crush --continue
@@ -89,53 +91,77 @@ crush --continue
 	RunE: func(cmd *cobra.Command, args []string) error {
 		sessionID, _ := cmd.Flags().GetString("session")
 		continueLast, _ := cmd.Flags().GetBool("continue")
+		return runInteractive(cmd, sessionID, continueLast)
+	},
+}
 
-		ws, cleanup, err := setupWorkspaceWithProgressBar(cmd)
+var resumeCmd = &cobra.Command{
+	Use:   "resume <session-id>",
+	Short: "Resume a previous session",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runInteractive(cmd, args[0], false)
+	},
+}
+
+func runInteractive(cmd *cobra.Command, sessionID string, continueLast bool) error {
+	ws, cleanup, err := setupWorkspaceWithProgressBar(cmd)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if sessionID != "" {
+		sess, err := resolveWorkspaceSessionID(cmd.Context(), ws, sessionID)
 		if err != nil {
 			return err
 		}
-		defer cleanup()
-
-		if sessionID != "" {
-			sess, err := resolveWorkspaceSessionID(cmd.Context(), ws, sessionID)
-			if err != nil {
-				return err
-			}
-			sessionID = sess.ID
-		} else {
-			if continueLast {
-				if sessions, err := ws.ListSessions(cmd.Context()); err == nil && len(sessions) > 0 {
-					sessionID = sessions[0].ID
-				}
-			}
-			if sessionID == "" {
-				if sess, err := ws.CreateSession(cmd.Context(), "", session.ModeExecute); err == nil {
-					sessionID = sess.ID
-				}
+		sessionID = sess.ID
+	} else {
+		if continueLast {
+			if sessions, err := ws.ListSessions(cmd.Context()); err == nil && len(sessions) > 0 {
+				sessionID = sessions[0].ID
 			}
 		}
-
-		event.AppInitialized()
-
-		com := common.DefaultCommon(ws)
-		model := ui.New(com, sessionID, continueLast)
-
-		var env uv.Environ = os.Environ()
-		program := tea.NewProgram(
-			model,
-			tea.WithEnvironment(env),
-			tea.WithContext(cmd.Context()),
-			tea.WithFilter(ui.MouseEventFilter),
-		)
-		go ws.Subscribe(program, sessionID)
-
-		if _, err := program.Run(); err != nil {
-			event.Error(err)
-			slog.Error("TUI run error", "error", err)
-			return errors.New("Crush crashed. If metrics are enabled, we were notified about it. If you'd like to report it, please copy the stacktrace above and open an issue at https://github.com/charmbracelet/crush/issues/new?template=bug.yml") //nolint:staticcheck
+		if sessionID == "" {
+			if sess, err := ws.CreateSession(cmd.Context(), "Untitled Session", session.ModeExecute); err == nil {
+				sessionID = sess.ID
+			}
 		}
-		return nil
-	},
+	}
+
+	event.AppInitialized()
+
+	com := common.DefaultCommon(ws)
+	model := ui.New(com, sessionID, continueLast)
+
+	var env uv.Environ = os.Environ()
+	program := tea.NewProgram(
+		model,
+		tea.WithEnvironment(env),
+		tea.WithContext(cmd.Context()),
+		tea.WithFilter(ui.MouseEventFilter),
+	)
+	go ws.Subscribe(program, sessionID)
+
+	if _, err := program.Run(); err != nil {
+		event.Error(err)
+		slog.Error("TUI run error", "error", err)
+		return errors.New("Crush crashed. If metrics are enabled, we were notified about it. If you'd like to report it, please copy the stacktrace above and open an issue at https://github.com/charmbracelet/crush/issues/new?template=bug.yml") //nolint:staticcheck
+	}
+	printResumeHint(cmd.ErrOrStderr(), sessionID)
+	return nil
+}
+
+func printResumeHint(w io.Writer, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	launcher := os.Getenv("CRUSH_LAUNCHER_NAME")
+	if launcher == "" {
+		launcher = filepath.Base(os.Args[0])
+	}
+	fmt.Fprintf(w, "\nSession ID: %s\nResume: %s resume %s\n", sessionID, launcher, sessionID)
 }
 
 var heartbit = lipgloss.NewStyle().Foreground(charmtone.Dolly).SetString(`
@@ -362,7 +388,11 @@ func ResolveCwd(cmd *cobra.Command) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("failed to change directory: %v", err)
 		}
-		return cwd, nil
+		resolved, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve current working directory: %v", err)
+		}
+		return resolved, nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {

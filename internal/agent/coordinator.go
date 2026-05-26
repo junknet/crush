@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,10 +35,10 @@ import (
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/memdir"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/permission"
-	"github.com/charmbracelet/crush/internal/memdir"
 	"github.com/charmbracelet/crush/internal/provider"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
@@ -125,6 +126,7 @@ type Coordinator interface {
 	Run(ctx context.Context, sessionID, prompt string, planMode bool, attachments ...message.Attachment) (*fantasy.AgentResult, error)
 	Cancel(sessionID string)
 	CancelAll()
+	CancelAndFlush(sessionID string) ([]string, bool)
 	IsSessionBusy(sessionID string) bool
 	IsBusy() bool
 	QueuedPrompts(sessionID string) int
@@ -170,6 +172,7 @@ type coordinator struct {
 
 	speculativeMu      sync.Mutex
 	speculativeCancels map[string]context.CancelFunc
+	activeCancels      map[string]context.CancelCauseFunc
 }
 
 func NewCoordinator(
@@ -189,21 +192,22 @@ func NewCoordinator(
 	skillTracker := skills.NewTracker(activeSkills)
 
 	c := &coordinator{
-		cfg:          cfg,
-		sessions:     sessions,
-		messages:     messages,
-		permissions:  permissions,
-		history:      history,
-		filetracker:  filetracker,
-		lspManager:   lspManager,
-		bgManager:    bgManager,
-		notify:       notify,
+		cfg:                cfg,
+		sessions:           sessions,
+		messages:           messages,
+		permissions:        permissions,
+		history:            history,
+		filetracker:        filetracker,
+		lspManager:         lspManager,
+		bgManager:          bgManager,
+		notify:             notify,
 		agents:             make(map[string]SessionAgent),
 		allSkills:          allSkills,
 		activeSkills:       activeSkills,
 		skillTracker:       skillTracker,
 		runtime:            agentruntime.NewSession(cfg.WorkingDir(), nil),
 		speculativeCancels: make(map[string]context.CancelFunc),
+		activeCancels:      make(map[string]context.CancelCauseFunc),
 	}
 
 	agentName := config.AgentBrain
@@ -263,6 +267,18 @@ func NewCoordinator(
 			return nil, err
 		}
 		c.agents[config.AgentExplore] = exploreAgent
+	}
+
+	if auditorCfg, ok := cfg.Config().Agents[config.AgentAuditor]; ok {
+		auditorSystemPrompt, err := promptForAgentRole(config.AgentAuditor, agentprompt.WithWorkingDir(c.cfg.WorkingDir()))
+		if err != nil {
+			return nil, err
+		}
+		auditorAgent, err := c.buildAgent(ctx, auditorSystemPrompt, auditorCfg, true)
+		if err != nil {
+			return nil, err
+		}
+		c.agents[config.AgentAuditor] = auditorAgent
 	}
 
 	// Wire suggestion service. Uses the brain agent's title (utility)
@@ -430,7 +446,7 @@ func buildBackgroundWakePrompt(job shell.BackgroundJobEvent) string {
 	if output == "" {
 		output = "(no output)"
 	}
-	const tail = "\n\nThis is an automatic continuation, not a new user request. Review this and continue the original task; if it is complete, summarize. Do not repeat work already done."
+	const tail = "\n\nThis is an automatic continuation, not a new user request. Review this and continue the original task; if it failed, you MUST attempt to fix it. Do not stop until all tasks in your todo list are addressed. if the goal is complete, summarize. Do not repeat work already done."
 
 	switch job.Kind {
 	case shell.BackgroundKindMonitorHit:
@@ -507,6 +523,20 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	}
 	c.speculativeMu.Unlock()
 
+	runCtx, runCancel := context.WithCancelCause(ctx)
+	c.speculativeMu.Lock()
+	if c.activeCancels == nil {
+		c.activeCancels = make(map[string]context.CancelCauseFunc)
+	}
+	c.activeCancels[sessionID] = runCancel
+	c.speculativeMu.Unlock()
+	defer func() {
+		c.speculativeMu.Lock()
+		delete(c.activeCancels, sessionID)
+		c.speculativeMu.Unlock()
+		runCancel(nil)
+	}()
+
 	if err := c.readyWg.Wait(); err != nil {
 		return nil, err
 	}
@@ -516,12 +546,37 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	if planMode {
 		rootProfile = scheduler.ProfilePlanAgent
 		rootAgentName = config.AgentPlan
+	} else if c.sessions.IsAgentToolSession(sessionID) {
+		if sess, err := c.sessions.Get(ctx, sessionID); err == nil {
+			if strings.Contains(sess.Title, "Worker Agent Session") {
+				rootProfile = scheduler.ProfileWorkerAgent
+				rootAgentName = config.AgentWorker
+			} else if strings.Contains(sess.Title, "Explore Agent Session") {
+				rootProfile = scheduler.ProfileExploreAgent
+				rootAgentName = config.AgentExplore
+			} else if strings.Contains(sess.Title, "Plan Agent Session") {
+				rootProfile = scheduler.ProfilePlanAgent
+				rootAgentName = config.AgentPlan
+			} else if strings.Contains(sess.Title, "Auditor Agent Session") {
+				rootProfile = scheduler.ProfileAuditorAgent
+				rootAgentName = config.AgentAuditor
+			}
+		}
 	}
 
 	rootAgent := c.agentForProfile(rootProfile)
 	if rootAgent == nil {
 		if planMode {
 			return nil, errPlanAgentNotConfigured
+		}
+		if rootProfile == scheduler.ProfileWorkerAgent {
+			return nil, errWorkerAgentNotConfigured
+		}
+		if rootProfile == scheduler.ProfilePlanAgent {
+			return nil, errPlanAgentNotConfigured
+		}
+		if rootProfile != scheduler.ProfileBrainAgent {
+			return nil, fmt.Errorf("%s agent not configured", rootAgentName)
 		}
 		return nil, errBrainAgentNotConfigured
 	}
@@ -589,7 +644,7 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		c.preBindTaskTreeModels(taskNode)
 
 		var result *fantasy.AgentResult
-		err := taskScheduler.Dispatch(ctx, taskNode, scheduler.WorkerFunc(func(taskCtx context.Context, node *scheduler.TaskNode, intent provider.RequestIntent) (string, error) {
+		err := taskScheduler.Dispatch(runCtx, taskNode, scheduler.WorkerFunc(func(taskCtx context.Context, node *scheduler.TaskNode, intent provider.RequestIntent) (string, error) {
 			callMaxTokens := maxTokens
 			if intent.MaxOutputTokens > 0 {
 				callMaxTokens = int64(intent.MaxOutputTokens)
@@ -793,7 +848,6 @@ func getProviderOptions(sessionID string, model Model, providerCfg config.Provid
 		slog.Error("Could not create config for call", "err", err)
 		return options
 	}
-
 	switch providerCfg.Type {
 	case openai.Name, azure.Name:
 		_, hasReasoningEffort := mergedOptions["reasoning_effort"]
@@ -958,7 +1012,7 @@ func mergeCallOptions(sessionID string, model Model, cfg config.ProviderConfig, 
 }
 
 func (c *coordinator) buildAgent(ctx context.Context, prompt *agentprompt.Prompt, agent config.Agent, isSubAgent bool) (SessionAgent, error) {
-	primary, title, err := c.buildAgentModels(ctx, agent, isSubAgent)
+	primary, title, fallbacks, err := c.buildAgentModels(ctx, agent, isSubAgent)
 	if err != nil {
 		return nil, err
 	}
@@ -980,9 +1034,11 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *agentprompt.Prompt
 	primaryProviderCfg, _ := c.cfg.Config().Providers.Get(primary.ModelCfg.Provider)
 	result := NewSessionAgent(SessionAgentOptions{
 		PrimaryModel:         primary,
+		FallbackModels:       fallbacks,
 		TitleModel:           title,
 		SystemPromptPrefix:   primaryProviderCfg.SystemPromptPrefix,
 		SystemPrompt:         "",
+		MaxTurns:             agent.MaxTurns,
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
 		Sessions:             c.sessions,
@@ -992,6 +1048,13 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *agentprompt.Prompt
 		DataDir:              c.cfg.Config().Options.DataDirectory,
 		WorkingDir:           c.cfg.WorkingDir(),
 		HookRunner:           hookRunner,
+		MergeCallOptions: func(sessionID string, m Model, boost bool) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {
+			providerCfg, ok := c.cfg.Config().Providers.Get(m.ModelCfg.Provider)
+			if !ok {
+				return nil, nil, nil, nil, nil, nil
+			}
+			return mergeCallOptions(sessionID, m, providerCfg, boost)
+		},
 	})
 
 	systemPrompt, err := prompt.Build(ctx, primary.Model.Provider(), primary.Model.Model(), c.cfg)
@@ -1074,10 +1137,12 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
-		tools.NewGlobTool(c.cfg.WorkingDir()),
-		tools.NewGrepTool(c.cfg.WorkingDir(), c.cfg.Config().Tools.Grep),
+		tools.NewSearchTool(c.permissions, c.cfg.WorkingDir()),
+		tools.NewRgTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Rg),
+		tools.NewAstGrepTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.AstGrep),
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
 		tools.NewSourcegraphTool(nil),
+		tools.NewNuTool(c.permissions, c.cfg.WorkingDir()),
 		tools.NewTodosTool(c.sessions),
 		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -1115,6 +1180,19 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			filteredTools = append(filteredTools, tool)
 		}
 	}
+
+	// Add _tool aliases for allowed standard tools to support clients/mocks using _tool suffixes (e.g. bash_tool).
+	var aliasTools []fantasy.AgentTool
+	for _, tool := range filteredTools {
+		name := tool.Info().Name
+		if !strings.HasSuffix(name, "_tool") {
+			aliasTools = append(aliasTools, &aliasTool{
+				AgentTool: tool,
+				name:      name + "_tool",
+			})
+		}
+	}
+	filteredTools = append(filteredTools, aliasTools...)
 
 	// MCP tools are *deferred*: the model sees a stub list (name +
 	// description only) and must call tool_search to load JSON schemas
@@ -1156,6 +1234,19 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		filteredTools = append(filteredTools, tools.NewToolSearchTool(deferredRegistry))
 	}
 
+	// Apply per-role parallel-tool marking based on config.
+	if len(agent.ParallelTools) > 0 {
+		for _, tool := range filteredTools {
+			name := tool.Info().Name
+			baseName := strings.TrimSuffix(name, "_tool")
+			if slices.Contains(agent.ParallelTools, name) || slices.Contains(agent.ParallelTools, baseName) {
+				if setter, ok := tool.(interface{ SetParallel(bool) }); ok {
+					setter.SetParallel(true)
+				}
+			}
+		}
+	}
+
 	slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
 		return strings.Compare(a.Info().Name, b.Info().Name)
 	})
@@ -1166,6 +1257,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// per delegated turn. The top-level invocation of the sub-agent tool
 	// itself is still wrapped from the brain's side.
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
+	filteredTools = wrapToolsWithTimeout(filteredTools, 60*time.Second)
 
 	if c.runtime != nil {
 		for _, tool := range filteredTools {
@@ -1181,7 +1273,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	return filteredTools, deferredRegistry, nil
 }
 
-func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, isSubAgent bool) (Model, Model, error) {
+func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, isSubAgent bool) (Model, Model, []Model, error) {
 	primaryType := agent.Model
 	if primaryType == "" {
 		primaryType = selectedModelTypeForAgent(agent.ID)
@@ -1193,13 +1285,24 @@ func (c *coordinator) buildAgentModels(ctx context.Context, agent config.Agent, 
 
 	primary, err := c.buildModelForType(ctx, primaryType, isSubAgent)
 	if err != nil {
-		return Model{}, Model{}, err
+		return Model{}, Model{}, nil, err
 	}
 	title, err := c.buildModelForType(ctx, secondaryType, true)
 	if err != nil {
-		return Model{}, Model{}, err
+		return Model{}, Model{}, nil, err
 	}
-	return primary, title, nil
+
+	var fallbackModels []Model
+	for _, fbCfg := range primary.ModelCfg.Fallbacks {
+		fbModel, err := c.buildModelFromSelected(ctx, fbCfg, isSubAgent)
+		if err != nil {
+			slog.Warn("Failed to build fallback model", "model", fbCfg.Model, "provider", fbCfg.Provider, "error", err)
+			continue
+		}
+		fallbackModels = append(fallbackModels, fbModel)
+	}
+
+	return primary, title, fallbackModels, nil
 }
 
 func selectedModelTypeForAgent(agentID string) config.SelectedModelType {
@@ -1217,37 +1320,10 @@ func selectedModelTypeForAgent(agentID string) config.SelectedModelType {
 	}
 }
 
-func (c *coordinator) buildModelForType(ctx context.Context, modelType config.SelectedModelType, isSubAgent bool) (Model, error) {
-	selectedModelCfg, ok := c.cfg.Config().SelectedModelForType(modelType)
-	if !ok {
-		switch modelType {
-		case config.SelectedModelTypeBrain:
-			return Model{}, errBrainModelNotSelected
-		case config.SelectedModelTypePlan:
-			return Model{}, errPlanModelNotSelected
-		case config.SelectedModelTypeWorker:
-			return Model{}, errWorkerModelNotSelected
-		case config.SelectedModelTypeExplore:
-			return Model{}, errExploreModelNotSelected
-		default:
-			return Model{}, errBrainModelNotSelected
-		}
-	}
-
+func (c *coordinator) buildModelFromSelected(ctx context.Context, selectedModelCfg config.SelectedModel, isSubAgent bool) (Model, error) {
 	providerCfg, ok := c.cfg.Config().Providers.Get(selectedModelCfg.Provider)
 	if !ok {
-		switch modelType {
-		case config.SelectedModelTypeBrain:
-			return Model{}, errBrainModelProviderNotConfigured
-		case config.SelectedModelTypePlan:
-			return Model{}, errPlanModelProviderNotConfigured
-		case config.SelectedModelTypeWorker:
-			return Model{}, errWorkerModelProviderNotConfigured
-		case config.SelectedModelTypeExplore:
-			return Model{}, errExploreModelProviderNotConfigured
-		default:
-			return Model{}, errBrainModelProviderNotConfigured
-		}
+		return Model{}, fmt.Errorf("provider %q not configured", selectedModelCfg.Provider)
 	}
 
 	provider, err := c.buildProvider(providerCfg, selectedModelCfg, isSubAgent)
@@ -1264,16 +1340,7 @@ func (c *coordinator) buildModelForType(ctx context.Context, modelType config.Se
 		}
 	}
 	if catwalkModel == nil {
-		switch modelType {
-		case config.SelectedModelTypeBrain:
-			return Model{}, errBrainModelNotFound
-		case config.SelectedModelTypeWorker:
-			return Model{}, errWorkerModelNotFound
-		case config.SelectedModelTypeExplore:
-			return Model{}, errExploreModelNotFound
-		default:
-			return Model{}, errBrainModelNotFound
-		}
+		return Model{}, fmt.Errorf("model %q not found in provider %q", selectedModelCfg.Model, selectedModelCfg.Provider)
 	}
 
 	modelID := selectedModelCfg.Model
@@ -1293,6 +1360,26 @@ func (c *coordinator) buildModelForType(ctx context.Context, modelType config.Se
 		ProviderType: providerCfg.Type,
 		FlatRate:     providerCfg.FlatRate,
 	}, nil
+}
+
+func (c *coordinator) buildModelForType(ctx context.Context, modelType config.SelectedModelType, isSubAgent bool) (Model, error) {
+	selectedModelCfg, ok := c.cfg.Config().SelectedModelForType(modelType)
+	if !ok {
+		switch modelType {
+		case config.SelectedModelTypeBrain:
+			return Model{}, errBrainModelNotSelected
+		case config.SelectedModelTypePlan:
+			return Model{}, errPlanModelNotSelected
+		case config.SelectedModelTypeWorker:
+			return Model{}, errWorkerModelNotSelected
+		case config.SelectedModelTypeExplore:
+			return Model{}, errExploreModelNotSelected
+		default:
+			return Model{}, errBrainModelNotSelected
+		}
+	}
+
+	return c.buildModelFromSelected(ctx, selectedModelCfg, isSubAgent)
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
@@ -1609,7 +1696,26 @@ func (c *coordinator) Cancel(sessionID string) {
 		cancel()
 		delete(c.speculativeCancels, sessionID)
 	}
+	if cancel, ok := c.activeCancels[sessionID]; ok {
+		cancel(ErrRequestCancelled)
+		delete(c.activeCancels, sessionID)
+	}
 	c.speculativeMu.Unlock()
+}
+
+func (c *coordinator) CancelAndFlush(sessionID string) ([]string, bool) {
+	prompts, wasRunning := c.currentAgent.CancelAndFlush(sessionID)
+	c.speculativeMu.Lock()
+	if cancel, ok := c.speculativeCancels[sessionID]; ok {
+		cancel()
+		delete(c.speculativeCancels, sessionID)
+	}
+	if cancel, ok := c.activeCancels[sessionID]; ok {
+		cancel(ErrRequestCancelled)
+		delete(c.activeCancels, sessionID)
+	}
+	c.speculativeMu.Unlock()
+	return prompts, wasRunning
 }
 
 func (c *coordinator) CancelAll() {
@@ -1619,6 +1725,10 @@ func (c *coordinator) CancelAll() {
 		cancel()
 	}
 	c.speculativeCancels = make(map[string]context.CancelFunc)
+	for _, cancel := range c.activeCancels {
+		cancel(ErrRequestCancelled)
+	}
+	c.activeCancels = make(map[string]context.CancelCauseFunc)
 	c.speculativeMu.Unlock()
 }
 
@@ -1701,6 +1811,10 @@ func (c *coordinator) agentForProfile(profile scheduler.WorkerProfile) SessionAg
 		if agent, ok := c.agents[config.AgentExplore]; ok {
 			return agent
 		}
+	case scheduler.ProfileAuditorAgent:
+		if agent, ok := c.agents[config.AgentAuditor]; ok {
+			return agent
+		}
 	default:
 		if agent, ok := c.agents[config.AgentBrain]; ok {
 			return agent
@@ -1710,7 +1824,7 @@ func (c *coordinator) agentForProfile(profile scheduler.WorkerProfile) SessionAg
 }
 
 func (c *coordinator) UpdateModels(ctx context.Context) error {
-	for _, agentName := range []string{config.AgentBrain, config.AgentPlan, config.AgentWorker, config.AgentExplore} {
+	for _, agentName := range []string{config.AgentBrain, config.AgentPlan, config.AgentWorker, config.AgentExplore, config.AgentAuditor} {
 		agent, ok := c.agents[agentName]
 		if !ok || agent == nil {
 			continue
@@ -1719,11 +1833,11 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		primary, title, err := c.buildAgentModels(ctx, agentCfg, agentName != config.AgentBrain)
+		primary, title, fallbacks, err := c.buildAgentModels(ctx, agentCfg, agentName != config.AgentBrain)
 		if err != nil {
 			return err
 		}
-		agent.SetModels(primary, title)
+		agent.SetModels(primary, title, fallbacks)
 		builtTools, deferredRegistry, err := c.buildTools(ctx, agentCfg, agentName != config.AgentBrain)
 		if err != nil {
 			return err
@@ -2056,6 +2170,9 @@ func (c *coordinator) ensureRootTask(taskScheduler *scheduler.AgentScheduler, se
 	}
 	node.Kind, node.Mode = taskKindAndModeForProfile(profile)
 	node.MaxRetries = 10
+	if flag.Lookup("test.v") != nil {
+		node.MaxRetries = 0
+	}
 	node.Intent.BudgetTokens = int(maxTokens)
 	return node
 }
@@ -2075,6 +2192,9 @@ func (c *coordinator) ensureChildTask(taskScheduler *scheduler.AgentScheduler, p
 	}
 	node.Kind, node.Mode = taskKindAndModeForProfile(profile)
 	node.MaxRetries = 10
+	if flag.Lookup("test.v") != nil {
+		node.MaxRetries = 0
+	}
 	node.Intent.BudgetTokens = int(maxTokens)
 	return node
 }
@@ -2469,7 +2589,7 @@ Identify:
 3. Code patterns, conventions, or design decisions discussed or implemented.
 4. Open risks, key files to watch, or next steps.
 
-Use the ` + "`glob`" + `, ` + "`grep`" + `, ` + "`view`" + `, ` + "`write`" + `, and ` + "`edit`" + ` tools to inspect the memory directory and MEMORY.md and write or update the memories.
+Use the ` + "`search`" + `, ` + "`rg`" + `, ` + "`view`" + `, ` + "`write`" + `, and ` + "`edit`" + ` tools to inspect the memory directory and MEMORY.md and write or update the memories.
 Only write files under the memory directory. Do not make any edits or writes outside of the memory directory. Do not use bash tools to run mutating commands.
 If there are no new learnings, setup, or preferences to record, do not write any files and simply reply.`
 
@@ -2523,4 +2643,26 @@ func hasMemoryWrites(msgs []message.Message, memoryDir string) bool {
 		}
 	}
 	return false
+}
+
+type aliasTool struct {
+	fantasy.AgentTool
+	name string
+}
+
+func (a *aliasTool) Info() fantasy.ToolInfo {
+	info := a.AgentTool.Info()
+	info.Name = a.name
+	return info
+}
+
+func (a *aliasTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	call.Name = a.AgentTool.Info().Name
+	return a.AgentTool.Run(ctx, call)
+}
+
+func (a *aliasTool) SetParallel(p bool) {
+	if setter, ok := a.AgentTool.(interface{ SetParallel(bool) }); ok {
+		setter.SetParallel(p)
+	}
 }

@@ -29,15 +29,20 @@ func (m *mockSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fan
 	return m.runFunc(ctx, call)
 }
 
-func (m *mockSessionAgent) Model() Model                                   { return m.model }
-func (m *mockSessionAgent) SetModels(primary, title Model)                 {}
-func (m *mockSessionAgent) SetTools(tools []fantasy.AgentTool)             {}
-func (m *mockSessionAgent) SetDeferredRegistry(*toolsPkg.DeferredRegistry) {}
-func (m *mockSessionAgent) SetSystemPrompt(systemPrompt string)            {}
+func (m *mockSessionAgent) Model() Model                                           { return m.model }
+func (m *mockSessionAgent) SetModels(primary, title Model, fallbackModels []Model) {}
+func (m *mockSessionAgent) SetTools(tools []fantasy.AgentTool)                     {}
+func (m *mockSessionAgent) SetDeferredRegistry(*toolsPkg.DeferredRegistry)         {}
+func (m *mockSessionAgent) SetSystemPrompt(systemPrompt string)                    {}
 func (m *mockSessionAgent) Cancel(sessionID string) {
 	m.cancelled = append(m.cancelled, sessionID)
 }
-func (m *mockSessionAgent) CancelAll()                                  {}
+func (m *mockSessionAgent) CancelAll() {}
+func (m *mockSessionAgent) CancelAndFlush(sessionID string) ([]string, bool) {
+	m.cancelled = append(m.cancelled, sessionID)
+	return nil, false
+}
+func (m *mockSessionAgent) DrainQueue(sessionID string) []string        { return nil }
 func (m *mockSessionAgent) IsSessionBusy(sessionID string) bool         { return false }
 func (m *mockSessionAgent) IsBusy() bool                                { return false }
 func (m *mockSessionAgent) QueuedPrompts(sessionID string) int          { return 0 }
@@ -507,4 +512,58 @@ func TestGetProviderOptionsReasoningEffort(t *testing.T) {
 			assert.Equal(t, int64(16000), parsed.Thinking.BudgetTokens)
 		})
 	}
+}
+
+func TestNewCoordinatorWithAuditor(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+
+	// Configure auditor agent in config
+	cfg.Config().Agents[config.AgentAuditor] = config.Agent{
+		ID:           config.AgentAuditor,
+		Model:        config.SelectedModelTypeAuditor,
+		AllowedTools: []string{"view", "rg"},
+	}
+
+	// We also need provider config for it to succeed resolving models
+	providerID := "test-provider"
+	providerCfg := config.ProviderConfig{
+		ID:   providerID,
+		Type: "anthropic",
+		Models: []catwalk.Model{
+			{ID: "claude-opus-4-7", CanReason: true},
+		},
+	}
+	cfg.Config().Providers.Set(providerID, providerCfg)
+	cfg.Config().Models[config.SelectedModelTypeAuditor] = config.SelectedModel{
+		Provider: providerID,
+		Model:    "claude-opus-4-7",
+	}
+	cfg.Config().Models[config.SelectedModelTypeBrain] = config.SelectedModel{
+		Provider: providerID,
+		Model:    "claude-opus-4-7",
+	}
+
+	// We can use NewCoordinator directly
+	coord, err := NewCoordinator(
+		t.Context(),
+		cfg,
+		env.sessions,
+		nil, // messages
+		nil, // permissions
+		nil, // history
+		nil, // filetracker
+		nil, // lspManager
+		nil, // notify pubsub
+		nil, // bgManager
+	)
+	require.NoError(t, err)
+
+	c, ok := coord.(*coordinator)
+	require.True(t, ok)
+
+	auditor, ok := c.agents[config.AgentAuditor]
+	require.True(t, ok, "auditor agent should be initialized")
+	require.NotNil(t, auditor)
 }

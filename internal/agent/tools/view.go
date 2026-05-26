@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -46,13 +47,105 @@ type ViewParams struct {
 	FilePath string `json:"file_path" description:"The path to the file to read"`
 	Offset   int    `json:"offset,omitempty" description:"The line number to start reading from (0-based)"`
 	Limit    int    `json:"limit,omitempty" description:"The number of lines to read (defaults to 2000)"`
+	Fold     bool   `json:"fold,omitempty" description:"If true, use regex-based folding to collapse function/type bodies and return a compressed semantic view (supports Nim and Go)"`
 }
 
 type ViewPermissionsParams struct {
 	FilePath string `json:"file_path"`
 	Offset   int    `json:"offset"`
 	Limit    int    `json:"limit"`
+	Fold     bool   `json:"fold"`
 }
+
+type viewLine struct {
+	Number int
+	Text   string
+}
+
+func foldLines(lines []string, filePath string) []viewLine {
+	ext := filepath.Ext(filePath)
+	var result []viewLine
+	for i, line := range lines {
+		result = append(result, viewLine{Number: i + 1, Text: line})
+	}
+
+	if ext != ".go" && ext != ".nim" {
+		return result
+	}
+
+	var folded []viewLine
+	if ext == ".go" {
+		inBlock := false
+		braceCount := 0
+		for _, line := range result {
+			trimmed := strings.TrimSpace(line.Text)
+			if !inBlock {
+				folded = append(folded, line)
+				// Start folding if it's a func or type declaration ending with {
+				if (strings.HasPrefix(trimmed, "func ") || strings.HasPrefix(trimmed, "type ")) && strings.HasSuffix(trimmed, "{") {
+					inBlock = true
+					braceCount = 1
+					folded = append(folded, viewLine{Number: 0, Text: "    ..."})
+				}
+			} else {
+				braceCount += strings.Count(line.Text, "{")
+				braceCount -= strings.Count(line.Text, "}")
+				if braceCount <= 0 {
+					inBlock = false
+					// Only keep the line if it contains the final closing brace
+					if strings.Contains(line.Text, "}") {
+						folded = append(folded, line)
+					}
+				}
+			}
+		}
+	} else if ext == ".nim" {
+		inBlock := false
+		blockIndent := -1
+		declRegex := regexp.MustCompile(`^(proc|template|macro|method|iterator|converter|type)\b`)
+
+		for i := 0; i < len(result); i++ {
+			line := result[i]
+			trimmed := strings.TrimSpace(line.Text)
+			if trimmed == "" {
+				if !inBlock {
+					folded = append(folded, line)
+				}
+				continue
+			}
+
+			indent := len(line.Text) - len(strings.TrimLeft(line.Text, " "))
+			if !inBlock {
+				folded = append(folded, line)
+				if declRegex.MatchString(trimmed) {
+					// Look ahead for indentation
+					nextIdx := i + 1
+					for nextIdx < len(result) && strings.TrimSpace(result[nextIdx].Text) == "" {
+						nextIdx++
+					}
+					if nextIdx < len(result) {
+						nextIndent := len(result[nextIdx].Text) - len(strings.TrimLeft(result[nextIdx].Text, " "))
+						if nextIndent > indent {
+							inBlock = true
+							blockIndent = indent
+							folded = append(folded, viewLine{Number: 0, Text: strings.Repeat(" ", nextIndent) + "..."})
+						}
+					}
+				}
+			} else {
+				if indent <= blockIndent {
+					inBlock = false
+					folded = append(folded, line)
+				}
+			}
+		}
+	}
+	if len(folded) > 0 {
+		return folded
+	}
+	return result
+}
+
 
 type ViewResourceType string
 
@@ -93,7 +186,7 @@ func NewViewTool(
 	workingDir string,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		ViewToolName,
 		viewDescription(),
 		func(ctx context.Context, params ViewParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -230,7 +323,7 @@ func NewViewTool(
 			if isSkillFile {
 				maxContentSize = 0
 			}
-			content, hasMore, err := readTextFile(ctx, filePath, params.Offset, params.Limit, maxContentSize)
+			content, rawContent, hasMore, err := readTextFile(ctx, filePath, params.Offset, params.Limit, maxContentSize, params.Fold)
 			if err != nil {
 				var tooLarge contentTooLargeError
 				if errors.As(err, &tooLarge) {
@@ -239,14 +332,14 @@ func NewViewTool(
 				}
 				return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", err)
 			}
-			if !utf8.ValidString(content) {
+			if !utf8.ValidString(rawContent) {
 				return fantasy.NewTextErrorResponse("File content is not valid UTF-8"), nil
 			}
 
 			openInLSPs(ctx, lspManager, filePath)
 			waitForLSPDiagnostics(ctx, lspManager, filePath, 300*time.Millisecond)
 			output := "<file>\n"
-			output += addLineNumbers(content, params.Offset+1)
+			output += content
 
 			if hasMore {
 				output += fmt.Sprintf("\n\n(File has more lines. Use 'offset' parameter to read beyond line %d)",
@@ -258,7 +351,7 @@ func NewViewTool(
 
 			meta := ViewResponseMetadata{
 				FilePath: filePath,
-				Content:  content,
+				Content:  rawContent,
 			}
 			if isSkillFile {
 				if skill, err := skills.Parse(filePath); err == nil {
@@ -302,52 +395,74 @@ func addLineNumbers(content string, startLine int) string {
 	return strings.Join(result, "\n")
 }
 
-func readTextFile(ctx context.Context, filePath string, offset, limit, maxContentSize int) (string, bool, error) {
-	// Use the driver-aware read path so SSH workspaces fetch the file in
-	// a single SFTP round-trip instead of streaming line-by-line. For
-	// view's typical use (offset+limit slicing of a code file) the whole
-	// file is comparable in size to the slice anyway; for genuinely huge
-	// files the maxContentSize check below catches them.
+func readTextFile(ctx context.Context, filePath string, offset, limit, maxContentSize int, fold bool) (string, string, bool, error) {
 	data, err := CtxReadFile(ctx, filePath)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
-	all := strings.Split(string(data), "\n")
+	rawLines := strings.Split(string(data), "\n")
 	// Strip a trailing empty element from a final newline so line counts
 	// match the editor's notion of "lines in the file".
-	if len(all) > 0 && all[len(all)-1] == "" {
-		all = all[:len(all)-1]
+	if len(rawLines) > 0 && rawLines[len(rawLines)-1] == "" {
+		rawLines = rawLines[:len(rawLines)-1]
 	}
-	if offset >= len(all) {
-		return "", false, nil
+
+	var lines []viewLine
+	if fold {
+		lines = foldLines(rawLines, filePath)
+	} else {
+		lines = make([]viewLine, len(rawLines))
+		for i, line := range rawLines {
+			lines[i] = viewLine{Number: i + 1, Text: line}
+		}
+	}
+
+	if offset >= len(lines) {
+		return "", "", false, nil
 	}
 	end := offset + limit
-	if end > len(all) {
-		end = len(all)
+	if end > len(lines) {
+		end = len(lines)
 	}
-	slice := all[offset:end]
+	slice := lines[offset:end]
 
-	lines := make([]string, 0, len(slice))
+	var resultLines []string
+	var rawResultLines []string
 	contentSize := 0
-	for i, lineText := range slice {
-		lineText = strings.TrimSuffix(lineText, "\r")
+	for i, line := range slice {
+		lineText := strings.TrimSuffix(line.Text, "\r")
 		if len(lineText) > MaxLineLength {
 			lineText = lineText[:MaxLineLength] + "..."
 		}
+
+		var formatted string
+		if line.Number == 0 {
+			formatted = "      | " + lineText
+		} else {
+			numStr := fmt.Sprintf("%d", line.Number)
+			if len(numStr) >= 6 {
+				formatted = fmt.Sprintf("%s|%s", numStr, lineText)
+			} else {
+				formatted = fmt.Sprintf("%6s|%s", numStr, lineText)
+			}
+		}
+
 		projectedSize := contentSize + len(lineText)
 		if i > 0 {
 			projectedSize++
 		}
 		if maxContentSize > 0 && projectedSize > maxContentSize {
-			return "", false, contentTooLargeError{Size: projectedSize, Max: maxContentSize}
+			return "", "", false, contentTooLargeError{Size: projectedSize, Max: maxContentSize}
 		}
 		contentSize = projectedSize
-		lines = append(lines, lineText)
+		resultLines = append(resultLines, formatted)
+		rawResultLines = append(rawResultLines, lineText)
 	}
 
-	hasMore := end < len(all)
-	return strings.Join(lines, "\n"), hasMore, nil
+	hasMore := end < len(lines)
+	return strings.Join(resultLines, "\n"), strings.Join(rawResultLines, "\n"), hasMore, nil
 }
+
 
 func getImageMimeType(filePath string) (bool, string) {
 	ext := strings.ToLower(filepath.Ext(filePath))
@@ -385,12 +500,6 @@ func sniffImageMimeType(data []byte, fallback string) string {
 	return fallback
 }
 
-// isInSkillsPath checks if filePath is within any of the configured skills
-// directories. Returns true for files that can be read without permission
-// prompts and without size limits.
-//
-// Note that symlinks are resolved to prevent path traversal attacks via
-// symbolic links.
 func isInSkillsPath(filePath string, skillsPaths []string) bool {
 	if len(skillsPaths) == 0 {
 		return false
@@ -402,9 +511,7 @@ func isInSkillsPath(filePath string, skillsPaths []string) bool {
 	}
 
 	evalFilePath, err := filepath.EvalSymlinks(absFilePath)
-	if err != nil {
-		return false
-	}
+	hasEvalFile := err == nil
 
 	for _, skillsPath := range skillsPaths {
 		absSkillsPath, err := filepath.Abs(skillsPath)
@@ -412,14 +519,27 @@ func isInSkillsPath(filePath string, skillsPaths []string) bool {
 			continue
 		}
 
+		// Check 1: Try matching using unresolved (absolute) paths.
+		// This handles the case where the file path is under a symlinked skills directory
+		// (e.g. filePath = /home/user/.claude/skills/my-skill/SKILL.md, skillsPath = /home/user/.claude/skills).
+		// Since both share the unresolved symlink path prefix, Rel will match correctly.
+		relPath, err := filepath.Rel(absSkillsPath, absFilePath)
+		if err == nil && !strings.HasPrefix(relPath, "..") {
+			return true
+		}
+
+		// Check 2: Try matching using fully evaluated paths.
+		// This handles the case where either the filePath or skillsPath (or both) are fully resolved.
 		evalSkillsPath, err := filepath.EvalSymlinks(absSkillsPath)
 		if err != nil {
 			continue
 		}
 
-		relPath, err := filepath.Rel(evalSkillsPath, evalFilePath)
-		if err == nil && !strings.HasPrefix(relPath, "..") {
-			return true
+		if hasEvalFile {
+			relPath, err = filepath.Rel(evalSkillsPath, evalFilePath)
+			if err == nil && !strings.HasPrefix(relPath, "..") {
+				return true
+			}
 		}
 	}
 

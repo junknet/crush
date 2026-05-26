@@ -179,7 +179,7 @@ func (s *AgentScheduler) dispatchNode(ctx context.Context, node *TaskNode, worke
 			s.publishFinished(node, true, "", node.LastOutput)
 			return nil
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			break
 		}
 		if attempt >= maxAttempts {

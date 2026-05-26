@@ -42,7 +42,7 @@ func newTestService(t *testing.T, opts ...ServiceOption) (Service, string) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
+	sessions := session.NewService(q, conn, t.TempDir())
 	sess, err := sessions.Create(t.Context(), "test", session.ModeExecute)
 	require.NoError(t, err)
 
@@ -490,7 +490,7 @@ func TestFlush_WaitsForInFlightWrite(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
+	sessions := session.NewService(q, conn, t.TempDir())
 	sess, err := sessions.Create(t.Context(), "test", session.ModeExecute)
 	require.NoError(t, err)
 
@@ -554,7 +554,7 @@ func TestFlushAll_WaitsForInFlightWrite(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
+	sessions := session.NewService(q, conn, t.TempDir())
 	sess, err := sessions.Create(t.Context(), "test", session.ModeExecute)
 	require.NoError(t, err)
 
@@ -647,7 +647,7 @@ func TestUpdate_StructuralFlushUsesMustDeliver(t *testing.T) {
 			t.Cleanup(func() { _ = conn.Close() })
 
 			q := db.New(conn)
-			sessions := session.NewService(q, conn)
+			sessions := session.NewService(q, conn, t.TempDir())
 			sess, err := sessions.Create(t.Context(), "test", session.ModeExecute)
 			require.NoError(t, err)
 

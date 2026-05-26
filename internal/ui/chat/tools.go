@@ -96,6 +96,7 @@ type ToolRenderOpts struct {
 	Compact         bool
 	IsSpinning      bool
 	Status          ToolStatus
+	StartedAt       time.Time
 }
 
 // IsPending returns true if the tool call is still pending (not finished and
@@ -144,6 +145,7 @@ type baseToolMessageItem struct {
 	result       *message.ToolResult
 	messageID    string
 	status       ToolStatus
+	startedAt    time.Time
 	// we use this so we can efficiently cache
 	// tools that have a capped width (e.x bash.. and others)
 	hasCappedWidth bool
@@ -186,6 +188,7 @@ func newBaseToolMessageItem(
 		toolCall:                 toolCall,
 		result:                   result,
 		status:                   status,
+		startedAt:                time.Now(),
 		hasCappedWidth:           hasCappedWidth,
 	}
 	return t
@@ -203,6 +206,7 @@ func NewToolMessageItem(
 	result *message.ToolResult,
 	canceled bool,
 ) ToolMessageItem {
+	toolCall.Name = normalizeToolName(toolCall.Name)
 	var item ToolMessageItem
 	switch toolCall.Name {
 	case tools.BashToolName:
@@ -219,10 +223,10 @@ func NewToolMessageItem(
 		item = NewEditToolMessageItem(sty, toolCall, result, canceled)
 	case tools.MultiEditToolName:
 		item = NewMultiEditToolMessageItem(sty, toolCall, result, canceled)
-	case tools.GlobToolName:
-		item = NewGlobToolMessageItem(sty, toolCall, result, canceled)
-	case tools.GrepToolName:
-		item = NewGrepToolMessageItem(sty, toolCall, result, canceled)
+	case tools.SearchToolName:
+		item = NewSearchToolMessageItem(sty, toolCall, result, canceled)
+	case tools.RgToolName:
+		item = NewRgToolMessageItem(sty, toolCall, result, canceled)
 	case tools.LSToolName:
 		item = NewLSToolMessageItem(sty, toolCall, result, canceled)
 	case tools.DownloadToolName:
@@ -324,6 +328,7 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 			Compact:         t.isCompact,
 			IsSpinning:      t.isSpinning(),
 			Status:          t.computeStatus(),
+			StartedAt:       t.startedAt,
 		})
 
 		// Prepend hook indicator if hooks ran for this tool call.
@@ -339,6 +344,28 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 	}
 
 	return t.renderHighlighted(content, toolItemWidth, height)
+}
+
+func runningDurationText(startedAt time.Time) string {
+	if startedAt.IsZero() {
+		return ""
+	}
+	elapsed := time.Since(startedAt)
+	if elapsed < 0 {
+		return ""
+	}
+	switch {
+	case elapsed < time.Minute:
+		return fmt.Sprintf("%ds", int(elapsed.Seconds()))
+	case elapsed < time.Hour:
+		mins := int(elapsed.Minutes())
+		secs := int(elapsed.Seconds()) % 60
+		return fmt.Sprintf("%dm %ds", mins, secs)
+	default:
+		hours := int(elapsed.Hours())
+		mins := int(elapsed.Minutes()) % 60
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
 }
 
 // Render renders the tool message item at the given width.
@@ -1112,7 +1139,7 @@ func (t *baseToolMessageItem) formatToolForCopy() string {
 
 // formatParametersForCopy formats tool parameters for clipboard copying.
 func (t *baseToolMessageItem) formatParametersForCopy() string {
-	switch t.toolCall.Name {
+	switch normalizeToolName(t.toolCall.Name) {
 	case tools.BashToolName:
 		var params tools.BashParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
@@ -1181,8 +1208,8 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			return fmt.Sprintf("**URL:** %s", params.URL)
 		}
-	case tools.GrepToolName:
-		var params tools.GrepParams
+	case tools.RgToolName:
+		var params tools.RgParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			var parts []string
 			parts = append(parts, fmt.Sprintf("**Pattern:** %s", params.Pattern))
@@ -1197,8 +1224,8 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 			}
 			return strings.Join(parts, "\n")
 		}
-	case tools.GlobToolName:
-		var params tools.GlobParams
+	case tools.SearchToolName:
+		var params tools.SearchParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			var parts []string
 			parts = append(parts, fmt.Sprintf("**Pattern:** %s", params.Pattern))
@@ -1278,7 +1305,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return fmt.Sprintf("[Media: %s]", t.result.MIMEType)
 	}
 
-	switch t.toolCall.Name {
+	switch normalizeToolName(t.toolCall.Name) {
 	case tools.BashToolName:
 		return t.formatBashResultForCopy()
 	case tools.ViewToolName:
@@ -1297,7 +1324,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatWebFetchResultForCopy()
 	case agent.AgentToolName:
 		return t.formatAgentResultForCopy()
-	case tools.DownloadToolName, tools.GrepToolName, tools.GlobToolName, tools.LSToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
+	case tools.DownloadToolName, tools.RgToolName, tools.SearchToolName, tools.LSToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
 		return fmt.Sprintf("```\n%s\n```", t.result.Content)
 	default:
 		return t.result.Content
@@ -1610,46 +1637,63 @@ func (t *baseToolMessageItem) formatAgentResultForCopy() string {
 	return result.String()
 }
 
-// prettifyToolName returns a human-readable name for tool names.
+// prettifyToolName returns the visible anchor for tool names.
 func prettifyToolName(name string) string {
+	name = normalizeToolName(name)
 	switch name {
 	case agent.AgentToolName:
-		return "Agent"
+		return agent.AgentToolName
 	case tools.BashToolName:
-		return "Bash"
+		return tools.BashToolName
 	case tools.JobOutputToolName:
-		return "Job: Output"
+		return tools.JobOutputToolName
 	case tools.JobKillToolName:
-		return "Job: Kill"
+		return tools.JobKillToolName
 	case tools.DownloadToolName:
-		return "Download"
+		return tools.DownloadToolName
 	case tools.EditToolName:
-		return "Edit"
+		return tools.EditToolName
 	case tools.MultiEditToolName:
-		return "Multi-Edit"
+		return tools.MultiEditToolName
 	case tools.FetchToolName:
-		return "Fetch"
+		return tools.FetchToolName
 	case tools.AgenticFetchToolName:
-		return "Agentic Fetch"
+		return tools.AgenticFetchToolName
 	case tools.WebFetchToolName:
-		return "Fetch"
+		return tools.WebFetchToolName
 	case tools.WebSearchToolName:
-		return "Search"
-	case tools.GlobToolName:
-		return "Glob"
-	case tools.GrepToolName:
-		return "Grep"
+		return tools.WebSearchToolName
+	case tools.SearchToolName:
+		return tools.SearchToolName
+	case tools.RgToolName:
+		return tools.RgToolName
 	case tools.LSToolName:
-		return "List"
+		return tools.LSToolName
 	case tools.SourcegraphToolName:
-		return "Sourcegraph"
+		return tools.SourcegraphToolName
 	case tools.TodosToolName:
-		return "To-Do"
+		return tools.TodosToolName
 	case tools.ViewToolName:
-		return "View"
+		return tools.ViewToolName
 	case tools.WriteToolName:
-		return "Write"
+		return tools.WriteToolName
 	default:
 		return humanizedToolName(name)
+	}
+}
+
+// normalizeToolName normalizes legacy or aliased tool names (e.g. "bash_tool")
+// to their canonical standard forms.
+func normalizeToolName(name string) string {
+	if strings.HasSuffix(name, "_tool") {
+		name = strings.TrimSuffix(name, "_tool")
+	}
+	switch name {
+	case "multiedit":
+		return "edit:multi"
+	case "list":
+		return "ls"
+	default:
+		return name
 	}
 }

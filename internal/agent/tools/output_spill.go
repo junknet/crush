@@ -44,14 +44,14 @@ type SpillResult struct {
 // Spiller writes a "too big to embed in a tool response" payload to a
 // stable per-session path under dataDir, gated by a caller-owned byte
 // threshold. Multiple tools share one Spiller; the label argument keeps
-// their files distinguishable (`bash-…`, `view-…`, `grep-…`).
+// their files distinguishable (`bash-…`, `view-…`, `rg-…`).
 //
 // A nil receiver is safe — MaybeSpill returns (zero, false) so callers
 // that don't have a dataDir (older test fixtures) degrade silently to
 // the inline-only path.
 type Spiller struct {
 	DataDir string
-	Subdir  string         // defaults to SpillSubdir when empty
+	Subdir  string           // defaults to SpillSubdir when empty
 	Now     func() time.Time // defaults to time.Now when nil
 }
 

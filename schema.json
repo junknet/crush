@@ -21,8 +21,10 @@
           "type": "string",
           "enum": [
             "brain",
+            "plan",
             "worker",
-            "explore"
+            "explore",
+            "auditor"
           ],
           "description": "The model type to use for this agent",
           "default": "brain"
@@ -47,6 +49,20 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "max_turns": {
+          "type": "integer",
+          "description": "Maximum number of LLM turns before the agent stops (0 = unlimited)",
+          "examples": [
+            8
+          ]
+        },
+        "parallel_tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "List of tool names that are allowed to run in parallel within a single turn"
         }
       },
       "additionalProperties": false,
@@ -575,6 +591,11 @@
           },
           "type": "array",
           "description": "List of skill names to disable and hide from the agent"
+        },
+        "disable_suggestion": {
+          "type": "boolean",
+          "description": "Disable ghost-text autocomplete suggestions in the prompt input",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -762,6 +783,13 @@
         "provider_options": {
           "type": "object",
           "description": "Additional provider-specific options for the model"
+        },
+        "fallbacks": {
+          "items": {
+            "$ref": "#/$defs/SelectedModel"
+          },
+          "type": "array",
+          "description": "List of backup model configurations in order of priority"
         }
       },
       "additionalProperties": false,
@@ -823,11 +851,11 @@
         "expires_at"
       ]
     },
-    "ToolGrep": {
+    "ToolAstGrep": {
       "properties": {
         "timeout": {
           "type": "integer",
-          "description": "Timeout for the grep tool call"
+          "description": "Timeout for the ast-grep tool call"
         }
       },
       "additionalProperties": false,
@@ -855,13 +883,26 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "ToolRg": {
+      "properties": {
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout for the rg tool call"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "Tools": {
       "properties": {
         "ls": {
           "$ref": "#/$defs/ToolLs"
         },
-        "grep": {
-          "$ref": "#/$defs/ToolGrep"
+        "rg": {
+          "$ref": "#/$defs/ToolRg"
+        },
+        "ast_grep": {
+          "$ref": "#/$defs/ToolAstGrep"
         }
       },
       "additionalProperties": false,

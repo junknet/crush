@@ -169,7 +169,7 @@ func quickStyle(o quickStyleOpts) Styles {
 		},
 		H4: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Color: hex(o.infoMoreSubtle),
+				Color: hex(o.info),
 				Bold:  ptr(true),
 			},
 		},
@@ -360,7 +360,7 @@ func quickStyle(o quickStyleOpts) Styles {
 			StylePrimitive: ansi.StylePrimitive{
 				BlockSuffix:     "\n",
 				Bold:            ptr(true),
-				Color:           plainFg,
+				Color:           hex(o.fgBase),
 				BackgroundColor: plainBg,
 			},
 		},
@@ -369,7 +369,7 @@ func quickStyle(o quickStyleOpts) Styles {
 				BlockSuffix:     "\n",
 				Bold:            ptr(true),
 				Underline:       ptr(true),
-				Color:           plainFg,
+				Color:           hex(o.fgBase),
 				BackgroundColor: plainBg,
 			},
 		},
@@ -377,34 +377,34 @@ func quickStyle(o quickStyleOpts) Styles {
 			StylePrimitive: ansi.StylePrimitive{
 				BlockSuffix:     "\n",
 				Bold:            ptr(true),
-				Color:           plainFg,
+				Color:           hex(o.fgBase),
 				BackgroundColor: plainBg,
 			},
 		},
 		H3: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				Bold:            ptr(true),
-				Color:           plainFg,
+				Color:           hex(o.fgBase),
 				BackgroundColor: plainBg,
 			},
 		},
 		H4: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				Bold:            ptr(true),
-				Color:           plainFg,
+				Color:           hex(o.fgBase),
 				BackgroundColor: plainBg,
 			},
 		},
 		H5: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				Bold:            ptr(true),
-				Color:           plainFg,
+				Color:           hex(o.fgBase),
 				BackgroundColor: plainBg,
 			},
 		},
 		H6: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
-				Color:           plainFg,
+				Color:           hex(o.fgBase),
 				BackgroundColor: plainBg,
 			},
 		},
@@ -448,12 +448,12 @@ func quickStyle(o quickStyleOpts) Styles {
 		},
 		Link: ansi.StylePrimitive{
 			Underline:       ptr(true),
-			Color:           plainFg,
+			Color:           hex(o.info),
 			BackgroundColor: plainBg,
 		},
 		LinkText: ansi.StylePrimitive{
 			Bold:            ptr(true),
-			Color:           plainFg,
+			Color:           hex(o.info),
 			BackgroundColor: plainBg,
 		},
 		Image: ansi.StylePrimitive{
@@ -642,7 +642,7 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Tool.JobDescription = subtle
 
 	// Agent task styles
-	s.Tool.AgentWorkTag = base.Bold(true).Padding(0, 1).MarginLeft(2).Background(o.infoMoreSubtle).Foreground(o.onPrimary)
+	s.Tool.AgentWorkTag = base.Bold(true).Padding(0, 1).MarginLeft(2).Background(o.info).Foreground(o.bgBase)
 	s.Tool.AgentPrompt = muted
 
 	// Agentic fetch styles
@@ -652,6 +652,7 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Tool.TodoRatio = base.Foreground(o.infoMostSubtle)
 	s.Tool.TodoCompletedIcon = base.Foreground(o.success)
 	s.Tool.TodoInProgressIcon = base.Foreground(o.successMostSubtle)
+	s.Tool.TodoFailedIcon = base.Foreground(o.error)
 	s.Tool.TodoPendingIcon = base.Foreground(o.fgMoreSubtle)
 	s.Tool.TodoStatusNote = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
 	s.Tool.TodoItem = lipgloss.NewStyle().Foreground(o.fgBase)
@@ -913,7 +914,7 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Dialog.Sessions.InfoBlurred = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
 	s.Dialog.Sessions.InfoFocused = lipgloss.NewStyle().Foreground(o.fgBase)
 
-	s.Status.Help = lipgloss.NewStyle().Padding(0, 1)
+	s.Status.Help = lipgloss.NewStyle().Foreground(o.fgMoreSubtle).Padding(0, 1)
 	s.Status.SuccessIndicator = base.Foreground(o.bgLessVisible).Background(o.success).Padding(0, 1).Bold(true).SetString("OKAY!")
 	s.Status.InfoIndicator = s.Status.SuccessIndicator
 	s.Status.UpdateIndicator = s.Status.SuccessIndicator.SetString("HEY!")
@@ -951,8 +952,8 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Pills.TodoProgress = lipgloss.NewStyle().Foreground(o.fgMoreSubtle)
 	s.Pills.TodoCurrentTask = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
 	s.Pills.TodoSpinner = lipgloss.NewStyle().Foreground(o.successMostSubtle)
-	s.Pills.HelpKey = lipgloss.NewStyle().Foreground(o.fgMoreSubtle)
-	s.Pills.HelpText = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
+	s.Pills.HelpKey = lipgloss.NewStyle().Foreground(o.fgBase)
+	s.Pills.HelpText = lipgloss.NewStyle().Foreground(o.fgSubtle)
 	s.Pills.Area = base
 
 	return s

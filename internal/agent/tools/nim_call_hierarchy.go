@@ -25,7 +25,7 @@ const NimCallHierarchyToolName = "nim_call_hierarchy"
 var nimCallHierarchyDescription string
 
 func NewNimCallHierarchyTool(lspManager *lsp.Manager) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		NimCallHierarchyToolName,
 		nimCallHierarchyDescription,
 		func(ctx context.Context, params NimCallHierarchyParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {

@@ -70,7 +70,9 @@ type (
 		Msg  string
 		TTL  time.Duration
 	}
-	ClearStatusMsg struct{}
+	ClearStatusMsg struct {
+		ID uint64
+	}
 )
 
 // IsEmpty checks if the [InfoMsg] is empty.

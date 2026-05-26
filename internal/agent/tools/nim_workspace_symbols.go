@@ -22,7 +22,7 @@ const NimWorkspaceSymbolsToolName = "nim_workspace_symbols"
 var nimWorkspaceSymbolsDescription string
 
 func NewNimWorkspaceSymbolsTool(lspManager *lsp.Manager) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		NimWorkspaceSymbolsToolName,
 		nimWorkspaceSymbolsDescription,
 		func(ctx context.Context, params NimWorkspaceSymbolsParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {

@@ -25,6 +25,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agenttools "github.com/charmbracelet/crush/internal/agent/tools"
@@ -154,6 +155,11 @@ type (
 	// closeDialogMsg is sent to close the current dialog.
 	closeDialogMsg struct{}
 
+	restoreCanceledPromptMsg struct {
+		sessionID string
+		text      string
+	}
+
 	// hyperRefreshDoneMsg is sent after a silent Hyper OAuth refresh
 	// finishes. It carries the original model-selection action so the
 	// selection can be resumed.
@@ -213,6 +219,9 @@ type UI struct {
 	ctrlCArmedAt time.Time
 
 	header *header
+
+	headerAnimFrame   int
+	headerAnimTicking bool
 
 	// sendProgressBar instructs the TUI to send progress bar updates to the
 	// terminal.
@@ -633,6 +642,14 @@ func (m *UI) loadMCPrompts() tea.Msg {
 }
 
 // Update handles updates to the UI model.
+type headerAnimTickMsg struct{}
+
+func tickHeaderAnim() tea.Cmd {
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return headerAnimTickMsg{}
+	})
+}
+
 func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	if m.hasSession() && m.isAgentBusy() {
@@ -645,6 +662,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Update terminal capabilities
 	m.caps.Update(msg)
 	switch msg := msg.(type) {
+	case headerAnimTickMsg:
+		m.headerAnimFrame++
+		m.headerAnimTicking = false
 	case tea.EnvMsg:
 		// Is this Windows Terminal?
 		if !m.sendProgressBar {
@@ -671,6 +691,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.session = msg.session
 		m.sessionFiles = msg.files
 		cmds = append(cmds, m.startLSPs(msg.lspFilePaths()))
+		if err := m.com.Workspace.RepairSessionMessages(context.Background(), m.session.ID); err != nil {
+			slog.Error("Failed to repair session messages", "error", err)
+		}
 		msgs, err := m.com.Workspace.ListMessages(context.Background(), m.session.ID)
 		if err != nil {
 			cmds = append(cmds, util.ReportError(err))
@@ -701,15 +724,27 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.startLSPs(paths))
 
 	case sendMessageMsg:
-		// Keyboard submit re-engages follow mode: snap to bottom so the
-		// agent's response streams in view even if the user previously
-		// scrolled up.
-		m.chat.ScrollToBottom()
+		// Keyboard submit is an explicit user action: force-snap to bottom
+		// and re-engage follow mode regardless of where the user previously
+		// scrolled. free-code/REPL pins this in a useEffect so a buffered
+		// wheel event between submit-fire and commit can't yank it back —
+		// in Bubble Tea the equivalent is to use the Force variant here so
+		// the next stream tick can't race the regular ScrollToBottom.
+		m.chat.ForceScrollToBottom()
 		cmds = append(cmds, m.sendMessage(msg.Content, msg.Attachments...))
 
 	case relay.RelayPromptMsg:
-		m.chat.ScrollToBottom()
+		m.chat.ForceScrollToBottom()
 		cmds = append(cmds, m.sendMessage(msg.Text))
+
+	case relay.RelayCancelMsg:
+		if m.isAgentBusy() {
+			if cmd := m.cancelAgent(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		} else if m.hasSession() && m.hasUnfinishedChatItem() {
+			cmds = append(cmds, m.repairInterruptedSession())
+		}
 
 	case relay.RelayModelUpdateMsg:
 		_ = m.com.Workspace.UpdateAgentModel(context.TODO())
@@ -744,6 +779,16 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.promptHistory.messages = msg.messages
 		m.promptHistory.index = -1
 		m.promptHistory.draft = ""
+
+	case restoreCanceledPromptMsg:
+		if m.session != nil && m.session.ID == msg.sessionID && strings.TrimSpace(m.textarea.Value()) == "" && msg.text != "" {
+			prevHeight := m.textarea.Height()
+			m.textarea.SetValue(msg.text)
+			m.textarea.MoveToEnd()
+			m.promptHistory.draft = msg.text
+			m.promptHistory.index = -1
+			cmds = append(cmds, m.updateTextareaWithPrevHeight(nil, prevHeight))
+		}
 
 	case closeDialogMsg:
 		m.dialog.CloseFrontDialog()
@@ -998,25 +1043,19 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if cmd := m.chat.ScrollByAndAnimate(-MouseScrollThreshold); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				if !m.chat.SelectedItemInView() {
-					m.chat.SelectPrev()
-					if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				}
+				m.chat.SelectFirstInView()
 			case tea.MouseWheelDown:
 				if cmd := m.chat.ScrollByAndAnimate(MouseScrollThreshold); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				if !m.chat.SelectedItemInView() {
-					if m.chat.AtBottom() {
-						m.chat.SelectLast()
-					} else {
-						m.chat.SelectNext()
-					}
-					if cmd := m.chat.ScrollToSelectedAndAnimate(); cmd != nil {
+				if m.chat.AtBottom() {
+					// Re-engage follow mode: ScrollToSelected below can flip it off.
+					if cmd := m.chat.ForceScrollToBottomAndAnimate(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
+					m.chat.SelectLast()
+				} else {
+					m.chat.SelectLastInView()
 				}
 			}
 		}
@@ -1025,10 +1064,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd := m.chat.Animate(msg); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
-			// Follow-mode-aware sticky bottom: only auto-scroll when
-			// the user has not scrolled up. Mouse-wheel up flips
-			// chat.follow off; keyboard submit / ScrollToBottom
-			// flips it back on.
+			// Streaming ticks are passive output. They must honor follow
+			// mode so mouse-wheel up can keep the viewport unlocked.
 			if m.chat.Follow() {
 				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
 					cmds = append(cmds, cmd)
@@ -1074,14 +1111,10 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Type == util.InfoTypeError {
 			slog.Error("Error reported", "error", msg.Msg)
 		}
-		m.status.SetInfoMsg(msg)
-		ttl := msg.TTL
-		if ttl <= 0 {
-			ttl = DefaultStatusTTL
-		}
-		cmds = append(cmds, clearInfoMsgCmd(ttl))
+		msgID := m.status.SetInfoMsg(msg)
+		cmds = append(cmds, clearInfoMsgCmd(msgID, statusMessageTTL(msg)))
 	case util.ClearStatusMsg:
-		m.status.ClearInfoMsg()
+		m.status.ClearInfoMsg(msg.ID)
 	case completions.CompletionItemsLoadedMsg:
 		if m.completionsOpen {
 			m.completions.SetItems(msg.Files, msg.Resources)
@@ -1102,7 +1135,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Textarea placeholder logic
 	if m.isAgentBusy() {
-		m.textarea.Placeholder = m.workingPlaceholder
+		m.textarea.Placeholder = m.activeEditorBusyPlaceholder()
 	} else {
 		m.textarea.Placeholder = m.readyPlaceholder
 	}
@@ -1110,6 +1143,12 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// at this point this can only handle [message.Attachment] message, and we
 	// should return all cmds anyway.
 	_ = m.attachments.Update(msg)
+
+	if m.isAgentBusy() && !m.headerAnimTicking {
+		m.headerAnimTicking = true
+		cmds = append(cmds, tickHeaderAnim())
+	}
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -1159,6 +1198,33 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 			}
 		}
 	}
+
+	type shellIDer interface {
+		ShellID() string
+	}
+
+	filteredItems := make([]chat.MessageItem, 0, len(items))
+	lastJobOutputIndex := make(map[string]int)
+
+	for _, item := range items {
+		if sIDer, ok := item.(shellIDer); ok {
+			shellID := sIDer.ShellID()
+			if shellID != "" {
+				if prevIdx, exists := lastJobOutputIndex[shellID]; exists {
+					filteredItems[prevIdx] = item
+					continue
+				} else {
+					lastJobOutputIndex[shellID] = len(filteredItems)
+					filteredItems = append(filteredItems, item)
+				}
+			} else {
+				filteredItems = append(filteredItems, item)
+			}
+		} else {
+			filteredItems = append(filteredItems, item)
+		}
+	}
+	items = filteredItems
 
 	m.chat.SetMessages(items...)
 	if cmd := m.chat.ForceScrollToBottomAndAnimate(); cmd != nil {
@@ -1270,6 +1336,20 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			m.chat.AppendMessages(infoItem)
 			if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
 				cmds = append(cmds, cmd)
+			}
+			// Plan-mode closed loop: when the plan agent finishes its turn,
+			// auto-pre-fill `/accept` in the composer so the user only has
+			// to hit Enter to execute, and surface a success-styled toast
+			// with the alternatives. Avoids forcing modal dialogs while
+			// keeping the UX one keystroke away from go.
+			if m.currentSessionMode().IsPlan() && m.textarea.Value() == "" {
+				m.textarea.SetValue("/accept")
+				m.textarea.MoveToEnd()
+				cmds = append(cmds, util.CmdHandler(util.InfoMsg{
+					Type: util.InfoTypeSuccess,
+					Msg:  `Plan ready · press Enter to run /accept · edit textarea for /cancel-plan instead`,
+					TTL:  15 * time.Second,
+				}))
 			}
 		}
 	case message.Tool:
@@ -2005,6 +2085,10 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			}
 			return tea.Batch(cmds...)
 		}
+		if isEscapeKey && m.hasSession() && m.hasUnfinishedChatItem() {
+			cmds = append(cmds, m.repairInterruptedSession())
+			return tea.Batch(cmds...)
+		}
 		if (m.state == uiChat || m.state == uiLanding) &&
 			(m.focus == uiFocusMain || m.mouseAutoScrollPending || (m.chat != nil && m.chat.mouseDown)) {
 			m.stopMouseAutoScroll()
@@ -2112,6 +2196,11 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			}
 
 			switch {
+			case msg.String() == "backspace" && m.textarea.Value() == "" && len(m.attachments.List()) > 0:
+				// Backspace on empty input removes the most-recent attachment.
+				list := m.attachments.List()
+				m.attachments.SetList(list[:len(list)-1])
+
 			case key.Matches(msg, m.keyMap.Editor.AddImage):
 				if !m.currentModelSupportsImages() {
 					break
@@ -2162,6 +2251,55 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					return m.newSession()
 				}
 
+				// Plan-mode closed loop: `/accept` (or `/run`) commits the
+				// most-recent plan — flip the session back to execute mode
+				// and tell brain to implement what it just designed in the
+				// same session, so the plan text stays in context and we
+				// don't have to copy-paste it. `/cancel-plan` is the
+				// chicken-out path: leave plan mode without acting.
+				if value == "/accept" || value == "/run" {
+					if !m.hasSession() {
+						return nil
+					}
+					if !m.currentSessionMode().IsPlan() {
+						return util.ReportWarn("Not in plan mode")
+					}
+					if m.isAgentBusy() {
+						return util.ReportWarn("Agent is busy, please wait...")
+					}
+					m.setCurrentSessionMode(session.ModeExecute)
+					innerCmds := []tea.Cmd{
+						util.CmdHandler(util.InfoMsg{
+							Type: util.InfoTypeInfo,
+							Msg:  "Plan accepted · mode → execute · implementing now",
+							TTL:  4 * time.Second,
+						}),
+						m.sendMessage("Implement the plan you produced above. Use worker sub-agents for any non-trivial edits and keep me in the loop with concise progress."),
+					}
+					if saveCmd := m.saveCurrentSessionMode(); saveCmd != nil {
+						innerCmds = append(innerCmds, saveCmd)
+					}
+					m.historyReset()
+					return tea.Batch(innerCmds...)
+				}
+				if value == "/cancel-plan" || value == "/exit-plan" {
+					if !m.currentSessionMode().IsPlan() {
+						return util.ReportWarn("Not in plan mode")
+					}
+					m.setCurrentSessionMode(session.ModeExecute)
+					innerCmds := []tea.Cmd{
+						util.CmdHandler(util.InfoMsg{
+							Type: util.InfoTypeInfo,
+							Msg:  "Plan mode disabled",
+							TTL:  3 * time.Second,
+						}),
+					}
+					if saveCmd := m.saveCurrentSessionMode(); saveCmd != nil {
+						innerCmds = append(innerCmds, saveCmd)
+					}
+					return tea.Batch(innerCmds...)
+				}
+
 				attachments := m.attachments.List()
 				m.attachments.Reset()
 				if len(value) == 0 && !message.ContainsTextAttachment(attachments) {
@@ -2206,22 +2344,14 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				m.closeCompletions()
 				cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, prevHeight))
 			case key.Matches(msg, m.keyMap.Editor.HistoryPrev):
-				if m.isAtEditorStart() {
-					cmd := m.handleHistoryUp(msg)
-					if cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				} else {
-					cmds = append(cmds, m.updateTextarea(msg))
+				cmd := m.handleHistoryUp(msg)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Editor.HistoryNext):
-				if m.isAtEditorEnd() {
-					cmd := m.handleHistoryDown(msg)
-					if cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-				} else {
-					cmds = append(cmds, m.updateTextarea(msg))
+				cmd := m.handleHistoryDown(msg)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
 				}
 			case key.Matches(msg, m.keyMap.Editor.Escape):
 				cmd := m.handleHistoryEscape(msg)
@@ -2406,11 +2536,18 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 		m.detailsOpen,
 		area.Dx(),
 		m.hyperCredits,
+		m.isAgentBusy(),
+		m.activeRunStatusText(),
+		m.headerAnimFrame,
 	)
 }
 
 // Draw implements [uv.Drawable] and draws the UI model.
 func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
+	isOnboarding := m.state == uiOnboarding
+	m.status.SetHideHelp(isOnboarding)
+	m.status.SetStatusLine(m.runtimeStatusLine())
+
 	layout := m.generateLayout(area.Dx(), area.Dy())
 
 	if m.layout != layout {
@@ -2467,10 +2604,7 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		}
 	}
 
-	isOnboarding := m.state == uiOnboarding
-
 	// Add status and help layer
-	m.status.SetHideHelp(isOnboarding)
 	m.status.Draw(scr, layout.status)
 
 	// Draw completions popup if open
@@ -2547,8 +2681,12 @@ func (m *UI) offsetEditorCursor(cur *tea.Cursor) *tea.Cursor {
 	if cur == nil {
 		return nil
 	}
-	cur.X++                            // Adjust for app margins.
-	cur.Y += m.layout.editor.Min.Y + 1 // Offset for attachments row.
+	cur.X++ // Adjust for app margins.
+	if len(m.attachments.List()) > 0 {
+		cur.Y += m.layout.editor.Min.Y + 1 // Offset for attachments row.
+	} else {
+		cur.Y += m.layout.editor.Min.Y
+	}
 	return cur
 }
 
@@ -2917,8 +3055,10 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 	// The screen area we're working with
 	area := image.Rect(0, 0, w, h)
 
-	// The help height
-	helpHeight := 1
+	helpHeight := 0
+	if m.status != nil && m.status.HasContent() {
+		helpHeight = 1
+	}
 	// The editor height: textarea height + margin for attachments and bottom spacing.
 	editorHeight := m.textarea.Height() + editorHeightMargin
 	// The sidebar width
@@ -2927,7 +3067,7 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 	const landingHeaderHeight = 4
 
 	var helpKeyMap help.KeyMap = m
-	if m.status != nil && m.status.ShowingAll() {
+	if helpHeight > 0 && m.status != nil && m.status.ShowingAll() {
 		for _, row := range helpKeyMap.FullHelp() {
 			helpHeight = max(helpHeight, len(row))
 		}
@@ -2935,10 +3075,15 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 
 	// Add app margins
 	var appRect, helpRect image.Rectangle
-	layout.Vertical(
-		layout.Len(area.Dy()-helpHeight),
-		layout.Fill(1),
-	).Split(area).Assign(&appRect, &helpRect)
+	if helpHeight > 0 {
+		layout.Vertical(
+			layout.Len(area.Dy()-helpHeight),
+			layout.Fill(1),
+		).Split(area).Assign(&appRect, &helpRect)
+	} else {
+		appRect = area
+		helpRect = image.Rect(0, area.Max.Y, area.Dx(), area.Max.Y)
+	}
 	appRect.Min.Y += 1
 	appRect.Max.Y -= 1
 	helpRect.Min.Y -= 1
@@ -3364,12 +3509,7 @@ var readyPlaceholders = [...]string{
 }
 
 var workingPlaceholders = [...]string{
-	"Working!",
-	"Working...",
-	"Brrrrr...",
-	"Prrrrrrrr...",
-	"Processing...",
-	"Thinking...",
+	"Agent running - Esc cancels",
 }
 
 // randomizePlaceholders selects random placeholder text for the textarea's
@@ -3379,18 +3519,103 @@ func (m *UI) randomizePlaceholders() {
 	m.readyPlaceholder = readyPlaceholders[rand.Intn(len(readyPlaceholders))]
 }
 
-// renderEditorView renders the editor view with attachments if any.
-func (m *UI) renderEditorView(width int) string {
-	var attachmentsView string
-	if len(m.attachments.List()) > 0 {
-		attachmentsView = m.attachments.Render(width)
+func (m *UI) activeEditorBusyPlaceholder() string {
+	status := m.activeRunStatusText()
+	if status == "" {
+		return "Agent running - Esc cancels"
 	}
+	return status + " - Esc cancels"
+}
+
+func (m *UI) runtimeStatusLine() string {
+	if m == nil || m.com == nil || m.com.Workspace == nil {
+		return ""
+	}
+	stats := m.com.Workspace.BackgroundShellStats()
+	parts := make([]string, 0, 4)
+	if busyStatus := m.activeRunStatusText(); busyStatus != "" {
+		parts = append(parts, busyStatus)
+	} else if m.isAgentBusy() {
+		parts = append(parts, "model running")
+	}
+	if stats.Running > 0 {
+		parts = append(parts, fmt.Sprintf("jobs %d", stats.Running))
+	}
+	if stats.ActiveMonitors > 0 {
+		parts = append(parts, fmt.Sprintf("monitor %d", stats.ActiveMonitors))
+	}
+	if contextPercent := m.contextUsagePercent(); contextPercent != "" {
+		parts = append(parts, "ctx "+contextPercent)
+	}
+	return strings.Join(parts, "  ·  ")
+}
+
+func (m *UI) contextUsagePercent() string {
+	if m == nil || m.com == nil || m.com.Config() == nil || m.session == nil {
+		return ""
+	}
+	agentCfg, ok := m.com.Config().Agents[config.AgentBrain]
+	if !ok {
+		return ""
+	}
+	model := m.com.Config().GetModelByType(agentCfg.Model)
+	if model == nil || model.ContextWindow <= 0 {
+		return ""
+	}
+	usedTokens := m.session.CompletionTokens + m.session.PromptTokens
+	percentage := (float64(usedTokens) / float64(model.ContextWindow)) * 100
+	return fmt.Sprintf("%d%%", int(percentage))
+}
+
+func statusMessageTTL(msg util.InfoMsg) time.Duration {
+	ttl := msg.TTL
+	if ttl <= 0 {
+		ttl = DefaultStatusTTL
+	}
+	switch msg.Type {
+	case util.InfoTypeError:
+		return maxDuration(ttl, DefaultErrorStatusTTL)
+	case util.InfoTypeWarn:
+		return maxDuration(ttl, DefaultWarnStatusTTL)
+	default:
+		return ttl
+	}
+}
+
+func maxDuration(left, right time.Duration) time.Duration {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+// renderEditorView renders the editor view with attachments if any.
+//
+// Layout intent: the attachment chip strip lives **inside** the editor
+// block, indented to the same column as the textarea prompt (`::: `). That
+// way pasted images and file chips read as part of the user's current
+// turn — same affordance free-code (Claude Code) uses where image refs
+// sit inline in the composer — instead of a free-floating row above it
+// that looks like static UI chrome.
+func (m *UI) renderEditorView(width int) string {
 	editorBody := m.textarea.View()
 	if g := m.ghostSuffix(); g != "" {
 		editorBody = appendGhostToEditor(editorBody, g)
 	}
+	if len(m.attachments.List()) == 0 {
+		return strings.Join([]string{
+			editorBody,
+			"", // margin at bottom of editor
+		}, "\n")
+	}
+	// Prompt width is the visual width of `::: ` (4 cells). Indent chips
+	// to that column so they align with the cursor's leftmost typing
+	// position — visually they become an inline continuation of input.
+	const promptWidth = 4
+	chipsView := m.attachments.Render(max(0, width-promptWidth))
+	chipsView = lipgloss.NewStyle().PaddingLeft(promptWidth).Render(chipsView)
 	return strings.Join([]string{
-		attachmentsView,
+		chipsView,
 		editorBody,
 		"", // margin at bottom of editor
 	}, "\n")
@@ -3620,7 +3845,7 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	cmds = append(cmds, func() tea.Msg {
 		err := m.com.Workspace.AgentRun(context.Background(), sessionID, content, planMode, attachments...)
 		if err != nil {
-			isCancelErr := errors.Is(err, context.Canceled)
+			isCancelErr := errors.Is(err, context.Canceled) || errors.Is(err, agent.ErrRequestCancelled)
 			if isCancelErr {
 				return nil
 			}
@@ -3643,9 +3868,9 @@ func ctrlCTimerCmd() tea.Cmd {
 	})
 }
 
-// cancelAgent cancels the running agent on a single ESC press. Queued
-// prompts (waiting to send) are cleared first; if the queue is empty,
-// the in-flight agent run is cancelled immediately.
+// cancelAgent cancels the running agent on ESC. Always clears the queue
+// and cancels the in-flight run atomically — one press is enough to stop
+// everything, including mid-retry loops.
 func (m *UI) cancelAgent() tea.Cmd {
 	if !m.hasSession() {
 		return nil
@@ -3655,17 +3880,109 @@ func (m *UI) cancelAgent() tea.Cmd {
 		return nil
 	}
 
-	// Clear the queue first if any prompts are pending — that matches
-	// "stop what's about to happen" before "stop what's happening".
-	if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
-		m.com.Workspace.AgentClearQueue(m.session.ID)
-		return nil
-	}
-
-	m.com.Workspace.AgentCancel(m.session.ID)
+	prompts, wasRunning := m.com.Workspace.AgentCancelAndFlush(m.session.ID)
 	m.todoIsSpinning = false
 	m.renderPills()
-	return nil
+	m.appendInterruptDivider()
+
+	// Snapshot whatever the user has typed (but not yet sent) into the
+	// composer as the active history draft. Without this, ↑/↓ after ESC
+	// would treat the unsent text as nothing and overwrite it on the first
+	// historyPrev() call, making the cancel + edit + re-send flow lose the
+	// in-progress draft.
+	m.promptHistory.draft = m.textarea.Value()
+	m.promptHistory.index = -1
+
+	if len(prompts) > 0 && wasRunning {
+		slog.Info("Cancelled inflight, drained queued prompts to composer", "session_id", m.session.ID, "count", len(prompts))
+		var mergedPrompt strings.Builder
+		currentDraft := m.textarea.Value()
+		if currentDraft != "" {
+			mergedPrompt.WriteString(currentDraft)
+			mergedPrompt.WriteString("\n\n")
+		}
+		for i, p := range prompts {
+			if i > 0 {
+				mergedPrompt.WriteString("\n\n")
+			}
+			mergedPrompt.WriteString(p)
+		}
+		m.textarea.SetValue(mergedPrompt.String())
+		m.textarea.MoveToEnd()
+	}
+	return tea.Batch(
+		m.restoreLastUserPrompt(m.session.ID),
+		m.repairInterruptedSession(),
+	)
+}
+
+func (m *UI) hasUnfinishedChatItem() bool {
+	if m.chat == nil {
+		return false
+	}
+	for i := 0; i < m.chat.list.Len(); i++ {
+		item := m.chat.list.ItemAt(i)
+		if item != nil && !item.Finished() {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *UI) appendInterruptDivider() {
+	if m.chat == nil || m.session == nil {
+		return
+	}
+	id := m.interruptDividerSourceID()
+	if m.chat.MessageItem(chat.InterruptDividerID(id)) != nil {
+		return
+	}
+	m.chat.AppendMessages(chat.NewInterruptDividerItem(m.com.Styles, id))
+	m.chat.ForceScrollToBottom()
+}
+
+func (m *UI) interruptDividerSourceID() string {
+	for i := m.chat.list.Len() - 1; i >= 0; i-- {
+		item := m.chat.list.ItemAt(i)
+		if item == nil || item.Finished() {
+			continue
+		}
+		if identifiable, ok := item.(chat.Identifiable); ok && identifiable.ID() != "" {
+			return identifiable.ID()
+		}
+	}
+	return "esc-cancel-" + m.session.ID
+}
+
+func (m *UI) repairInterruptedSession() tea.Cmd {
+	if !m.hasSession() {
+		return nil
+	}
+	m.appendInterruptDivider()
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		if err := m.com.Workspace.RepairSessionMessages(context.Background(), sessionID); err != nil {
+			slog.Error("Failed to repair interrupted session messages", "session_id", sessionID, "error", err)
+			return util.NewErrorMsg(err)
+		}
+		return m.loadSession(sessionID)()
+	}
+}
+
+func (m *UI) restoreLastUserPrompt(sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		messages, err := m.com.Workspace.ListUserMessages(context.Background(), sessionID)
+		if err != nil || len(messages) == 0 {
+			if err != nil {
+				slog.Error("Failed to restore cancelled prompt", "session_id", sessionID, "error", err)
+			}
+			return nil
+		}
+		return restoreCanceledPromptMsg{
+			sessionID: sessionID,
+			text:      messages[0].Content().Text,
+		}
+	}
 }
 
 // clearComposer clears the current draft, attachments, and completion state.
@@ -3950,7 +4267,14 @@ func (m *UI) handlePasteMsg(msg tea.PasteMsg) tea.Cmd {
 	}
 
 	if m.focus != uiFocusEditor {
-		return nil
+		// Snap focus to editor so the paste lands somewhere visible.
+		m.focus = uiFocusEditor
+		cmds := []tea.Cmd{m.textarea.Focus()}
+		m.chat.Blur()
+		if cmd := m.chat.ForceScrollToBottomAndAnimate(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return tea.Batch(append(cmds, func() tea.Msg { return msg })...)
 	}
 
 	if hasPasteExceededThreshold(msg) {
@@ -4303,55 +4627,55 @@ func (m *UI) handleSchedulerEvent(ev scheduler.Event) tea.Cmd {
 
 	switch ev.Kind {
 	case scheduler.EventTaskPlanned:
-		m.status.SetInfoMsg(util.InfoMsg{
+		msgID := m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeInfo,
 			Msg:  "Task planned: " + taskLabel,
 			TTL:  3 * time.Second,
 		})
-		return clearInfoMsgCmd(3 * time.Second)
+		return clearInfoMsgCmd(msgID, 3*time.Second)
 	case scheduler.EventTaskStarted:
-		m.status.SetInfoMsg(util.InfoMsg{
+		msgID := m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeInfo,
 			Msg:  "Task started: " + taskLabel,
 			TTL:  3 * time.Second,
 		})
-		return clearInfoMsgCmd(3 * time.Second)
+		return clearInfoMsgCmd(msgID, 3*time.Second)
 	case scheduler.EventTaskProgress:
 		msg := ev.Status
 		if msg == "" {
 			msg = taskLabel
 		}
-		m.status.SetInfoMsg(util.InfoMsg{
+		msgID := m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeInfo,
 			Msg:  "Task progress: " + msg,
 			TTL:  3 * time.Second,
 		})
-		return clearInfoMsgCmd(3 * time.Second)
+		return clearInfoMsgCmd(msgID, 3*time.Second)
 	case scheduler.EventTaskFinished:
-		m.status.SetInfoMsg(util.InfoMsg{
+		msgID := m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeSuccess,
 			Msg:  "Task finished: " + taskLabel,
 			TTL:  4 * time.Second,
 		})
-		return clearInfoMsgCmd(4 * time.Second)
+		return clearInfoMsgCmd(msgID, 4*time.Second)
 	case scheduler.EventTaskFailed:
 		msg := ev.Error
 		if msg == "" {
 			msg = "Task failed: " + taskLabel
 		}
-		m.status.SetInfoMsg(util.InfoMsg{
+		msgID := m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeError,
 			Msg:  msg,
-			TTL:  6 * time.Second,
+			TTL:  DefaultErrorStatusTTL,
 		})
-		return clearInfoMsgCmd(6 * time.Second)
+		return clearInfoMsgCmd(msgID, DefaultErrorStatusTTL)
 	default:
-		m.status.SetInfoMsg(util.InfoMsg{
+		msgID := m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeInfo,
 			Msg:  "Task event: " + taskLabel,
 			TTL:  3 * time.Second,
 		})
-		return clearInfoMsgCmd(3 * time.Second)
+		return clearInfoMsgCmd(msgID, 3*time.Second)
 	}
 }
 

@@ -379,6 +379,33 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func (m *UI) activeRunStatusText() string {
+	if !m.isAgentBusy() {
+		return ""
+	}
+	for _, entry := range m.subAgents {
+		if entry.Status != subAgentRunning {
+			continue
+		}
+		role := subAgentRole(entry.Profile)
+		if status := activeSubAgentStatus(entry); status != "" {
+			return role + " " + status
+		}
+		return role + " agent"
+	}
+	return "model running"
+}
+
+func activeSubAgentStatus(entry subAgentEntry) string {
+	status := strings.TrimSpace(entry.LastStatus)
+	switch status {
+	case "", "planned", "running", "done", "failed":
+		return ""
+	default:
+		return compactSubAgentText(status)
+	}
+}
+
 // truncatePrompt shortens a multi-line prompt to a single ellipsised
 // line of the given width. width <= 4 returns "…".
 func truncatePrompt(p string, width int) string {

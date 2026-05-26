@@ -104,7 +104,7 @@ func WriteMemoryFile(dataDir, workspacePath string, fm Frontmatter, body string)
 
 // AppendEntry adds one bullet line to MEMORY.md:
 //
-//	- [title](relPath) — hook
+//   - [title](relPath) — hook
 //
 // Concurrent callers within this process are serialised by an in-process
 // mutex; the file is opened with O_APPEND so external writers are still

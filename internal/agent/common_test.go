@@ -81,7 +81,7 @@ func testEnv(t *testing.T) fakeEnv {
 	require.NoError(t, err)
 
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
+	sessions := session.NewService(q, conn, workingDir)
 	messages := message.NewService(q)
 
 	permissions := permission.NewPermissionService(workingDir, []string{})
@@ -179,12 +179,39 @@ func normalizePromptPayload(value any) {
 				normalizeMessagePayload(msgMap)
 			}
 		}
+		if tools, ok := v["tools"].([]any); ok {
+			for _, tool := range tools {
+				if toolMap, ok := tool.(map[string]any); ok {
+					normalizeToolPayload(toolMap)
+				}
+			}
+		}
 		for _, nested := range v {
 			normalizePromptPayload(nested)
 		}
 	case []any:
 		for _, nested := range v {
 			normalizePromptPayload(nested)
+		}
+	}
+}
+
+func normalizeToolPayload(tool map[string]any) {
+	recursiveClearDescription(tool)
+}
+
+func recursiveClearDescription(m map[string]any) {
+	for k, v := range m {
+		if k == "description" {
+			m[k] = ""
+		} else if nextMap, ok := v.(map[string]any); ok {
+			recursiveClearDescription(nextMap)
+		} else if nextSlice, ok := v.([]any); ok {
+			for _, item := range nextSlice {
+				if itemMap, ok := item.(map[string]any); ok {
+					recursiveClearDescription(itemMap)
+				}
+			}
 		}
 	}
 }
@@ -299,8 +326,8 @@ func workerAgent(r *vcr.Recorder, env fakeEnv, primary, title fantasy.LanguageMo
 		tools.NewEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewMultiEditTool(nil, env.permissions, env.history, *env.filetracker, env.workingDir),
 		tools.NewFetchTool(env.permissions, env.workingDir, r.GetDefaultClient()),
-		tools.NewGlobTool(env.workingDir),
-		tools.NewGrepTool(env.workingDir, cfg.Config().Tools.Grep),
+		tools.NewSearchTool(env.permissions, env.workingDir),
+		tools.NewRgTool(env.permissions, env.workingDir, cfg.Config().Tools.Rg),
 		tools.NewLsTool(env.permissions, env.workingDir, cfg.Config().Tools.Ls),
 		tools.NewSourcegraphTool(r.GetDefaultClient()),
 		tools.NewViewTool(nil, env.permissions, *env.filetracker, nil, env.workingDir),

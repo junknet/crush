@@ -531,6 +531,27 @@ func (a *AssistantMessageItem) renderSpinning() string {
 	} else if a.message.IsSummaryMessage {
 		label = "Summarizing"
 	}
+
+	// Show elapsed waiting / thinking time to expose first-byte latency
+	hasContent := len(a.message.Content().Text) > 0
+	reasoning := a.message.ReasoningContent()
+	hasThinking := len(reasoning.Thinking) > 0
+	hasReasoningStarted := reasoning.StartedAt > 0 && reasoning.FinishedAt == 0
+	if a.message.CreatedAt > 0 {
+		elapsed := time.Now().Unix() - a.message.CreatedAt
+		if elapsed >= 0 {
+			if !hasContent && !hasThinking && hasReasoningStarted {
+				label = fmt.Sprintf("Reasoning privately, waiting for visible output... (%ds)", elapsed)
+			} else if !hasContent && !hasThinking {
+				label = fmt.Sprintf("Waiting for first model event... (%ds)", elapsed)
+			} else if hasThinking && reasoning.FinishedAt == 0 {
+				label = fmt.Sprintf("Thinking... (%ds)", elapsed)
+			} else {
+				label = fmt.Sprintf("%s (%ds)", label, elapsed)
+			}
+		}
+	}
+
 	// One-cell braille spinner + label. The anim instance still drives
 	// the tea.Tick cycle so list-cache invalidation continues at 20fps
 	// while spinning; we just discard anim's noisy visual output.

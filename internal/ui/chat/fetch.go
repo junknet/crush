@@ -165,7 +165,7 @@ type WebSearchToolRenderContext struct{}
 func (w *WebSearchToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if opts.IsPending() {
-		return pendingTool(sty, "Search", opts.Compact)
+		return pendingTool(sty, tools.WebSearchToolName, opts.Compact)
 	}
 
 	var params tools.WebSearchParams
@@ -174,7 +174,7 @@ func (w *WebSearchToolRenderContext) RenderTool(sty *styles.Styles, width int, o
 	}
 
 	toolParams := []string{params.Query}
-	header := toolHeader(sty, opts.Status, "Search", cappedWidth, opts.Compact, toolParams...)
+	header := toolHeader(sty, opts.Status, tools.WebSearchToolName, cappedWidth, opts.Compact, toolParams...)
 	if opts.Compact {
 		return header
 	}

@@ -153,20 +153,34 @@ func FormatTodosList(sty *styles.Styles, todos []session.Todo, inProgressIcon st
 		switch todo.Status {
 		case session.TodoStatusCompleted:
 			prefix = sty.Tool.TodoCompletedIcon.Render(styles.TodoCompletedIcon) + " "
+			textStyle = textStyle.Faint(true)
 		case session.TodoStatusInProgress:
-			prefix = sty.Tool.TodoInProgressIcon.Render(inProgressIcon + " ")
+			prefix = sty.Tool.TodoInProgressIcon.Render(styles.TodoInProgressIcon) + " "
+			textStyle = textStyle.Bold(true)
+		case session.TodoStatusFailed:
+			prefix = sty.Tool.TodoFailedIcon.Render(styles.TodoFailedIcon) + " "
+			textStyle = textStyle.Foreground(sty.Tool.TodoFailedIcon.GetForeground())
 		default:
 			prefix = sty.Tool.TodoPendingIcon.Render(styles.TodoPendingIcon) + " "
 		}
 
-		text := todo.Content
-		if todo.Status == session.TodoStatusInProgress && todo.ActiveForm != "" {
-			text = todo.ActiveForm
-		}
-		line := prefix + textStyle.Render(text)
-		line = ansi.Truncate(line, width, "…")
+		subjectLine := prefix + textStyle.Render(todo.Content)
+		subjectLine = ansi.Truncate(subjectLine, width, "…")
 
-		lines = append(lines, line)
+		var itemBlock string
+		if todo.Status == session.TodoStatusInProgress && todo.ActiveForm != "" {
+			activity := todo.ActiveForm
+			if !strings.HasSuffix(activity, "…") && !strings.HasSuffix(activity, "...") {
+				activity += "…"
+			}
+			activityLine := "  " + sty.Tool.TodoItem.Faint(true).Render(activity)
+			activityLine = ansi.Truncate(activityLine, width, "…")
+			itemBlock = subjectLine + "\n" + activityLine
+		} else {
+			itemBlock = subjectLine
+		}
+
+		lines = append(lines, itemBlock)
 	}
 
 	return strings.Join(lines, "\n")
@@ -186,7 +200,9 @@ func statusOrder(s session.TodoStatus) int {
 		return 0
 	case session.TodoStatusInProgress:
 		return 1
-	default:
+	case session.TodoStatusFailed:
 		return 2
+	default:
+		return 3
 	}
 }

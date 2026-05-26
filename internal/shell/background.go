@@ -116,7 +116,16 @@ type BackgroundShell struct {
 
 // BackgroundShellManager manages background shell instances.
 type BackgroundShellManager struct {
-	shells *csync.Map[string, *BackgroundShell]
+	shells         *csync.Map[string, *BackgroundShell]
+	activeMonitors atomic.Int64
+}
+
+// BackgroundShellStats summarizes background job and monitor activity.
+type BackgroundShellStats struct {
+	Total          int
+	Running        int
+	Completed      int
+	ActiveMonitors int
 }
 
 // idCounter assigns globally-unique background job IDs across all managers.
@@ -138,9 +147,9 @@ func NewBackgroundShellManager() *BackgroundShellManager {
 // sessionID ties the job back to the conversation that launched it so a
 // completion event can wake the right session; pass "" if unknown.
 func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, blockFuncs []BlockFunc, command string, description string, sessionID string) (*BackgroundShell, error) {
-	// Check job limit
-	if m.shells.Len() >= MaxBackgroundJobs {
-		return nil, fmt.Errorf("maximum number of background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
+	m.Cleanup()
+	if stats := m.Stats(); stats.Running >= MaxBackgroundJobs {
+		return nil, fmt.Errorf("maximum number of running background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
 	}
 
 	id := fmt.Sprintf("%03X", idCounter.Add(1))
@@ -257,7 +266,9 @@ func (m *BackgroundShellManager) StartMonitor(shellID, pattern string, timeout t
 		return fmt.Errorf("StartMonitor: invalid pattern %q: %w", pattern, err)
 	}
 
+	m.activeMonitors.Add(1)
 	go func() {
+		defer m.activeMonitors.Add(-1)
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		deadline := time.After(timeout)
@@ -378,6 +389,25 @@ func (m *BackgroundShellManager) KillBySession(sessionID string) int {
 		<-shell.done
 	}
 	return len(victims)
+}
+
+// Stats returns a point-in-time summary of tracked jobs and active monitors.
+func (m *BackgroundShellManager) Stats() BackgroundShellStats {
+	if m == nil {
+		return BackgroundShellStats{}
+	}
+	stats := BackgroundShellStats{
+		Total:          m.shells.Len(),
+		ActiveMonitors: int(m.activeMonitors.Load()),
+	}
+	for shell := range m.shells.Seq() {
+		if shell.IsDone() {
+			stats.Completed++
+		} else {
+			stats.Running++
+		}
+	}
+	return stats
 }
 
 // BackgroundShellInfo contains information about a background shell.

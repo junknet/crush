@@ -99,32 +99,32 @@ const AgenticFetchToolName = tools.AgenticFetchToolName
 // agentic_fetch tool.
 type AgenticFetchPermissionsParams = tools.AgenticFetchPermissionsParams
 
-const GlobToolName = "glob"
+const FdToolName = "fd"
 
-// GlobParams represents the parameters for the glob tool.
-type GlobParams struct {
+// FdParams represents the parameters for the fd tool.
+type FdParams struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path"`
 }
 
-// GlobResponseMetadata represents the metadata for a glob tool response.
-type GlobResponseMetadata struct {
+// FdResponseMetadata represents the metadata for a fd tool response.
+type FdResponseMetadata struct {
 	NumberOfFiles int  `json:"number_of_files"`
 	Truncated     bool `json:"truncated"`
 }
 
-const GrepToolName = "grep"
+const RgToolName = "rg"
 
-// GrepParams represents the parameters for the grep tool.
-type GrepParams struct {
+// RgParams represents the parameters for the rg tool.
+type RgParams struct {
 	Pattern     string `json:"pattern"`
 	Path        string `json:"path"`
 	Include     string `json:"include"`
 	LiteralText bool   `json:"literal_text"`
 }
 
-// GrepResponseMetadata represents the metadata for a grep tool response.
-type GrepResponseMetadata struct {
+// RgResponseMetadata represents the metadata for an rg tool response.
+type RgResponseMetadata struct {
 	NumberOfMatches int  `json:"number_of_matches"`
 	Truncated       bool `json:"truncated"`
 }

@@ -21,6 +21,7 @@ const (
 	TodoStatusPending    TodoStatus = "pending"
 	TodoStatusInProgress TodoStatus = "in_progress"
 	TodoStatusCompleted  TodoStatus = "completed"
+	TodoStatusFailed     TodoStatus = "failed"
 )
 
 type Mode string
@@ -70,6 +71,7 @@ type Session struct {
 	Todos            []Todo
 	CreatedAt        int64
 	UpdatedAt        int64
+	WorkingDir       string
 }
 
 type Service interface {
@@ -96,8 +98,9 @@ type Service interface {
 
 type service struct {
 	*pubsub.Broker[Session]
-	db *sql.DB
-	q  *db.Queries
+	db         *sql.DB
+	q          *db.Queries
+	workingDir string
 }
 
 func (s *service) Create(ctx context.Context, title string, mode Mode) (Session, error) {
@@ -105,6 +108,10 @@ func (s *service) Create(ctx context.Context, title string, mode Mode) (Session,
 		ID:    uuid.New().String(),
 		Title: title,
 		Mode:  string(mode),
+		WorkingDir: sql.NullString{
+			String: s.workingDir,
+			Valid:  s.workingDir != "",
+		},
 	})
 	if err != nil {
 		return Session{}, err
@@ -121,6 +128,10 @@ func (s *service) CreateTaskSession(ctx context.Context, toolCallID, parentSessi
 		ParentSessionID: sql.NullString{String: parentSessionID, Valid: true},
 		Title:           title,
 		Mode:            string(ModeExecute),
+		WorkingDir: sql.NullString{
+			String: s.workingDir,
+			Valid:  s.workingDir != "",
+		},
 	})
 	if err != nil {
 		return Session{}, err
@@ -136,6 +147,10 @@ func (s *service) CreateTitleSession(ctx context.Context, parentSessionID string
 		ParentSessionID: sql.NullString{String: parentSessionID, Valid: true},
 		Title:           "Generate a title",
 		Mode:            string(ModeExecute),
+		WorkingDir: sql.NullString{
+			String: s.workingDir,
+			Valid:  s.workingDir != "",
+		},
 	})
 	if err != nil {
 		return Session{}, err
@@ -182,11 +197,17 @@ func (s *service) Get(ctx context.Context, id string) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
+	if s.workingDir != "" && dbSession.WorkingDir.String != s.workingDir {
+		return Session{}, sql.ErrNoRows
+	}
 	return s.fromDBItem(dbSession), nil
 }
 
 func (s *service) GetLast(ctx context.Context) (Session, error) {
-	dbSession, err := s.q.GetLastSession(ctx)
+	dbSession, err := s.q.GetLastSession(ctx, sql.NullString{
+		String: s.workingDir,
+		Valid:  s.workingDir != "",
+	})
 	if err != nil {
 		return Session{}, err
 	}
@@ -245,7 +266,10 @@ func (s *service) Rename(ctx context.Context, id string, title string) error {
 }
 
 func (s *service) List(ctx context.Context) ([]Session, error) {
-	dbSessions, err := s.q.ListSessions(ctx)
+	dbSessions, err := s.q.ListSessions(ctx, sql.NullString{
+		String: s.workingDir,
+		Valid:  s.workingDir != "",
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -256,15 +280,19 @@ func (s *service) List(ctx context.Context) ([]Session, error) {
 	return sessions, nil
 }
 
-func (s service) fromDBItem(item db.Session) Session {
+func (s *service) fromDBItem(item db.Session) Session {
 	todos, err := unmarshalTodos(item.Todos.String)
 	if err != nil {
 		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
+	title := strings.TrimSpace(item.Title)
+	if title == "" {
+		title = "Untitled Session"
+	}
 	return Session{
 		ID:               item.ID,
 		ParentSessionID:  item.ParentSessionID.String,
-		Title:            item.Title,
+		Title:            title,
 		Mode:             Mode(item.Mode),
 		MessageCount:     item.MessageCount,
 		PromptTokens:     item.PromptTokens,
@@ -274,6 +302,7 @@ func (s service) fromDBItem(item db.Session) Session {
 		Todos:            todos,
 		CreatedAt:        item.CreatedAt,
 		UpdatedAt:        item.UpdatedAt,
+		WorkingDir:       item.WorkingDir.String,
 	}
 }
 
@@ -299,12 +328,13 @@ func unmarshalTodos(data string) ([]Todo, error) {
 	return todos, nil
 }
 
-func NewService(q *db.Queries, conn *sql.DB) Service {
+func NewService(q *db.Queries, conn *sql.DB, workingDir string) Service {
 	broker := pubsub.NewBroker[Session]()
 	return &service{
-		Broker: broker,
-		db:     conn,
-		q:      q,
+		Broker:     broker,
+		db:         conn,
+		q:          q,
+		workingDir: workingDir,
 	}
 }
 
@@ -346,6 +376,10 @@ func (s *service) PrepareSpeculativeSession(ctx context.Context, sessionID, spec
 		ParentSessionID: sql.NullString{String: sessionID, Valid: true},
 		Title:           "Speculative: " + parent.Title,
 		Mode:            parent.Mode,
+		WorkingDir: sql.NullString{
+			String: parent.WorkingDir.String,
+			Valid:  parent.WorkingDir.String != "",
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create speculative session: %w", err)

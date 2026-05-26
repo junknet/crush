@@ -38,8 +38,9 @@ const (
 	SectionSeparator string = "─"
 
 	TodoCompletedIcon  string = "✓"
-	TodoPendingIcon    string = "•"
-	TodoInProgressIcon string = "→"
+	TodoPendingIcon    string = "□"
+	TodoInProgressIcon string = "▶"
+	TodoFailedIcon     string = "×"
 
 	ImageIcon string = "■"
 	TextIcon  string = "≡"
@@ -314,6 +315,7 @@ type Styles struct {
 		TodoRatio          lipgloss.Style // Todo ratio (e.g., "2/5")
 		TodoCompletedIcon  lipgloss.Style // Completed todo icon
 		TodoInProgressIcon lipgloss.Style // In-progress todo icon
+		TodoFailedIcon     lipgloss.Style // Failed todo icon
 		TodoPendingIcon    lipgloss.Style // Pending todo icon
 		TodoStatusNote     lipgloss.Style // " · completed N" / " · starting task" trailing note
 		TodoItem           lipgloss.Style // Default body text for todo list items

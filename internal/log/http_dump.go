@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -19,6 +18,17 @@ import (
 // --debug slog plumbing so crush-dev can capture raw traffic for all
 // providers (not just one) regardless of log level.
 const HTTPDumpDirEnv = "CRUSH_HTTP_DUMP_DIR"
+
+const (
+	providerHTTPIdleConnTimeout     = 45 * time.Second
+	providerHTTPMaxIdleConns        = 128
+	providerHTTPMaxIdleConnsPerHost = 16
+)
+
+var (
+	providerHTTPTransportOnce sync.Once
+	providerHTTPTransport     *http.Transport
+)
 
 // DumpHTTPClient returns an *http.Client that mirrors every request +
 // response pair into the file at path (line-delimited JSON).
@@ -44,7 +54,7 @@ func DumpRoundTripper(next http.RoundTripper, path string) http.RoundTripper {
 }
 
 // NewProviderHTTPClient builds the http.Client used for a provider's outbound
-// traffic, composing two optional layers over the default transport:
+// traffic, composing two optional layers over a shared provider transport:
 //
 //   - file dump  — enabled when CRUSH_HTTP_DUMP_DIR is set; writes raw req/resp
 //     bodies to "<dir>/<providerID>.jsonl". Independent of debug.
@@ -52,10 +62,11 @@ func DumpRoundTripper(next http.RoundTripper, path string) http.RoundTripper {
 //     Debug level via [HTTPRoundTripLogger].
 //
 // The dump layer wraps the slog layer so a single call produces both a disk
-// record and a log line. When neither layer is enabled it returns nil, and the
-// caller should skip WithHTTPClient so the SDK keeps its own default client.
+// record and a log line. The base transport is always shared across provider
+// clients so SDK instances reuse TCP/TLS connections instead of each request
+// constructing an isolated pool.
 func NewProviderHTTPClient(providerID string, debug bool) *http.Client {
-	var rt http.RoundTripper = http.DefaultTransport
+	var rt http.RoundTripper = providerHTTPRoundTripper()
 	if debug {
 		rt = &HTTPRoundTripLogger{Transport: rt}
 	}
@@ -65,10 +76,25 @@ func NewProviderHTTPClient(providerID string, debug bool) *http.Client {
 			rt = &dumpTransport{path: path, next: rt}
 		}
 	}
-	if rt == http.RoundTripper(http.DefaultTransport) {
-		return nil
-	}
 	return &http.Client{Transport: rt}
+}
+
+// CloseProviderIdleConnections drops idle keepalive sockets from the shared
+// provider pool. Active SSE streams are not closed. Call this after network
+// failures where a local proxy/TUN stack may have left stale pooled sockets.
+func CloseProviderIdleConnections() {
+	providerHTTPRoundTripper().CloseIdleConnections()
+}
+
+func providerHTTPRoundTripper() *http.Transport {
+	providerHTTPTransportOnce.Do(func() {
+		base := http.DefaultTransport.(*http.Transport).Clone()
+		base.IdleConnTimeout = providerHTTPIdleConnTimeout
+		base.MaxIdleConns = providerHTTPMaxIdleConns
+		base.MaxIdleConnsPerHost = providerHTTPMaxIdleConnsPerHost
+		providerHTTPTransport = base
+	})
+	return providerHTTPTransport
 }
 
 type dumpTransport struct {
@@ -106,7 +132,7 @@ func (d *dumpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		var savedReq io.ReadCloser
 		var err error
 		savedReq, req.Body, err = drainBody(req.Body)
-		if err == nil {
+		if err == nil && savedReq != nil {
 			b, _ := io.ReadAll(savedReq)
 			entry.ReqBody = string(b)
 		}
@@ -132,7 +158,7 @@ func (d *dumpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// dump entry when the consumer closes it. Finite provider streams are
 	// captured in full (up to the cap); infinite streams stay bounded and
 	// flush whatever was seen on disconnect.
-	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if isEventStreamResponse(resp) {
 		if resp.Body != nil {
 			resp.Body = &streamCaptureBody{
 				rc:  resp.Body,
@@ -154,8 +180,14 @@ func (d *dumpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if resp.Body != nil {
 		var savedResp io.ReadCloser
 		savedResp, resp.Body, _ = drainBody(resp.Body)
-		b, _ := io.ReadAll(savedResp)
-		entry.RespBody = string(b)
+		// drainBody returns nil savedResp on ReadFrom/Close error (e.g.
+		// another transport already drained the body before we got here —
+		// see Anthropic CCH cch.go:101 → dumpTransport composition).
+		// io.ReadAll(nil) panics, which would take down the whole TUI.
+		if savedResp != nil {
+			b, _ := io.ReadAll(savedResp)
+			entry.RespBody = string(b)
+		}
 	}
 	d.write(entry)
 	return resp, nil

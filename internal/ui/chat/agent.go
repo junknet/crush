@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // -----------------------------------------------------------------------------
@@ -128,59 +130,112 @@ type AgentToolRenderContext struct {
 // RenderTool implements the [ToolRenderer] interface.
 func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
-	if !opts.ToolCall.Finished && !opts.IsCanceled() && len(r.agent.nestedTools) == 0 {
-		return pendingTool(sty, "Agent", opts.Compact)
-	}
 
 	var params agent.AgentParams
 	_ = json.Unmarshal([]byte(opts.ToolCall.Input), &params)
+	agentName := getAgentRoleName(params.Role)
 
-	prompt := params.Prompt
-	prompt = strings.ReplaceAll(prompt, "\n", " ")
+	role := strings.ToLower(strings.TrimSpace(params.Role))
+	if role == "" {
+		role = "explore"
+	}
+	elapsed := runningDurationText(opts.StartedAt)
+	elapsedSuffix := ""
+	if elapsed != "" {
+		elapsedSuffix = " · " + elapsed
+	}
+	var headerText string
+	switch opts.Status {
+	case ToolStatusRunning:
+		headerText = fmt.Sprintf("Running %s agent%s", role, elapsedSuffix)
+	case ToolStatusError:
+		headerText = fmt.Sprintf("%s agent failed", role)
+	case ToolStatusCanceled:
+		headerText = fmt.Sprintf("%s agent canceled", role)
+	default:
+		headerText = fmt.Sprintf("%s agent finished", role)
+	}
 
-	header := toolHeader(sty, opts.Status, "Agent", cappedWidth, opts.Compact)
+	header := toolHeader(sty, opts.Status, headerText, cappedWidth, opts.Compact)
 	if opts.Compact {
 		return header
 	}
 
-	// Render the agent label and prompt.
-	taskTag := sty.Tool.AgentWorkTag.Render("Agent")
-	taskTagWidth := lipgloss.Width(taskTag)
+	// Tree branch formatting (dimmed)
+	treeChar := "└─ "
+	dimmedTree := sty.Tool.AgentPrompt.Render(treeChar)
 
-	// Calculate remaining width for prompt.
-	remainingWidth := min(cappedWidth-taskTagWidth-3, maxTextWidth-taskTagWidth-3) // -3 for spacing
-
-	promptText := sty.Tool.AgentPrompt.Width(remainingWidth).Render(prompt)
-
-	header = lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		"",
-		lipgloss.JoinHorizontal(
-			lipgloss.Left,
-			taskTag,
-			" ",
-			promptText,
-		),
-	)
-
-	// Brain tree with nested tool calls.
-	childTools := tree.Root(header)
-
-	for _, nestedTool := range r.agent.nestedTools {
-		childView := nestedTool.Render(remainingWidth)
-		childTools.Child(childView)
+	// Agent tag with specific coloring or default
+	tagStyle := sty.Tool.AgentWorkTag
+	if role == "plan" {
+		tagStyle = tagStyle.Background(lipgloss.Color("#2ecc71")).Foreground(lipgloss.Color("#ffffff"))
+	} else if role == "explore" {
+		tagStyle = tagStyle.Background(lipgloss.Color("#3498db")).Foreground(lipgloss.Color("#ffffff"))
+	} else if role == "auditor" {
+		tagStyle = tagStyle.Background(lipgloss.Color("#9b59b6")).Foreground(lipgloss.Color("#ffffff"))
 	}
 
-	// Brain parts.
-	var parts []string
-	parts = append(parts, childTools.Enumerator(roundedEnumerator(2, taskTagWidth-5)).String())
+	dimLine := !opts.HasResult() && !opts.IsCanceled()
+	if dimLine {
+		tagStyle = tagStyle.Faint(true)
+	}
+	taskTag := tagStyle.Render(agentName)
 
-	// Show one-cell braille spinner if still running. opts.Anim still
-	// ticks the redraw cycle; we discard its 15-char cycling output and
-	// render a clean spinner+label instead.
+	// Truncate prompt/description to single line
+	promptSingleLine := strings.ReplaceAll(params.Prompt, "\n", " ")
+	promptSingleLine = strings.TrimSpace(promptSingleLine)
+
+	indentWidth := 3 + 3 + lipgloss.Width(taskTag)
+	remainingWidth := cappedWidth - indentWidth - 25
+	if remainingWidth < 15 {
+		remainingWidth = 15
+	}
+
+	promptSingleLine = ansi.Truncate(promptSingleLine, remainingWidth, "…")
+
+	promptStyle := sty.Tool.AgentPrompt
+	if dimLine {
+		promptStyle = promptStyle.Faint(true)
+	}
+	promptText := promptStyle.Render(" (" + promptSingleLine + ")")
+
+	// Render stats: only if not resolved
+	var statsText string
 	if !opts.HasResult() && !opts.IsCanceled() {
-		parts = append(parts, "", renderBrailleSpinner(sty, "Working"))
+		toolUses := len(r.agent.nestedTools)
+		plural := "uses"
+		if toolUses == 1 {
+			plural = "use"
+		}
+		statsText = fmt.Sprintf(" · %d tool %s", toolUses, plural)
+	}
+	statsRendered := promptStyle.Render(statsText)
+
+	mainLine := "   " + dimmedTree + taskTag + promptText + statsRendered
+
+	var statusLine string
+	if !opts.HasResult() && !opts.IsCanceled() {
+		statusText := "Initializing…"
+		if len(r.agent.nestedTools) > 0 {
+			lastTool := r.agent.nestedTools[len(r.agent.nestedTools)-1]
+			toolName := normalizeToolName(lastTool.ToolCall().Name)
+			statusText = fmt.Sprintf("active tool: %s", toolName)
+		}
+		if elapsed != "" {
+			statusText = fmt.Sprintf("%s · %s", statusText, elapsed)
+		}
+		statusPrefix := sty.Tool.AgentPrompt.Render("   \u23BF  ") // U+23BF is ⎿
+		statusLine = "   " + statusPrefix + sty.Tool.AgentPrompt.Render(statusText)
+	} else if opts.HasResult() {
+		statusPrefix := sty.Tool.AgentPrompt.Render("   \u23BF  ")
+		statusLine = "   " + statusPrefix + sty.Tool.AgentPrompt.Render("Done")
+	}
+
+	var parts []string
+	parts = append(parts, header)
+	parts = append(parts, mainLine)
+	if statusLine != "" {
+		parts = append(parts, statusLine)
 	}
 
 	result := lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -192,6 +247,25 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	}
 
 	return result
+}
+
+func getAgentRoleName(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "explore":
+		return "Explore Agent"
+	case "plan":
+		return "Plan Agent"
+	case "worker":
+		return "Worker Agent"
+	case "":
+		return "Explore Agent"
+	default:
+		r := strings.TrimSpace(role)
+		if len(r) == 0 {
+			return "Agent"
+		}
+		return strings.ToUpper(r[:1]) + r[1:] + " Agent"
+	}
 }
 
 // -----------------------------------------------------------------------------

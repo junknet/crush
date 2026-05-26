@@ -9,6 +9,7 @@ INSERT INTO sessions (
     completion_tokens,
     cost,
     summary_message_id,
+    working_dir,
     updated_at,
     created_at
 ) VALUES (
@@ -21,25 +22,29 @@ INSERT INTO sessions (
     ?,
     ?,
     null,
+    ?,
     strftime('%s', 'now'),
     strftime('%s', 'now')
-) RETURNING id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos;
+) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir;
 
 -- name: GetSessionByID :one
-SELECT id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir
 FROM sessions
 WHERE id = ? LIMIT 1;
 
 -- name: GetLastSession :one
-SELECT id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir
 FROM sessions
+WHERE parent_session_id is NULL
+  AND working_dir = ?
 ORDER BY updated_at DESC
 LIMIT 1;
 
 -- name: ListSessions :many
-SELECT id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir
 FROM sessions
 WHERE parent_session_id is NULL
+  AND working_dir = ?
 ORDER BY updated_at DESC;
 
 -- name: UpdateSession :one
@@ -53,7 +58,7 @@ SET
     cost = ?,
     todos = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, mode, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos;
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir;
 
 -- name: UpdateSessionTitleAndUsage :exec
 UPDATE sessions

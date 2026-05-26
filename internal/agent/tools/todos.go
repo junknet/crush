@@ -56,7 +56,7 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 
 			for _, item := range params.Todos {
 				switch item.Status {
-				case "pending", "in_progress", "completed":
+				case "pending", "in_progress", "completed", "failed":
 				default:
 					return fantasy.ToolResponse{}, fmt.Errorf("invalid status %q for todo %q", item.Status, item.Content)
 				}
@@ -105,6 +105,7 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 
 			pendingCount := 0
 			inProgressCount := 0
+			failedCount := 0
 
 			for _, todo := range todos {
 				switch todo.Status {
@@ -112,11 +113,13 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 					pendingCount++
 				case session.TodoStatusInProgress:
 					inProgressCount++
+				case session.TodoStatusFailed:
+					failedCount++
 				}
 			}
 
-			response += fmt.Sprintf("Status: %d pending, %d in progress, %d completed\n",
-				pendingCount, inProgressCount, completedCount)
+			response += fmt.Sprintf("Status: %d pending, %d in progress, %d completed, %d failed\n",
+				pendingCount, inProgressCount, completedCount, failedCount)
 
 			response += "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable."
 

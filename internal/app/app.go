@@ -73,7 +73,7 @@ type App struct {
 // New initializes a new application instance.
 func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, error) {
 	q := db.New(conn)
-	sessions := session.NewService(q, conn)
+	sessions := session.NewService(q, conn, store.WorkingDir())
 	messages := message.NewService(q)
 	files := history.NewService(q, conn)
 	cfg := store.Config()
@@ -105,6 +105,15 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	app.setupEvents()
 
 	go mcp.Initialize(ctx, app.Permissions, store)
+
+	// Prune large binary data from old messages in the background to save space.
+	go func() {
+		pruneCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := app.Messages.Prune(pruneCtx); err != nil {
+			slog.Error("Failed to prune large binary data from messages", "error", err)
+		}
+	}()
 
 	// Release the shared database connection on shutdown. The pool
 	// closes the underlying *sql.DB when the last reference is released.

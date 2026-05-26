@@ -64,10 +64,11 @@ type ModelItem struct {
 	model     catwalk.Model
 	modelType ModelType
 
-	cache   map[int]string
-	t       *styles.Styles
-	m       fuzzy.Match
-	focused bool
+	cache    map[int]string
+	t        *styles.Styles
+	m        fuzzy.Match
+	focused  bool
+	isActive bool
 }
 
 // Finished implements list.Item. Model items are render-stable
@@ -123,7 +124,17 @@ func (m *ModelItem) Render(width int) string {
 		InfoTextBlurred: m.t.Dialog.ListItem.InfoBlurred,
 		InfoTextFocused: m.t.Dialog.ListItem.InfoFocused,
 	}
+	// Active marker as a LEFT prefix instead of a right-side info chip:
+	// the right slot got visually swallowed by the focused row's full-width
+	// background highlight, so users couldn't distinguish "cursor sits here"
+	// from "this is the model in use". A column-stable prefix is visible no
+	// matter what's focused. 2-space pad keeps non-active rows aligned.
 	title := common.FormatModelDisplayName(string(m.prov.Name), m.model.Name)
+	if m.isActive {
+		title = m.t.ToolCallSuccess.Render() + " " + title
+	} else {
+		title = "  " + title
+	}
 	return renderItem(styles, title, "", m.focused, width, m.cache, &m.m)
 }
 
@@ -134,6 +145,20 @@ func (m *ModelItem) SetFocused(focused bool) {
 	}
 	m.cache = nil
 	m.focused = focused
+	if m.Versioned != nil {
+		m.Bump()
+	}
+}
+
+// SetActive marks this item as the currently configured (in-use) model.
+// Renders a checkmark in the right-hand info slot so users can tell which
+// row is the one the app is actually using vs the row their cursor sits on.
+func (m *ModelItem) SetActive(active bool) {
+	if m.isActive == active {
+		return
+	}
+	m.cache = nil
+	m.isActive = active
 	if m.Versioned != nil {
 		m.Bump()
 	}

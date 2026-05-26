@@ -494,7 +494,16 @@ func PromptWithTextAttachments(prompt string, attachments []Attachment) string {
 	return sb.String()
 }
 
-func (m *Message) ToAIMessage() []fantasy.Message {
+type ToAIMessageOptions struct {
+	TruncateMedia bool
+}
+
+func (m *Message) ToAIMessage(opts ...ToAIMessageOptions) []fantasy.Message {
+	var opt ToAIMessageOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	var messages []fantasy.Message
 	switch m.Role {
 	case User:
@@ -518,6 +527,10 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 		for _, content := range m.BinaryContent() {
 			// skip text attachements
 			if strings.HasPrefix(content.MIMEType, "text/") {
+				continue
+			}
+			if opt.TruncateMedia {
+				parts = append(parts, fantasy.TextPart{Text: fmt.Sprintf("[Image: %s (truncated)]", content.Path)})
 				continue
 			}
 			parts = append(parts, fantasy.FilePart{
@@ -578,11 +591,19 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 		for _, result := range m.ToolResults() {
 			var content fantasy.ToolResultOutputContent
 			if result.IsError {
+				errText := result.Content
+				if errText == "" {
+					errText = "error"
+				}
 				content = fantasy.ToolResultOutputContentError{
-					Error: errors.New(result.Content),
+					Error: errors.New(errText),
 				}
 			} else if result.Data != "" {
-				if stringext.IsValidBase64(result.Data) {
+				if opt.TruncateMedia {
+					content = fantasy.ToolResultOutputContentText{
+						Text: "[Media data truncated]",
+					}
+				} else if stringext.IsValidBase64(result.Data) {
 					content = fantasy.ToolResultOutputContentMedia{
 						Data:      result.Data,
 						MediaType: result.MIMEType,
@@ -593,8 +614,12 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 					}
 				}
 			} else {
+				text := result.Content
+				if text == "" {
+					text = "success"
+				}
 				content = fantasy.ToolResultOutputContentText{
-					Text: result.Content,
+					Text: text,
 				}
 			}
 			parts = append(parts, fantasy.ToolResultPart{

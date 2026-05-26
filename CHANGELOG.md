@@ -5,6 +5,41 @@
 
 ---
 
+## Wave 5 — TUI UX 闭环 & launcher 韧性 (2026-05-25)
+
+### Added
+- **`/accept` / `/run` / `/cancel-plan` / `/exit-plan` slash commands** (`ui.go:2174`) — plan-mode 闭环最后一公里。`/accept` 把会话 mode 切回 execute 并自动 `sendMessage("Implement the plan you produced above ...")`,plan 文本留在上下文里,brain 接手实施。`/cancel-plan` 静默退出 plan。
+- **Plan EndTurn 自动预填 `/accept`** (`ui.go:1278`) — plan agent 一结束 turn,textarea 空时直接塞入 `/accept`,toast 用 `InfoTypeSuccess` 绿色高亮 + 15s TTL 提示"按 Enter 跑 /accept"。一键闭环。
+- **Active model 行右侧 ✓ 标记** (`models_item.go`) — Switch Model 对话框现在用 `t.ToolCallSuccess` 在当前生效的 model 行右侧渲染绿色 ✓,光标焦点和"已生效"两个状态视觉解耦。`SetActive(bool)` 通过 `info` 槽走原有 renderItem,零侵入。
+
+### Changed
+- **Switch Model: Plan → Auditor tab** (`models.go:22-27`) — 4-tab 由 `Brain · Plan · Worker · Explore` 改为 `Brain · Worker · Auditor · Explore`。plan 角色现在跟随 brain(`config.SelectedModelForType` 已有 fallback),腾出的 slot 让 auditor 显式可配置。enum 顺序、`String()`/`Config()`/`Placeholder()`、radio strip 同步重排,`% 4` 魔数不变。
+- **Chat sticky-bottom autoscroll**:
+  - `AppendMessages` 追加完无条件调 follow-aware `ScrollToBottom()` (`chat.go:271`),tool call / 流式 chunk 自动贴底;用户上滑后 `follow=false` 仍会停。
+  - `sendMessageMsg` / `RelayPromptMsg` 用 `ForceScrollToBottom` 替代 `ScrollToBottom` (`ui.go:707`) — 用户明确发消息 = 强意图回底,buffered 滚轮事件不再可能在 commit 之间抢回旧位置。free-code REPL `repinScroll` 等价模式。
+- **ESC cancel 保 draft** (`ui.go:3670`,`cancelAgent`) — 按 ESC 取消 agent 时,把 textarea 当前内容 snapshot 到 `promptHistory.draft` 并 `index=-1`。之前按 ↑ 会直接吞掉未发送文本跳到上一条 user msg;现在 ESC 后 ↑ 从草稿开始往回翻。
+- **Sub-agent narration ban + MaxTurns 8→16** (`config.go:868`, `explore.md.tpl`) — 复杂调研常常 8 turn 不够,explore 中途吐出 "现在查看 X..." 这种 narration 然后 budget 用完,parent 看着像"返回不完整"。MaxTurns 提到 16,prompt 显式 ban "tool 之间写 prose",final report 才允许 prose。
+- **`rg` mandate** (`bash.md.tpl`, `grep.md.tpl`, `plan.md.tpl`, `explore.md.tpl`) — 提示词显式禁用 `grep` / `find`,要求用 `rg` (Grep 工具内部就是 ripgrep)、`rg --files | rg PATTERN`、`fd`。bash 的 usage_notes 同步改成"NEVER use grep/find"。
+- **Attachment chip 缩进对齐 prompt** (`ui.go:renderEditorView`) — `[image]` chip 用 `lipgloss.PaddingLeft(promptWidth)` 缩进 4 列对齐 `::: ` prompt 列,视觉上 chip 像输入文字的延续(free-code inline-token 风格的轻量复刻)。
+- **Plan agent 提示词** (`plan.md.tpl`) — 写明闭环:plan 结束后 UI 自动预填 `/accept`,plan 要写得 self-contained(brain 接手能不问就实施)。output 块改成强制结构化七段。
+
+### Fixed
+- **`http_dump.go` 双重 panic** (`http_dump.go:108,154`) — `drainBody` 在 ReadFrom/Close 失败时返回 `nil, b, err`;`io.ReadAll(nil)` 会 panic,把整个 TUI 拖垮。req/resp 两条路径都加 `if savedXxx != nil` 守卫。触发场景:Anthropic CCH transport (cch.go:101) 已经 Drain 过 body 再传给 dumpTransport。`crush-dev` 启动 anthropic provider 时必现。
+- **launcher 在 mvdan/sh 下打印源码** (`scripts/launch_crush.sh`, `launch_crush_dev.sh`) — 旧 launcher 用 `zsh -lic '...heredoc...'`,crush 内嵌 bash 工具走 `mvdan/sh` 解释器时把整段大字符串当 token,glob `'*.go'` 触发 `no matches found`,直接把 launcher 源码 echo 到屏。两个 launcher 改成纯 POSIX sh,`find -newer` 替代 zsh while-stat 循环,ANSI 用 `\033`。
+- **`launch_crush.sh` smart auto-rebuild** — prod launcher 现在检测源码 mtime > binary mtime 自动 `go build`,避免"我刚改了代码但 crush 还跑旧版"的 footgun。无变化时跳过(0 cost)。crush-dev 维持每次 unconditional rebuild(用户期望的 "always latest")。
+
+### Module IDs (本轮稳定 ID)
+- `models_dialog_v2` — Switch Model 4-tab 重排 + active ✓
+- `chat_sticky_bottom_v2` — autoscroll force / follow-aware 分离
+- `plan_mode_loop_v1` — /accept 闭环
+- `esc_draft_snapshot_v1` — ESC 保 draft
+- `subagent_narration_ban_v1` — explore turns + prompt
+- `rg_mandate_v1` — grep/find 工具禁用
+- `http_dump_nil_guard_v1` — panic fix
+- `launcher_posix_v1` — POSIX 兼容 + smart rebuild
+
+---
+
 ## Wave 4 — Polishing & Cancel-discard (2026-05-24)
 
 ### Added

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/crush/internal/message"
 )
 
 // promptHistoryLoadedMsg is sent when prompt history is loaded.
@@ -14,9 +15,19 @@ type promptHistoryLoadedMsg struct {
 
 // loadPromptHistory loads user messages for history navigation.
 func (m *UI) loadPromptHistory() tea.Cmd {
+	sessionID := ""
+	if m.session != nil {
+		sessionID = m.session.ID
+	}
 	return func() tea.Msg {
 		ctx := context.Background()
-		messages, err := m.com.Workspace.ListAllUserMessages(ctx)
+		var messages []message.Message
+		var err error
+		if sessionID != "" {
+			messages, err = m.com.Workspace.ListUserMessages(ctx, sessionID)
+		} else {
+			messages, err = m.com.Workspace.ListAllUserMessages(ctx)
+		}
 		if err != nil {
 			slog.Error("Failed to load prompt history", "error", err)
 			return promptHistoryLoadedMsg{messages: nil}

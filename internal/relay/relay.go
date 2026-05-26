@@ -60,9 +60,11 @@ type SessionMeta struct {
 	SessionID       string                          `json:"session_id"`
 	Path            string                          `json:"path"`
 	Title           string                          `json:"title"`
+	MessageCount    int64                           `json:"message_count,omitempty"`
 	IsBusy          bool                            `json:"is_busy"`
 	Alive           bool                            `json:"alive"`
 	UpdatedAt       int64                           `json:"updated_at"`
+	CreatedAt       int64                           `json:"created_at,omitempty"`
 	Provider        string                          `json:"provider,omitempty"`
 	Model           string                          `json:"model,omitempty"`
 	Models          map[string]config.SelectedModel `json:"models,omitempty"`
@@ -137,6 +139,16 @@ func Run(ctx context.Context, p *tea.Program, a *app.App, store *config.ConfigSt
 			if !ok {
 				return
 			}
+			// Drop events that belong to another session. The app event
+			// bus is process-wide so every per-session relay goroutine
+			// sees every other session's events; sub-agent message
+			// events in particular carry the sub-session's id, not the
+			// parent's, and used to bleed onto the parent NATS subject.
+			// Empty id means the event is global (mcp/lsp/permission
+			// notifications) and must be forwarded by every relay.
+			if owner := eventSessionID(ev.Payload); owner != "" && owner != sessionID {
+				continue
+			}
 			if notifyEv, ok := ev.Payload.(pubsub.Event[notify.Notification]); ok {
 				if notifyEv.Payload.SessionID == sessionID {
 					if notifyEv.Payload.Type == notify.TypeAgentStarted ||
@@ -182,6 +194,8 @@ func presenceLoop(ctx context.Context, a *app.App, store *config.ConfigStore, se
 		}
 		if sess, err := a.Sessions.Get(ctx, sessionID); err == nil {
 			meta.Title = sess.Title
+			meta.CreatedAt = sess.CreatedAt
+			meta.MessageCount = sess.MessageCount
 		}
 		if a.AgentCoordinator != nil {
 			meta.IsBusy = a.AgentCoordinator.IsSessionBusy(sessionID)
@@ -246,6 +260,10 @@ type RelayPromptMsg struct {
 	Text string
 }
 
+// RelayCancelMsg is sent to the TUI program to cancel and repair the
+// current run using the same state path as a local ESC keypress.
+type RelayCancelMsg struct{}
+
 // applySetModel persists a model selection coming from the phone into
 // state.yaml via the existing isStateKey routing. Validation is intentionally
 // thin: we trust the phone to pass a provider/model the user knows about
@@ -283,7 +301,9 @@ func commandLoop(ctx context.Context, p *tea.Program, a *app.App, sessionID stri
 				p.Send(RelayPromptMsg{Text: cmd.Text})
 			}
 		case "cancel":
-			if a.AgentCoordinator != nil {
+			if p != nil {
+				p.Send(RelayCancelMsg{})
+			} else if a.AgentCoordinator != nil {
 				a.AgentCoordinator.Cancel(sessionID)
 			}
 		case "kill":
@@ -333,5 +353,3 @@ type RelayModelUpdateMsg struct {
 	Provider string
 	Model    string
 }
-
-

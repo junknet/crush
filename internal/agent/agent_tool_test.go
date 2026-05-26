@@ -44,6 +44,12 @@ func TestResolveAgentToolRole(t *testing.T) {
 			wantRole:    config.AgentWorker,
 		},
 		{
+			name:        "auditor",
+			role:        "auditor",
+			wantProfile: scheduler.ProfileAuditorAgent,
+			wantRole:    config.AgentAuditor,
+		},
+		{
 			name:    "invalid",
 			role:    "brain",
 			wantErr: `unknown agent role "brain"`,

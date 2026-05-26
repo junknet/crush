@@ -234,7 +234,7 @@ func blockFuncs() []shell.BlockFunc {
 }
 
 func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShellManager, workingDir, dataDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
 		func(ctx context.Context, params BashParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -532,7 +532,7 @@ func headPreview(content string) string {
 
 // maybeSpillOutput writes the full transcript to disk when combined output
 // exceeds BashSpillThreshold. Delegates to the package-shared [Spiller]
-// abstraction so view/grep/fetch can reuse the same pattern. Returns
+// abstraction so view/rg/fetch can reuse the same pattern. Returns
 // ("", 0) on no-op or write failure — failure is treated as no-op so a
 // disk hiccup never loses the inline preview.
 func maybeSpillOutput(dataDir, sessionID, callID, stdout, stderr string) (string, int) {

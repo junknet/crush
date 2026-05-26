@@ -76,13 +76,13 @@ func TestMemExtractToolWrapper(t *testing.T) {
 	memoryDir := "/workspace/project/memory"
 	wrapper := &memExtractToolWrapper{inner: dummy, memoryDir: memoryDir}
 
-	// 1. Run safe tool (e.g. glob)
+	// 1. Run safe tool (e.g. search)
 	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
-		Name:  "glob",
+		Name:  "search",
 		Input: "{}",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "glob run", resp.Content)
+	assert.Equal(t, "search run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
 	// 2. Run write tool targeting memory dir

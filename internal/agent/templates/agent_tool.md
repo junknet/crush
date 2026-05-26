@@ -8,4 +8,4 @@ Delegate when the task is self-contained and the role matches the work. Use `exp
 
 Skip the sub-agent for single-file lookups when you already know the path, or for follow-up that needs prior context.
 
-**Cost:** `explore` parallelises wide searches — a chain of `glob` + `grep` + 4–6 `view`s in the parent costs 8–15 turns and bloats the parent context; one `explore` call returns the same evidence in 1 turn and frees the parent for synthesis. Default to dispatch when scope spans more than two files.
+**Cost:** `explore` parallelises wide searches — a chain of `search` + `rg` + 4–6 `view`s in the parent costs 8–15 turns and bloats the parent context; one `explore` call returns the same evidence in 1 turn and frees the parent for synthesis. Default to dispatch when scope spans more than two files.

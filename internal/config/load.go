@@ -610,10 +610,12 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 	planModelSelected, planModelConfigured := c.Models[SelectedModelTypePlan]
 	workerModelSelected, workerModelConfigured := c.Models[SelectedModelTypeWorker]
 	exploreModelSelected, exploreModelConfigured := c.Models[SelectedModelTypeExplore]
+	auditorModelSelected, auditorModelConfigured := c.Models[SelectedModelTypeAuditor]
 
 	brain, brainValid := normalizeSelectedModel(c, brainModelSelected, defaultBrain)
 	plan, planValid := normalizeSelectedModel(c, planModelSelected, defaultBrain)
 	explore, exploreValid := normalizeSelectedModel(c, exploreModelSelected, defaultExplore)
+	auditor, auditorValid := normalizeSelectedModel(c, auditorModelSelected, brain)
 
 	// When explore isn't explicitly configured and the provider isn't a
 	// known built-in, use the brain model as the explore model. This prevents
@@ -651,6 +653,11 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 				return fmt.Errorf("failed to update preferred plan model: %w", err)
 			}
 		}
+		if auditorModelConfigured && !auditorValid {
+			if err := store.UpdatePreferredModel(SelectedModelTypeAuditor, auditor); err != nil {
+				return fmt.Errorf("failed to update preferred auditor model: %w", err)
+			}
+		}
 	}
 
 	if !brainModelConfigured {
@@ -665,21 +672,25 @@ func configureSelectedModels(store *ConfigStore, knownProviders []catwalk.Provid
 	if !exploreModelConfigured {
 		explore = defaultExplore
 	}
+	if !auditorModelConfigured {
+		auditor = brain
+	}
 
 	c.Models[SelectedModelTypeBrain] = brain
 	c.Models[SelectedModelTypePlan] = plan
 	c.Models[SelectedModelTypeWorker] = worker
 	c.Models[SelectedModelTypeExplore] = explore
+	c.Models[SelectedModelTypeAuditor] = auditor
 	return nil
 }
 
 func (c *Config) validateSelectedModelTypes() error {
 	for modelType := range c.Models {
 		switch modelType {
-		case SelectedModelTypeBrain, SelectedModelTypePlan, SelectedModelTypeWorker, SelectedModelTypeExplore:
+		case SelectedModelTypeBrain, SelectedModelTypePlan, SelectedModelTypeWorker, SelectedModelTypeExplore, SelectedModelTypeAuditor:
 			continue
 		default:
-			return fmt.Errorf("unsupported model type %q; use brain, plan, worker, or explore", modelType)
+			return fmt.Errorf("unsupported model type %q; use brain, plan, worker, explore, or auditor", modelType)
 		}
 	}
 	return nil
@@ -714,6 +725,17 @@ func normalizeSelectedModel(c *Config, selected SelectedModel, fallback Selected
 	resolved.FrequencyPenalty = selected.FrequencyPenalty
 	resolved.PresencePenalty = selected.PresencePenalty
 	resolved.ProviderOptions = selected.ProviderOptions
+
+	if len(selected.Fallbacks) > 0 {
+		resolved.Fallbacks = make([]SelectedModel, 0, len(selected.Fallbacks))
+		for _, fb := range selected.Fallbacks {
+			normalizedFb, valid := normalizeSelectedModel(c, fb, SelectedModel{})
+			if valid {
+				resolved.Fallbacks = append(resolved.Fallbacks, normalizedFb)
+			}
+		}
+	}
+
 	return resolved, true
 }
 

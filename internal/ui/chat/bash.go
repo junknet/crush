@@ -68,6 +68,11 @@ func (b *BashToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 	if params.RunInBackground {
 		toolParams = append(toolParams, "background", "true")
 	}
+	if !opts.HasResult() && !opts.IsCanceled() {
+		if elapsed := runningDurationText(opts.StartedAt); elapsed != "" {
+			toolParams = append(toolParams, "elapsed", elapsed)
+		}
+	}
 
 	header := toolHeader(sty, opts.Status, "Bash", cappedWidth, opts.Compact, toolParams...)
 	if opts.Compact {
@@ -113,7 +118,19 @@ func NewJobOutputToolMessageItem(
 	result *message.ToolResult,
 	canceled bool,
 ) ToolMessageItem {
-	return newBaseToolMessageItem(sty, toolCall, result, &JobOutputToolRenderContext{}, canceled)
+	return &JobOutputToolMessageItem{
+		baseToolMessageItem: newBaseToolMessageItem(sty, toolCall, result, &JobOutputToolRenderContext{}, canceled),
+	}
+}
+
+func (j *JobOutputToolMessageItem) ShellID() string {
+	var params struct {
+		ShellID string `json:"shell_id"`
+	}
+	if err := json.Unmarshal([]byte(j.ToolCall().Input), &params); err == nil {
+		return params.ShellID
+	}
+	return ""
 }
 
 // JobOutputToolRenderContext renders job_output tool messages.

@@ -62,6 +62,21 @@ func (h *HTTPRoundTripLogger) RoundTrip(req *http.Request) (*http.Response, erro
 		return resp, err
 	}
 
+	if isEventStreamResponse(resp) {
+		if slog.Default().Enabled(req.Context(), slog.LevelDebug) {
+			slog.DebugContext(req.Context(),
+				"HTTP Response",
+				"status_code", resp.StatusCode,
+				"status", resp.Status,
+				"headers", formatHeaders(resp.Header),
+				"body", "[event stream omitted]",
+				"content_length", resp.ContentLength,
+				"duration_ms", duration.Milliseconds(),
+			)
+		}
+		return resp, nil
+	}
+
 	save, resp.Body, err = drainBody(resp.Body)
 	if err != nil {
 		slog.Error("Failed to drain response body", "error", err)
@@ -96,6 +111,13 @@ func bodyToString(body io.ReadCloser) string {
 		return string(src)
 	}
 	return b.String()
+}
+
+func isEventStreamResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	return strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 }
 
 // formatHeaders formats HTTP headers for logging, filtering out sensitive information.

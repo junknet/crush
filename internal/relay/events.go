@@ -21,6 +21,34 @@ import (
 // the SSE handler emits, keeping a single serialization source of truth.
 func WrapEvent(ev any) *pubsub.Payload { return wrapEvent(ev) }
 
+// eventSessionID extracts the owning session ID from a raw event payload
+// so the per-session relay loop can drop foreign-session events (the app
+// event bus is global). Returns "" for events that aren't tied to a
+// specific session (mcp/lsp/permission notification) — those are global
+// and must be forwarded by every relay.
+func eventSessionID(ev any) string {
+	switch e := ev.(type) {
+	case pubsub.Event[message.Message]:
+		return e.Payload.SessionID
+	case pubsub.Event[session.Session]:
+		// Prefer ParentSessionID so the root session's relay claims
+		// ownership of its sub-agent session lifecycle events; the sub-
+		// agent's own relay also gets it via session.ID below if it
+		// happens to match.
+		if e.Payload.ParentSessionID != "" {
+			return e.Payload.ParentSessionID
+		}
+		return e.Payload.ID
+	case pubsub.Event[history.File]:
+		return e.Payload.SessionID
+	case pubsub.Event[notify.Notification]:
+		return e.Payload.SessionID
+	case pubsub.Event[permission.PermissionRequest]:
+		return e.Payload.SessionID
+	}
+	return ""
+}
+
 // wrapEvent converts a raw tea.Msg (a pubsub.Event[T] from the app
 // event fan-in) into a pubsub.Payload envelope with the correct
 // PayloadType discriminator and a proto-typed inner payload that has

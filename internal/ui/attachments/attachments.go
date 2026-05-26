@@ -36,8 +36,9 @@ type Attachments struct {
 	deleting bool
 }
 
-func (m *Attachments) List() []message.Attachment { return m.list }
-func (m *Attachments) Reset()                     { m.list = nil }
+func (m *Attachments) List() []message.Attachment     { return m.list }
+func (m *Attachments) SetList(l []message.Attachment) { m.list = l }
+func (m *Attachments) Reset()                         { m.list = nil }
 
 func (m *Attachments) Update(msg tea.Msg) bool {
 	switch msg := msg.(type) {
@@ -110,23 +111,19 @@ func (r *Renderer) Render(attachments []message.Attachment, deleting bool, width
 	fits := int(math.Floor(float64(width)/float64(maxItemWidth))) - 1
 
 	for i, att := range attachments {
-		filename := filepath.Base(att.FileName)
-		// Truncate if needed.
-		if ansi.StringWidth(filename) > maxFilename {
-			filename = ansi.Truncate(filename, maxFilename, "…")
-		}
+		label := chipLabel(att)
 
 		if deleting {
 			chips = append(
 				chips,
 				r.deletingStyle.Render(fmt.Sprintf("%d", i)),
-				r.normalStyle.Render(filename),
+				r.normalStyle.Render(label),
 			)
 		} else {
 			chips = append(
 				chips,
 				r.icon(att).String(),
-				r.normalStyle.Render(filename),
+				r.normalStyle.Render(label),
 			)
 		}
 
@@ -137,6 +134,28 @@ func (r *Renderer) Render(attachments []message.Attachment, deleting bool, width
 	}
 
 	return lipgloss.JoinHorizontal(lipgloss.Left, chips...)
+}
+
+// chipLabel returns a compact human-readable label for an attachment chip.
+// Images show "[image]", pasted text shows "[paste: N kb]", files show their name.
+func chipLabel(att message.Attachment) string {
+	if att.IsImage() {
+		return "[image]"
+	}
+	name := filepath.Base(att.FileName)
+	if strings.HasPrefix(name, "paste_") {
+		size := len(att.Content)
+		switch {
+		case size >= 1024:
+			return fmt.Sprintf("[paste: %dkb]", size/1024)
+		default:
+			return fmt.Sprintf("[paste: %db]", size)
+		}
+	}
+	if ansi.StringWidth(name) > maxFilename {
+		return ansi.Truncate(name, maxFilename, "…")
+	}
+	return name
 }
 
 func (r *Renderer) icon(a message.Attachment) lipgloss.Style {

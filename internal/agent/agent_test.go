@@ -24,6 +24,7 @@ import (
 
 func TestMain(m *testing.M) {
 	slog.SetLogLoggerLevel(slog.LevelError)
+	os.Setenv("CRUSH_UNIT_TESTING", "1")
 	m.Run()
 }
 
@@ -294,14 +295,14 @@ func TestWorkerAgent(t *testing.T) {
 
 				require.True(t, foundFetch, "Expected to find a fetch operation")
 			})
-			t.Run("glob tool", func(t *testing.T) {
+			t.Run("search tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
 				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
-					Prompt:          "use glob to find all .go files in the current directory",
+					Prompt:          "use search to find all .go files in the current directory",
 					SessionID:       session.ID,
 					MaxOutputTokens: 10000,
 				})
@@ -311,37 +312,37 @@ func TestWorkerAgent(t *testing.T) {
 				msgs, err := env.messages.List(t.Context(), session.ID)
 				require.NoError(t, err)
 
-				foundGlob := false
-				var globTCID string
+				foundSearch := false
+				var searchTCID string
 
 				for _, msg := range msgs {
 					if msg.Role == message.Assistant {
 						for _, tc := range msg.ToolCalls() {
-							if tc.Name == tools.GlobToolName {
-								globTCID = tc.ID
+							if tc.Name == tools.SearchToolName {
+								searchTCID = tc.ID
 							}
 						}
 					}
 					if msg.Role == message.Tool {
 						for _, tr := range msg.ToolResults() {
-							if tr.ToolCallID == globTCID {
-								foundGlob = true
-								require.Contains(t, tr.Content, "main.go", "Expected glob to find main.go")
+							if tr.ToolCallID == searchTCID {
+								foundSearch = true
+								require.Contains(t, tr.Content, "main.go", "Expected search to find main.go")
 							}
 						}
 					}
 				}
 
-				require.True(t, foundGlob, "Expected to find a glob operation")
+				require.True(t, foundSearch, "Expected to find a search operation")
 			})
-			t.Run("grep tool", func(t *testing.T) {
+			t.Run("rg tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
 
 				session, err := env.sessions.Create(t.Context(), "New Session", session.ModeExecute)
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
-					Prompt:          "use grep to search for the word 'package' in go files",
+					Prompt:          "use rg to search for the word 'package' in go files",
 					SessionID:       session.ID,
 					MaxOutputTokens: 10000,
 				})
@@ -351,28 +352,28 @@ func TestWorkerAgent(t *testing.T) {
 				msgs, err := env.messages.List(t.Context(), session.ID)
 				require.NoError(t, err)
 
-				foundGrep := false
-				var grepTCID string
+				foundRg := false
+				var rgTCID string
 
 				for _, msg := range msgs {
 					if msg.Role == message.Assistant {
 						for _, tc := range msg.ToolCalls() {
-							if tc.Name == tools.GrepToolName {
-								grepTCID = tc.ID
+							if tc.Name == tools.RgToolName {
+								rgTCID = tc.ID
 							}
 						}
 					}
 					if msg.Role == message.Tool {
 						for _, tr := range msg.ToolResults() {
-							if tr.ToolCallID == grepTCID {
-								foundGrep = true
-								require.Contains(t, tr.Content, "main.go", "Expected grep to find main.go")
+							if tr.ToolCallID == rgTCID {
+								foundRg = true
+								require.Contains(t, tr.Content, "main.go", "Expected rg to find main.go")
 							}
 						}
 					}
 				}
 
-				require.True(t, foundGrep, "Expected to find a grep operation")
+				require.True(t, foundRg, "Expected to find an rg operation")
 			})
 			t.Run("ls tool", func(t *testing.T) {
 				agent, env := setupAgent(t, pair)
@@ -550,7 +551,7 @@ func TestWorkerAgent(t *testing.T) {
 				require.NoError(t, err)
 
 				res, err := agent.Run(t.Context(), SessionAgentCall{
-					Prompt:          "use glob to find all .go files and use ls to list the current directory, it is very important that you run both tool calls in parallel",
+					Prompt:          "use search to find all .go files and use ls to list the current directory, it is very important that you run both tool calls in parallel",
 					SessionID:       session.ID,
 					MaxOutputTokens: 10000,
 				})
@@ -578,14 +579,14 @@ func TestWorkerAgent(t *testing.T) {
 				toolCalls := assistantMsg.ToolCalls()
 				require.GreaterOrEqual(t, len(toolCalls), 2, "Expected at least 2 tool calls in parallel")
 
-				foundGlob := false
+				foundSearch := false
 				foundLS := false
-				var globTCID, lsTCID string
+				var searchTCID, lsTCID string
 
 				for _, tc := range toolCalls {
-					if tc.Name == tools.GlobToolName {
-						foundGlob = true
-						globTCID = tc.ID
+					if tc.Name == tools.SearchToolName {
+						foundSearch = true
+						searchTCID = tc.ID
 					}
 					if tc.Name == tools.LSToolName {
 						foundLS = true
@@ -593,20 +594,20 @@ func TestWorkerAgent(t *testing.T) {
 					}
 				}
 
-				require.True(t, foundGlob, "Expected to find a glob tool call")
+				require.True(t, foundSearch, "Expected to find a search tool call")
 				require.True(t, foundLS, "Expected to find an ls tool call")
 
 				require.GreaterOrEqual(t, len(toolMsgs), 2, "Expected at least 2 tool results in the same message")
 
-				foundGlobResult := false
+				foundSearchResult := false
 				foundLSResult := false
 
 				for _, msg := range toolMsgs {
 					for _, tr := range msg.ToolResults() {
-						if tr.ToolCallID == globTCID {
-							foundGlobResult = true
-							require.Contains(t, tr.Content, "main.go", "Expected glob result to contain main.go")
-							require.False(t, tr.IsError, "Expected glob result to not be an error")
+						if tr.ToolCallID == searchTCID {
+							foundSearchResult = true
+							require.Contains(t, tr.Content, "main.go", "Expected search result to contain main.go")
+							require.False(t, tr.IsError, "Expected search result to not be an error")
 						}
 						if tr.ToolCallID == lsTCID {
 							foundLSResult = true
@@ -616,7 +617,7 @@ func TestWorkerAgent(t *testing.T) {
 					}
 				}
 
-				require.True(t, foundGlobResult, "Expected to find glob tool result")
+				require.True(t, foundSearchResult, "Expected to find search tool result")
 				require.True(t, foundLSResult, "Expected to find ls tool result")
 			})
 		})
@@ -681,7 +682,7 @@ func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 	require.NoError(t, err)
 
 	// When supportsImages is false, image attachments should be stripped.
-	history, _ := agent.preparePrompt(msgs, false, catwalk.Type(""))
+	history, _ := agent.preparePrompt(sess, msgs, false, catwalk.Type(""))
 	// First message is the system reminder, second is the user message.
 	require.Len(t, history, 2)
 	require.Len(t, history[1].Content, 1)
@@ -691,7 +692,7 @@ func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 	require.Contains(t, text.Text, "important notes")
 
 	// When supportsImages is true, image attachments should remain.
-	history, _ = agent.preparePrompt(msgs, true, catwalk.Type(""))
+	history, _ = agent.preparePrompt(sess, msgs, true, catwalk.Type(""))
 	require.Len(t, history, 2)
 	require.Len(t, history[1].Content, 2)
 	text, ok = fantasy.AsMessagePart[fantasy.TextPart](history[1].Content[0])
@@ -725,7 +726,7 @@ func TestPreparePrompt_DropsUserMessageAfterUnsupportedAttachmentFiltering(t *te
 	msgs, err := env.messages.List(ctx, sess.ID)
 	require.NoError(t, err)
 
-	history, _ := agent.preparePrompt(msgs, false, catwalk.Type(""))
+	history, _ := agent.preparePrompt(sess, msgs, false, catwalk.Type(""))
 	require.Len(t, history, 1)
 	require.Equal(t, fantasy.MessageRoleUser, history[0].Role)
 	require.NotEmpty(t, history[0].Content)
@@ -777,7 +778,7 @@ func TestPreparePrompt_AddsAnthropicToolResultFallbackText(t *testing.T) {
 	msgs, err := env.messages.List(ctx, sess.ID)
 	require.NoError(t, err)
 
-	history, _ := agent.preparePrompt(msgs, true, catwalk.Type(catwalk.InferenceProviderAnthropic))
+	history, _ := agent.preparePrompt(sess, msgs, true, catwalk.Type(catwalk.InferenceProviderAnthropic))
 	require.Len(t, history, 4)
 	require.Equal(t, fantasy.MessageRoleTool, history[3].Role)
 	require.GreaterOrEqual(t, len(history[3].Content), 2)
@@ -832,7 +833,7 @@ func TestPreparePrompt_OrphanedToolUse(t *testing.T) {
 	msgs, err := env.messages.List(ctx, sess.ID)
 	require.NoError(t, err)
 
-	history, _ := agent.preparePrompt(msgs, true, catwalk.Type(""))
+	history, _ := agent.preparePrompt(sess, msgs, true, catwalk.Type(""))
 
 	// The history must contain a synthetic tool result for the orphaned call.
 	found := false
@@ -906,7 +907,7 @@ func TestPreparePrompt_OrphanedToolUseMixed(t *testing.T) {
 	msgs, err := env.messages.List(ctx, sess.ID)
 	require.NoError(t, err)
 
-	history, _ := agent.preparePrompt(msgs, true, catwalk.Type(""))
+	history, _ := agent.preparePrompt(sess, msgs, true, catwalk.Type(""))
 
 	// Should have a synthetic result only for the orphaned call.
 	var syntheticCount int

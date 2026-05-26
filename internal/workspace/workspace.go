@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 )
 
 // LSPClientInfo holds information about an LSP client's state. This is
@@ -95,10 +96,12 @@ type Workspace interface {
 	ListMessages(ctx context.Context, sessionID string) ([]message.Message, error)
 	ListUserMessages(ctx context.Context, sessionID string) ([]message.Message, error)
 	ListAllUserMessages(ctx context.Context) ([]message.Message, error)
+	RepairSessionMessages(ctx context.Context, sessionID string) error
 
 	// Agent
 	AgentRun(ctx context.Context, sessionID, prompt string, planMode bool, attachments ...message.Attachment) error
 	AgentCancel(sessionID string)
+	AgentCancelAndFlush(sessionID string) ([]string, bool)
 	AgentIsBusy() bool
 	AgentIsSessionBusy(sessionID string) bool
 	AgentModel() AgentModel
@@ -110,6 +113,7 @@ type Workspace interface {
 	UpdateAgentModel(ctx context.Context) error
 	InitBrainAgent(ctx context.Context) error
 	GetDefaultExploreModel(providerID string) config.SelectedModel
+	BackgroundShellStats() shell.BackgroundShellStats
 
 	// AgentSuggestion returns the ghost-text suggestion service, or nil
 	// when disabled / not wired (e.g. client mode without local agent).

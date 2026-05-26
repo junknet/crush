@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -15,10 +16,13 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/ui/attachments"
+	uichat "github.com/charmbracelet/crush/internal/ui/chat"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/dialog"
 	"github.com/charmbracelet/crush/internal/ui/list"
+	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/crush/internal/workspace"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/stretchr/testify/require"
@@ -128,6 +132,19 @@ func (i *dragScrollTestItem) Finished() bool {
 
 func (i *dragScrollTestItem) SetFocused(bool) {}
 
+type unfinishedMessageItem struct {
+	*list.Versioned
+	id string
+}
+
+func (i *unfinishedMessageItem) ID() string { return i.id }
+
+func (i *unfinishedMessageItem) Render(int) string { return "unfinished" }
+
+func (i *unfinishedMessageItem) RawRender(int) string { return "unfinished" }
+
+func (i *unfinishedMessageItem) Finished() bool { return false }
+
 func TestCtrlCClearsComposerAndArmsQuit(t *testing.T) {
 	t.Parallel()
 
@@ -198,6 +215,94 @@ func TestSchedulerEventUpdatesStatus(t *testing.T) {
 
 	require.NotNil(t, ui.status)
 	require.Contains(t, ui.status.msg.Msg, "Task started")
+}
+
+func TestRuntimeStatusLineOmitsIdleCounters(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+
+	require.Empty(t, ui.runtimeStatusLine())
+}
+
+func TestRuntimeStatusLineShowsActiveSignals(t *testing.T) {
+	t.Parallel()
+
+	providers := csync.NewMap[string, config.ProviderConfig]()
+	providers.Set("test-provider", config.ProviderConfig{
+		ID: "test-provider",
+		Models: []catwalk.Model{
+			{ID: "test-model", ContextWindow: 10_000},
+		},
+	})
+	cfg := &config.Config{
+		Models: map[config.SelectedModelType]config.SelectedModel{
+			config.SelectedModelTypeBrain: {
+				Provider: "test-provider",
+				Model:    "test-model",
+			},
+		},
+		Providers: providers,
+		Agents: map[string]config.Agent{
+			config.AgentBrain: {Model: config.SelectedModelTypeBrain},
+		},
+	}
+	ui := newTestUIWithConfig(t, cfg)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ws.agentReady = true
+	ws.agentBusy = true
+	ws.shellStats = shell.BackgroundShellStats{
+		Running:        2,
+		Completed:      9,
+		ActiveMonitors: 1,
+	}
+	ui.session = &session.Session{
+		PromptTokens:     1_000,
+		CompletionTokens: 500,
+	}
+
+	require.Equal(t, "model running  ·  jobs 2  ·  monitor 1  ·  ctx 15%", ui.runtimeStatusLine())
+}
+
+func TestContextUsagePercentWithoutSession(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, &config.Config{
+		Providers: csync.NewMap[string, config.ProviderConfig](),
+		Agents: map[string]config.Agent{
+			config.AgentBrain: {Model: config.SelectedModelTypeBrain},
+		},
+	})
+
+	require.Empty(t, ui.contextUsagePercent())
+}
+
+func TestStatusClearUsesMessageID(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	firstID := ui.status.SetInfoMsg(util.NewInfoMsg("old"))
+	secondID := ui.status.SetInfoMsg(util.NewErrorMsg(errors.New("assert error")))
+
+	ui.status.ClearInfoMsg(firstID)
+	require.Equal(t, secondID, ui.status.msgID)
+	require.Equal(t, "assert error", ui.status.msg.Msg)
+
+	ui.status.ClearInfoMsg(secondID)
+	require.Empty(t, ui.status.msg.Msg)
+}
+
+func TestStatusMessageTTLSeverityMinimums(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, DefaultStatusTTL, statusMessageTTL(util.NewInfoMsg("info")))
+	require.Equal(t, DefaultWarnStatusTTL, statusMessageTTL(util.NewWarnMsg("warn")))
+	require.Equal(t, DefaultErrorStatusTTL, statusMessageTTL(util.NewErrorMsg(errors.New("assert error"))))
+	require.Equal(t, 2*time.Minute, statusMessageTTL(util.InfoMsg{
+		Type: util.InfoTypeError,
+		Msg:  "long",
+		TTL:  2 * time.Minute,
+	}))
 }
 
 func TestSchedulerEventIgnoresOtherConversationSession(t *testing.T) {
@@ -294,16 +399,8 @@ func TestMouseDragAtViewportEdgeAutoScrolls(t *testing.T) {
 	t.Parallel()
 
 	ui := newTestUIWithConfig(t, nil)
-	items := make([]list.Item, 0, 6)
-	for i := range 6 {
-		items = append(items, newDragScrollTestItem(string(rune('a'+i))))
-	}
-	ui.chat.list.SetGap(0)
-	ui.chat.list.SetItems(items...)
-	ui.chat.SetSize(20, 3)
+	setScrollableChatItems(ui, 6, 3)
 	ui.chat.ForceScrollToBottom()
-	ui.state = uiChat
-	ui.focus = uiFocusMain
 	ui.layout.main = uv.Rect(0, 5, 20, 3)
 
 	startIdx, startLine := ui.chat.list.ScrollOffset()
@@ -323,20 +420,52 @@ func TestMouseDragAtViewportEdgeAutoScrolls(t *testing.T) {
 	require.True(t, afterTickIdx < afterMotionIdx || afterTickLine < afterMotionLine)
 }
 
+func TestStreamingTickDoesNotOverrideUnlockedScroll(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ws.agentReady = true
+	ws.agentBusy = true
+	setScrollableChatItems(ui, 12, 3)
+
+	ui.chat.ForceScrollToBottom()
+	require.True(t, ui.chat.Follow())
+	ui.chat.ScrollBy(-1)
+	require.False(t, ui.chat.Follow())
+	require.False(t, ui.chat.AtBottom())
+
+	_, _ = ui.Update(uichat.StepMsg{ID: "not-visible"})
+
+	require.False(t, ui.chat.Follow())
+	require.False(t, ui.chat.AtBottom())
+}
+
+func TestMouseWheelDownToBottomReengagesFollow(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	setScrollableChatItems(ui, 12, 3)
+
+	ui.chat.ForceScrollToBottom()
+	ui.chat.ScrollBy(-6)
+	require.False(t, ui.chat.Follow())
+	require.False(t, ui.chat.AtBottom())
+
+	for range 4 {
+		_, _ = ui.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	}
+
+	require.True(t, ui.chat.AtBottom())
+	require.True(t, ui.chat.Follow())
+}
+
 func TestEscapeStopsMouseAutoScroll(t *testing.T) {
 	t.Parallel()
 
 	ui := newTestUIWithConfig(t, nil)
-	items := make([]list.Item, 0, 6)
-	for i := range 6 {
-		items = append(items, newDragScrollTestItem(string(rune('a'+i))))
-	}
-	ui.chat.list.SetGap(0)
-	ui.chat.list.SetItems(items...)
-	ui.chat.SetSize(20, 3)
+	setScrollableChatItems(ui, 6, 3)
 	ui.chat.ForceScrollToBottom()
-	ui.state = uiChat
-	ui.focus = uiFocusMain
 	ui.layout.main = uv.Rect(0, 5, 20, 3)
 
 	handled, _ := ui.chat.HandleMouseDown(2, 1)
@@ -354,17 +483,99 @@ func TestEscapeStopsMouseAutoScroll(t *testing.T) {
 	require.True(t, ui.textarea.Focused())
 }
 
+func setScrollableChatItems(ui *UI, itemCount int, height int) {
+	items := make([]list.Item, 0, itemCount)
+	for i := range itemCount {
+		items = append(items, newDragScrollTestItem(string(rune('a'+i))))
+	}
+	ui.chat.list.SetGap(0)
+	ui.chat.list.SetItems(items...)
+	ui.chat.SetSize(20, height)
+	ui.state = uiChat
+	ui.focus = uiFocusMain
+	ui.layout.main = uv.Rect(0, 0, 20, height)
+}
+
+func TestEscapeCancelsAgentAndShowsInterruptDivider(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ws.agentReady = true
+	ws.agentBusy = true
+	ws.cancelWasRunning = true
+	ws.cancelPrompts = []string{"queued follow-up"}
+	ui.session = &session.Session{ID: "session-a", Mode: session.ModeExecute}
+	ui.textarea.SetValue("draft")
+
+	cmd := ui.handleKeyPressMsg(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+
+	require.Equal(t, "session-a", ws.cancelSessionID)
+	require.Contains(t, ui.textarea.Value(), "draft")
+	require.Contains(t, ui.textarea.Value(), "queued follow-up")
+	require.NotNil(t, ui.chat.MessageItem(uichat.InterruptDividerID("esc-cancel-session-a")))
+
+	runTestCmd(cmd)
+	require.Equal(t, "session-a", ws.repairedSessionID)
+}
+
+func TestInterruptDividerUsesUnfinishedMessageID(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.session = &session.Session{ID: "session-a", Mode: session.ModeExecute}
+	ui.chat.SetMessages(&unfinishedMessageItem{
+		Versioned: list.NewVersioned(),
+		id:        "assistant-a",
+	})
+
+	ui.appendInterruptDivider()
+
+	require.NotNil(t, ui.chat.MessageItem(uichat.InterruptDividerID("assistant-a")))
+}
+
+func TestLoadPromptHistoryUsesCurrentSessionMessages(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ui.session = &session.Session{ID: "session-a", Mode: session.ModeExecute}
+	ws.userMessages = []message.Message{{
+		ID:        "message-a",
+		SessionID: "session-a",
+		Role:      message.User,
+		Parts:     []message.ContentPart{message.TextContent{Text: "previous prompt"}},
+	}}
+
+	msg := ui.loadPromptHistory()()
+	loaded := msg.(promptHistoryLoadedMsg)
+
+	require.Equal(t, "session-a", ws.userMessagesSessionID)
+	require.False(t, ws.allUserMessagesCalled)
+	require.Len(t, loaded.messages, 1)
+	require.Equal(t, "previous prompt", loaded.messages[0])
+}
+
 // testWorkspace is a minimal [workspace.Workspace] stub for unit tests.
 type testWorkspace struct {
 	workspace.Workspace
 	cfg                   *config.Config
 	agentReady            bool
+	agentBusy             bool
 	lastCreateSessionMode session.Mode
 	lastCreatedSession    session.Session
 	lastSavedSession      session.Session
 	lastAgentRunPlanMode  bool
 	lastAgentRunPrompt    string
 	lastAgentRunSessionID string
+	userMessages          []message.Message
+	userMessagesSessionID string
+	allUserMessagesCalled bool
+	repairedSessionID     string
+	cancelSessionID       string
+	cancelPrompts         []string
+	cancelWasRunning      bool
+	shellStats            shell.BackgroundShellStats
 }
 
 func (w *testWorkspace) Config() *config.Config {
@@ -390,6 +601,21 @@ func (w *testWorkspace) SaveSession(_ context.Context, sess session.Session) (se
 	return sess, nil
 }
 
+func (w *testWorkspace) ListUserMessages(_ context.Context, sessionID string) ([]message.Message, error) {
+	w.userMessagesSessionID = sessionID
+	return w.userMessages, nil
+}
+
+func (w *testWorkspace) ListAllUserMessages(context.Context) ([]message.Message, error) {
+	w.allUserMessagesCalled = true
+	return w.userMessages, nil
+}
+
+func (w *testWorkspace) RepairSessionMessages(_ context.Context, sessionID string) error {
+	w.repairedSessionID = sessionID
+	return nil
+}
+
 func (w *testWorkspace) ListSessionHistory(context.Context, string) ([]history.File, error) {
 	return nil, nil
 }
@@ -403,16 +629,25 @@ func (w *testWorkspace) AgentIsReady() bool {
 }
 
 func (w *testWorkspace) AgentIsBusy() bool {
-	return false
+	return w.agentBusy
 }
 
 func (w *testWorkspace) AgentQueuedPrompts(string) int {
 	return 0
 }
 
+func (w *testWorkspace) BackgroundShellStats() shell.BackgroundShellStats {
+	return w.shellStats
+}
+
 func (w *testWorkspace) AgentClearQueue(string) {}
 
 func (w *testWorkspace) AgentCancel(string) {}
+
+func (w *testWorkspace) AgentCancelAndFlush(sessionID string) ([]string, bool) {
+	w.cancelSessionID = sessionID
+	return w.cancelPrompts, w.cancelWasRunning
+}
 
 func (w *testWorkspace) AgentRun(_ context.Context, sessionID, prompt string, planMode bool, _ ...message.Attachment) error {
 	w.lastAgentRunSessionID = sessionID
@@ -428,10 +663,75 @@ func runTestCmd(cmd tea.Cmd) {
 	msg := cmd()
 	if batch, ok := msg.(tea.BatchMsg); ok {
 		for _, child := range batch {
-			if child == nil {
-				continue
-			}
-			_ = child()
+			// Recurse: nested batches (e.g. the `/accept` slash command
+			// returns Batch(toast, sendMessage(...)) and sendMessage itself
+			// returns another Batch) need to be drained too — otherwise the
+			// inner AgentRun closure never fires and the workspace stub
+			// records nothing.
+			runTestCmd(child)
 		}
 	}
+}
+
+// submitEnter wires up the bare minimum UI state for an Enter keypress in the
+// editor to take the SendMessage code path, then fires the keypress and runs
+// any returned tea.Cmd. Returns the Cmd unchanged so callers can re-assert.
+func submitEnter(t *testing.T, ui *UI) tea.Cmd {
+	t.Helper()
+	ui.state = uiChat
+	ui.focus = uiFocusEditor
+	cmd := ui.handleKeyPressMsg(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	runTestCmd(cmd)
+	return cmd
+}
+
+func TestPlanModeAcceptCommandFlipsToExecuteAndSendsMessage(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ws.agentReady = true
+	ui.session = &session.Session{ID: "session-a", Mode: session.ModePlan}
+	ui.textarea.SetValue("/accept")
+
+	submitEnter(t, ui)
+
+	// After /accept: mode flips to execute, an implementation prompt is sent,
+	// and the saved session reflects the new mode.
+	require.Equal(t, session.ModeExecute, ui.currentSessionMode(), "/accept must flip mode")
+	require.Equal(t, session.ModeExecute, ws.lastSavedSession.Mode, "session must be persisted with execute mode")
+	require.NotEmpty(t, ws.lastAgentRunPrompt, "an implementation prompt must be dispatched")
+	require.False(t, ws.lastAgentRunPlanMode, "AgentRun must run as execute, not plan")
+	require.Contains(t, ws.lastAgentRunPrompt, "Implement", "prompt should ask brain to implement")
+}
+
+func TestPlanModeCancelCommandFlipsToExecuteWithoutSending(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ws.agentReady = true
+	ui.session = &session.Session{ID: "session-a", Mode: session.ModePlan}
+	ui.textarea.SetValue("/cancel-plan")
+
+	submitEnter(t, ui)
+
+	require.Equal(t, session.ModeExecute, ui.currentSessionMode(), "/cancel-plan flips mode")
+	require.Equal(t, session.ModeExecute, ws.lastSavedSession.Mode)
+	require.Empty(t, ws.lastAgentRunPrompt, "/cancel-plan must NOT dispatch any prompt")
+}
+
+func TestPlanModeAcceptOutsidePlanModeIsRejected(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ws.agentReady = true
+	ui.session = &session.Session{ID: "session-a", Mode: session.ModeExecute}
+	ui.textarea.SetValue("/accept")
+
+	submitEnter(t, ui)
+
+	require.Empty(t, ws.lastAgentRunPrompt, "/accept outside plan mode must be a no-op")
+	require.Equal(t, session.ModeExecute, ui.currentSessionMode())
 }

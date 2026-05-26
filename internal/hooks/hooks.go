@@ -12,9 +12,9 @@ import (
 
 // Hook event name constants.
 const (
-	EventPreToolUse  = "PreToolUse"
-	EventPostToolUse = "PostToolUse"
-	EventStop        = "Stop"
+	EventPreToolUse   = "PreToolUse"
+	EventPostToolUse  = "PostToolUse"
+	EventStop         = "Stop"
 	EventNotification = "Notification"
 )
 

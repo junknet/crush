@@ -111,7 +111,7 @@ type dummyTool struct{}
 func (d *dummyTool) Info() fantasy.ToolInfo {
 	return fantasy.ToolInfo{Name: "dummy"}
 }
-func (d *dummyTool) ProviderOptions() fantasy.ProviderOptions { return fantasy.ProviderOptions{} }
+func (d *dummyTool) ProviderOptions() fantasy.ProviderOptions        { return fantasy.ProviderOptions{} }
 func (d *dummyTool) SetProviderOptions(opts fantasy.ProviderOptions) {}
 func (d *dummyTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	return fantasy.ToolResponse{Content: call.Name + " run"}, nil

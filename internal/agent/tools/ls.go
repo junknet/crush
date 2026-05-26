@@ -1,13 +1,16 @@
 package tools
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	_ "embed"
 	"fmt"
 	"html/template"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"charm.land/fantasy"
@@ -19,7 +22,7 @@ import (
 
 type LSParams struct {
 	Path   string   `json:"path,omitempty" description:"The path to the directory to list (defaults to current working directory)"`
-	Ignore []string `json:"ignore,omitempty" description:"List of glob patterns to ignore"`
+	Ignore []string `json:"ignore,omitempty" description:"List of search patterns to ignore"`
 	Depth  int      `json:"depth,omitempty" description:"The maximum depth to traverse"`
 }
 
@@ -72,7 +75,7 @@ func lsDescription() string {
 }
 
 func NewLsTool(permissions permission.Service, workingDir string, lsConfig config.ToolLs) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		LSToolName,
 		lsDescription(),
 		func(ctx context.Context, params LSParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -122,7 +125,7 @@ func NewLsTool(permissions permission.Service, workingDir string, lsConfig confi
 				}
 			}
 
-			output, metadata, err := ListDirectoryTree(searchPath, params, lsConfig)
+			output, metadata, err := ListDirectoryTree(ctx, searchPath, params, lsConfig)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(err.Error()), nil
 			}
@@ -135,21 +138,56 @@ func NewLsTool(permissions permission.Service, workingDir string, lsConfig confi
 	)
 }
 
-func ListDirectoryTree(searchPath string, params LSParams, lsConfig config.ToolLs) (string, LSResponseMetadata, error) {
+func ListDirectoryTree(ctx context.Context, searchPath string, params LSParams, lsConfig config.ToolLs) (string, LSResponseMetadata, error) {
 	if _, err := os.Stat(searchPath); os.IsNotExist(err) {
 		return "", LSResponseMetadata{}, fmt.Errorf("path does not exist: %s", searchPath)
 	}
 
 	depth, limit := lsConfig.Limits()
 	maxFiles := cmp.Or(limit, maxLSFiles)
-	files, truncated, err := fsext.ListDirectory(
-		searchPath,
-		params.Ignore,
-		cmp.Or(params.Depth, depth),
-		maxFiles,
-	)
+	maxDepth := cmp.Or(params.Depth, depth)
+
+	rgPath := getRg()
+	if rgPath == "" {
+		return "", LSResponseMetadata{}, fmt.Errorf("ripgrep (rg) not found")
+	}
+
+	args := []string{"--files", "--null"}
+	if maxDepth > 0 {
+		args = append(args, "--max-depth", fmt.Sprintf("%d", maxDepth))
+	}
+	for _, ignore := range params.Ignore {
+		if ignore != "" {
+			args = append(args, "--glob", "!"+ignore)
+		}
+	}
+	args = append(args, searchPath)
+
+	var stdout bytes.Buffer
+	cmd := exec.CommandContext(ctx, rgPath, args...)
+	cmd.Stdout = &stdout
+	err := cmd.Run()
 	if err != nil {
-		return "", LSResponseMetadata{}, fmt.Errorf("error listing directory: %w", err)
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+			return "", LSResponseMetadata{}, fmt.Errorf("ripgrep error: %w", err)
+		}
+	}
+
+	outputBytes := stdout.Bytes()
+	var files []string
+	if len(outputBytes) > 0 {
+		files = strings.Split(string(outputBytes), "\x00")
+		if len(files) > 0 && files[len(files)-1] == "" {
+			files = files[:len(files)-1]
+		}
+	}
+
+	slices.Sort(files)
+
+	truncated := false
+	if len(files) > maxFiles {
+		files = files[:maxFiles]
+		truncated = true
 	}
 
 	metadata := LSResponseMetadata{
@@ -160,10 +198,10 @@ func ListDirectoryTree(searchPath string, params LSParams, lsConfig config.ToolL
 
 	var output string
 	if truncated {
-		output = fmt.Sprintf("There are more than %d files in the directory. Use a more specific path or use the Glob tool to find specific files. The first %[1]d files and directories are included below.\n", maxFiles)
+		output = fmt.Sprintf("There are more than %d files in the directory. Use a more specific path or use the search tool to find specific files. The first %[1]d files and directories are included below.\n", maxFiles)
 	}
-	if depth > 0 {
-		output = fmt.Sprintf("The directory tree is shown up to a depth of %d. Use a higher depth and a specific path to see more levels.\n", cmp.Or(params.Depth, depth))
+	if maxDepth > 0 {
+		output += fmt.Sprintf("The directory tree is shown up to a depth of %d. Use a higher depth and a specific path to see more levels.\n", maxDepth)
 	}
 	return output + "\n" + printTree(tree, searchPath), metadata, nil
 }

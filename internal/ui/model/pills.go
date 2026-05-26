@@ -73,11 +73,14 @@ func todoPill(todos []session.Todo, spinnerView string, focused, panelFocused bo
 	}
 
 	completed := 0
+	failed := 0
 	var currentTodo *session.Todo
 	for i := range todos {
 		switch todos[i].Status {
 		case session.TodoStatusCompleted:
 			completed++
+		case session.TodoStatusFailed:
+			failed++
 		case session.TodoStatusInProgress:
 			if currentTodo == nil {
 				currentTodo = &todos[i]
@@ -88,7 +91,11 @@ func todoPill(todos []session.Todo, spinnerView string, focused, panelFocused bo
 	total := len(todos)
 
 	label := t.Pills.TodoLabel.Render("To-Do")
-	progress := t.Pills.TodoProgress.Render(fmt.Sprintf("%d/%d", completed, total))
+	statusText := fmt.Sprintf("%d/%d", completed, total)
+	if failed > 0 {
+		statusText += fmt.Sprintf(" (%d failed)", failed)
+	}
+	progress := t.Pills.TodoProgress.Render(statusText)
 
 	var content string
 	if panelFocused {

@@ -268,6 +268,11 @@ func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
 		items[i] = msg
 	}
 	m.list.AppendItems(items...)
+	// Sticky-bottom: newly arrived tool calls / assistant chunks must stay
+	// pinned to the viewport bottom while the user has not scrolled up.
+	// ScrollToBottom is follow-aware so a user reading older context is
+	// not yanked away.
+	m.ScrollToBottom()
 }
 
 // UpdateNestedToolIDs updates the ID map for nested tools within a container.

@@ -13,8 +13,14 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// DefaultStatusTTL is the default time-to-live for status messages.
-const DefaultStatusTTL = 5 * time.Second
+const (
+	// DefaultStatusTTL is the default time-to-live for low-priority status messages.
+	DefaultStatusTTL = 5 * time.Second
+	// DefaultWarnStatusTTL keeps warnings visible long enough to read.
+	DefaultWarnStatusTTL = 45 * time.Second
+	// DefaultErrorStatusTTL keeps errors visible long enough to inspect.
+	DefaultErrorStatusTTL = 60 * time.Second
+)
 
 // Status is the status bar and help model.
 type Status struct {
@@ -23,6 +29,8 @@ type Status struct {
 	help     help.Model
 	helpKm   help.KeyMap
 	msg      util.InfoMsg
+	msgID    uint64
+	line     string
 }
 
 // NewStatus creates a new status bar and help model.
@@ -36,13 +44,31 @@ func NewStatus(com *common.Common, km help.KeyMap) *Status {
 }
 
 // SetInfoMsg sets the status info message.
-func (s *Status) SetInfoMsg(msg util.InfoMsg) {
+func (s *Status) SetInfoMsg(msg util.InfoMsg) uint64 {
+	s.msgID++
 	s.msg = msg
+	return s.msgID
 }
 
 // ClearInfoMsg clears the status info message.
-func (s *Status) ClearInfoMsg() {
+func (s *Status) ClearInfoMsg(msgID uint64) {
+	if msgID != 0 && msgID != s.msgID {
+		return
+	}
 	s.msg = util.InfoMsg{}
+}
+
+// SetStatusLine sets the persistent runtime status line.
+func (s *Status) SetStatusLine(line string) {
+	s.line = line
+}
+
+// HasContent reports whether the status layer needs a visible row.
+func (s *Status) HasContent() bool {
+	if s == nil {
+		return false
+	}
+	return (!s.hideHelp && s.line != "") || !s.msg.IsEmpty()
 }
 
 // SetWidth sets the width of the status bar and help view.
@@ -54,12 +80,12 @@ func (s *Status) SetWidth(width int) {
 
 // ShowingAll returns whether the full help view is shown.
 func (s *Status) ShowingAll() bool {
-	return s.help.ShowAll
+	return false
 }
 
 // ToggleHelp toggles the full help view.
 func (s *Status) ToggleHelp() {
-	s.help.ShowAll = !s.help.ShowAll
+	s.help.ShowAll = false
 }
 
 // SetHideHelp sets whether the app is on the onboarding flow.
@@ -69,9 +95,15 @@ func (s *Status) SetHideHelp(hideHelp bool) {
 
 // Draw draws the status bar onto the screen.
 func (s *Status) Draw(scr uv.Screen, area uv.Rectangle) {
-	if !s.hideHelp {
-		helpView := s.com.Styles.Status.Help.Render(s.help.View(s.helpKm))
-		uv.NewStyledString(helpView).Draw(scr, area)
+	if area.Dx() <= 0 || area.Dy() <= 0 {
+		return
+	}
+	if !s.hideHelp && s.line != "" {
+		statusLine := ansi.Truncate(s.line, area.Dx(), "…")
+		if w := lipgloss.Width(statusLine); w < area.Dx() {
+			statusLine += strings.Repeat(" ", area.Dx()-w)
+		}
+		uv.NewStyledString(s.com.Styles.Status.Help.Render(statusLine)).Draw(scr, area)
 	}
 
 	// Render notifications
@@ -116,8 +148,8 @@ func (s *Status) Draw(scr uv.Screen, area uv.Rectangle) {
 
 // clearInfoMsgCmd returns a command that clears the info message after the
 // given TTL.
-func clearInfoMsgCmd(ttl time.Duration) tea.Cmd {
+func clearInfoMsgCmd(msgID uint64, ttl time.Duration) tea.Cmd {
 	return tea.Tick(ttl, func(time.Time) tea.Msg {
-		return util.ClearStatusMsg{}
+		return util.ClearStatusMsg{ID: msgID}
 	})
 }

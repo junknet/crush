@@ -41,6 +41,7 @@ const (
 	SelectedModelTypePlan    SelectedModelType = "plan"
 	SelectedModelTypeWorker  SelectedModelType = "worker"
 	SelectedModelTypeExplore SelectedModelType = "explore"
+	SelectedModelTypeAuditor SelectedModelType = "auditor"
 )
 
 const (
@@ -48,6 +49,7 @@ const (
 	AgentPlan    string = "plan"
 	AgentWorker  string = "worker"
 	AgentExplore string = "explore"
+	AgentAuditor string = "auditor"
 )
 
 type SelectedModel struct {
@@ -83,6 +85,9 @@ type SelectedModel struct {
 
 	// Override provider specific options.
 	ProviderOptions map[string]any `json:"provider_options,omitempty" jsonschema:"description=Additional provider-specific options for the model"`
+
+	// List of backup model configurations in order of priority.
+	Fallbacks []SelectedModel `json:"fallbacks,omitempty" jsonschema:"description=List of backup model configurations in order of priority"`
 }
 
 type ProviderConfig struct {
@@ -505,7 +510,7 @@ type Agent struct {
 	// This is the id of the system prompt used by the agent
 	Disabled bool `json:"disabled,omitempty"`
 
-	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=brain,enum=plan,enum=worker,enum=explore,default=brain"`
+	Model SelectedModelType `json:"model" jsonschema:"required,description=The model type to use for this agent,enum=brain,enum=plan,enum=worker,enum=explore,enum=auditor,default=brain"`
 
 	// The available tools for the agent
 	//  if this is nil, all tools are available
@@ -519,11 +524,30 @@ type Agent struct {
 
 	// Overrides the context paths for this agent
 	ContextPaths []string `json:"context_paths,omitempty"`
+
+	// MaxTurns limits the number of LLM turns (tool-call rounds) this agent
+	// may take before the loop stops. 0 means unlimited.
+	MaxTurns int `json:"max_turns,omitempty" jsonschema:"description=Maximum number of LLM turns before the agent stops (0 = unlimited),example=8"`
+
+	// ParallelTools lists tool names that may be executed in parallel within
+	// a single turn when the model requests multiple tool calls at once.
+	// Tools not listed here run sequentially.
+	ParallelTools []string `json:"parallel_tools,omitempty" jsonschema:"description=List of tool names that are allowed to run in parallel within a single turn"`
 }
 
 type Tools struct {
-	Ls   ToolLs   `json:"ls,omitzero"`
-	Grep ToolGrep `json:"grep,omitzero"`
+	Ls      ToolLs      `json:"ls,omitzero"`
+	Rg      ToolRg      `json:"rg,omitzero"`
+	AstGrep ToolAstGrep `json:"ast_grep,omitzero"`
+}
+
+type ToolAstGrep struct {
+	Timeout *time.Duration `json:"timeout,omitempty" jsonschema:"description=Timeout for the ast-grep tool call,default=10s,example=20s"`
+}
+
+// GetTimeout returns the user-defined timeout or the default.
+func (t ToolAstGrep) GetTimeout() time.Duration {
+	return ptrValOr(t.Timeout, 10*time.Second)
 }
 
 type ToolLs struct {
@@ -536,12 +560,12 @@ func (t ToolLs) Limits() (depth, items int) {
 	return ptrValOr(t.MaxDepth, 0), ptrValOr(t.MaxItems, 0)
 }
 
-type ToolGrep struct {
-	Timeout *time.Duration `json:"timeout,omitempty" jsonschema:"description=Timeout for the grep tool call,default=5s,example=10s"`
+type ToolRg struct {
+	Timeout *time.Duration `json:"timeout,omitempty" jsonschema:"description=Timeout for the rg tool call,default=5s,example=10s"`
 }
 
 // GetTimeout returns the user-defined timeout or the default.
-func (t ToolGrep) GetTimeout() time.Duration {
+func (t ToolRg) GetTimeout() time.Duration {
 	return ptrValOr(t.Timeout, 5*time.Second)
 }
 
@@ -661,6 +685,11 @@ func (c *Config) ExploreModel() *catwalk.Model {
 	return c.getModelByTypeWithFallbacks(SelectedModelTypeExplore, SelectedModelTypeBrain)
 }
 
+// AuditorModel returns the configured model for the auditor role.
+func (c *Config) AuditorModel() *catwalk.Model {
+	return c.getModelByTypeWithFallbacks(SelectedModelTypeAuditor, SelectedModelTypeBrain)
+}
+
 func (c *Config) getModelByTypeWithFallbacks(modelTypes ...SelectedModelType) *catwalk.Model {
 	for _, modelType := range modelTypes {
 		model, ok := c.Models[modelType]
@@ -705,6 +734,13 @@ func (c *Config) SelectedModelForType(modelType SelectedModelType) (SelectedMode
 		if model, ok := c.Models[SelectedModelTypeBrain]; ok {
 			return model, true
 		}
+	case SelectedModelTypeAuditor:
+		if model, ok := c.Models[SelectedModelTypeAuditor]; ok {
+			return model, true
+		}
+		if model, ok := c.Models[SelectedModelTypeBrain]; ok {
+			return model, true
+		}
 	}
 	return SelectedModel{}, false
 }
@@ -714,6 +750,7 @@ const maxRecentModelsPerType = 5
 func allToolNames() []string {
 	return []string{
 		"agent",
+		"ast_grep",
 		"bash",
 		"crush_info",
 		"crush_logs",
@@ -736,9 +773,12 @@ func allToolNames() []string {
 		"nim_workspace_symbols",
 		"fetch",
 		"agentic_fetch",
-		"glob",
-		"grep",
+		"search",
+		"rg",
 		"ls",
+		"nu",
+		"monitor",
+		"schedule_wakeup",
 		"sourcegraph",
 		"todos",
 		"view",
@@ -762,7 +802,7 @@ func resolveExploreTools(tools []string) []string {
 	// constrains it to read-only inspection commands. Direct mutators
 	// (edit/multiedit/write/download/todos) and nim_restart are excluded.
 	exploreTools := []string{
-		"bash", "glob", "grep", "ls", "sourcegraph", "view",
+		"bash", "nu", "search", "rg", "ls", "sourcegraph", "view",
 		"nim_call_hierarchy",
 		"nim_check_file",
 		"nim_definition",
@@ -831,6 +871,22 @@ func (c *Config) SetupAgents() {
 			AllowedTools: resolveExploreTools(allowedTools),
 			// NO MCPs or LSPs by default
 			AllowedMCP: map[string][]string{},
+			// 16 turns: 8 was too tight for multi-question briefs.
+			// A typical brief has 3-4 sub-questions, each needing 2-3 reads;
+			// at 8 turns the agent would run out mid-investigation and emit
+			// a half-finished "going to look at X" line that looked like a
+			// truncated return to the parent.
+			MaxTurns:      16,
+			ParallelTools: []string{"search", "rg", "view", "ls", "bash", "nu"},
+		},
+		AgentAuditor: {
+			ID:           AgentAuditor,
+			Name:         "Auditor",
+			Description:  "An adversarial quantitative auditor that reviews implementations and code for mathematical and logical safety.",
+			Model:        SelectedModelTypeAuditor,
+			ContextPaths: c.Options.ContextPaths,
+			AllowedTools: resolveExploreTools(allowedTools),
+			AllowedMCP:   map[string][]string{},
 		},
 	}
 
@@ -841,7 +897,7 @@ func (c *Config) SetupAgents() {
 
 	for name, agent := range c.Agents {
 		if agent.Disabled {
-			if name == AgentBrain || name == AgentPlan || name == AgentWorker || name == AgentExplore {
+			if name == AgentBrain || name == AgentPlan || name == AgentWorker || name == AgentExplore || name == AgentAuditor {
 				continue
 			}
 			delete(agents, name)
@@ -876,6 +932,12 @@ func (c *Config) SetupAgents() {
 		if agent.ContextPaths != nil {
 			current.ContextPaths = agent.ContextPaths
 		}
+		if agent.MaxTurns != 0 {
+			current.MaxTurns = agent.MaxTurns
+		}
+		if agent.ParallelTools != nil {
+			current.ParallelTools = agent.ParallelTools
+		}
 		current.Disabled = agent.Disabled
 		agents[name] = current
 	}
@@ -896,6 +958,8 @@ func defaultAgentModelType(agentName string) SelectedModelType {
 		return SelectedModelTypeWorker
 	case AgentExplore:
 		return SelectedModelTypeExplore
+	case AgentAuditor:
+		return SelectedModelTypeAuditor
 	default:
 		return SelectedModelTypeBrain
 	}

@@ -21,8 +21,8 @@ type ModelType int
 
 const (
 	ModelTypeBrain ModelType = iota
-	ModelTypePlan
 	ModelTypeWorker
+	ModelTypeAuditor
 	ModelTypeExplore
 )
 
@@ -31,10 +31,10 @@ func (mt ModelType) String() string {
 	switch mt {
 	case ModelTypeBrain:
 		return "Brain"
-	case ModelTypePlan:
-		return "Plan"
 	case ModelTypeWorker:
 		return "Worker"
+	case ModelTypeAuditor:
+		return "Auditor"
 	case ModelTypeExplore:
 		return "Explore"
 	default:
@@ -49,10 +49,10 @@ func (mt ModelType) Config() config.SelectedModelType {
 	switch mt {
 	case ModelTypeBrain:
 		return config.SelectedModelTypeBrain
-	case ModelTypePlan:
-		return config.SelectedModelTypePlan
 	case ModelTypeWorker:
 		return config.SelectedModelTypeWorker
+	case ModelTypeAuditor:
+		return config.SelectedModelTypeAuditor
 	case ModelTypeExplore:
 		return config.SelectedModelTypeExplore
 	default:
@@ -65,10 +65,10 @@ func (mt ModelType) Placeholder() string {
 	switch mt {
 	case ModelTypeBrain:
 		return brainModelInputPlaceholder
-	case ModelTypePlan:
-		return planModelInputPlaceholder
 	case ModelTypeWorker:
 		return workerModelInputPlaceholder
+	case ModelTypeAuditor:
+		return auditorModelInputPlaceholder
 	case ModelTypeExplore:
 		return exploreModelInputPlaceholder
 	default:
@@ -79,8 +79,8 @@ func (mt ModelType) Placeholder() string {
 const (
 	onboardingModelInputPlaceholder = "Find your fave"
 	brainModelInputPlaceholder      = "Choose a model for the brain role"
-	planModelInputPlaceholder       = "Choose a model for the plan role"
 	workerModelInputPlaceholder     = "Choose a model for the worker role"
+	auditorModelInputPlaceholder    = "Choose a model for the auditor role"
 	exploreModelInputPlaceholder    = "Choose a model for the explore role"
 )
 
@@ -231,9 +231,10 @@ func (m *Models) HandleMsg(msg tea.Msg) Action {
 			if m.isOnboarding {
 				break
 			}
-			// Cycle Brain → Plan → Worker → Explore → Brain. Shift+Tab reverses
+			// Cycle Brain → Worker → Auditor → Explore → Brain. Shift+Tab reverses
 			// the cycle so the same key chord moves both directions through the
-			// four role slots.
+			// four role slots. Plan mode follows brain (no separate slot).
+
 			dir := 1
 			if msg.String() == "shift+tab" {
 				dir = -1
@@ -261,8 +262,8 @@ func (m *Models) Cursor() *tea.Cursor {
 	return InputCursor(m.com.Styles, m.input.Cursor())
 }
 
-// modelTypeRadioView renders the Brain / Plan / Worker / Explore radio strip. The
-// currently-active tab gets the `On` style; tab cycles through them.
+// modelTypeRadioView renders the Brain / Worker / Auditor / Explore radio strip.
+// The currently-active tab gets the `On` style; tab cycles through them.
 func (m *Models) modelTypeRadioView() string {
 	t := m.com.Styles
 	textStyle := t.Radio.Label
@@ -274,8 +275,8 @@ func (m *Models) modelTypeRadioView() string {
 	}
 	return fmt.Sprintf("%s%s  %s%s  %s%s  %s%s",
 		radioFor(m.modelType == ModelTypeBrain), textStyle.Render(ModelTypeBrain.String()),
-		radioFor(m.modelType == ModelTypePlan), textStyle.Render(ModelTypePlan.String()),
 		radioFor(m.modelType == ModelTypeWorker), textStyle.Render(ModelTypeWorker.String()),
+		radioFor(m.modelType == ModelTypeAuditor), textStyle.Render(ModelTypeAuditor.String()),
 		radioFor(m.modelType == ModelTypeExplore), textStyle.Render(ModelTypeExplore.String()))
 }
 
@@ -416,6 +417,7 @@ func (m *Models) setProviderItems() error {
 				itemsMap[item.ID()] = item
 				if model.ID == currentModel.Model && string(provider.ID) == currentModel.Provider {
 					selectedItemID = item.ID()
+					item.SetActive(true)
 				}
 			}
 			if len(group.Items) > 0 {
@@ -481,6 +483,7 @@ func (m *Models) setProviderItems() error {
 			itemsMap[item.ID()] = item
 			if model.ID == currentModel.Model && string(provider.ID) == currentModel.Provider {
 				selectedItemID = item.ID()
+				item.SetActive(true)
 			}
 		}
 
@@ -505,6 +508,7 @@ func (m *Models) setProviderItems() error {
 			recentGroup.AppendItems(item)
 			if recent.Model == currentModel.Model && recent.Provider == currentModel.Provider {
 				selectedItemID = item.ID()
+				item.SetActive(true)
 			}
 		}
 

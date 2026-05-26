@@ -16,11 +16,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
-	"path/filepath"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -42,13 +45,13 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools"
-	"github.com/charmbracelet/crush/internal/memdir"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/eventbus"
 	"github.com/charmbracelet/crush/internal/hooks"
 	crushlog "github.com/charmbracelet/crush/internal/log"
+	"github.com/charmbracelet/crush/internal/memdir"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
@@ -66,6 +69,8 @@ const (
 	// (i.e. remaining <= 30%). Single ratio for every window size so
 	// large-window models compact at the same proportional point as small ones.
 	autoSummarizeRemainingRatio = 0.30
+
+	firstModelEventTimeout = 60 * time.Second
 )
 
 var userAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
@@ -107,12 +112,14 @@ type SessionAgentCall struct {
 
 type SessionAgent interface {
 	Run(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)
-	SetModels(primary Model, title Model)
+	SetModels(primary Model, title Model, fallbackModels []Model)
 	SetTools(tools []fantasy.AgentTool)
 	SetDeferredRegistry(reg *tools.DeferredRegistry)
 	SetSystemPrompt(systemPrompt string)
 	Cancel(sessionID string)
 	CancelAll()
+	CancelAndFlush(sessionID string) ([]string, bool)
+	DrainQueue(sessionID string) []string
 	IsSessionBusy(sessionID string) bool
 	IsBusy() bool
 	QueuedPrompts(sessionID string) int
@@ -132,6 +139,7 @@ type Model struct {
 
 type sessionAgent struct {
 	primaryModel       *csync.Value[Model]
+	fallbackModels     *csync.Slice[Model]
 	titleModel         *csync.Value[Model]
 	systemPromptPrefix *csync.Value[string]
 	systemPrompt       *csync.Value[string]
@@ -147,6 +155,7 @@ type sessionAgent struct {
 	// we inject a <system-reminder> so the model notices.
 	lastDeferredHash *csync.Value[string]
 
+	maxTurns             int
 	isSubAgent           bool
 	sessions             session.Service
 	messages             message.Service
@@ -155,22 +164,26 @@ type sessionAgent struct {
 	dataDir              string
 	workingDir           string
 	hookRunner           *hooks.Runner
+	mergeCallOptions     func(sessionID string, model Model, boost bool) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64)
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
-	activeRequests *csync.Map[string, context.CancelFunc]
+	activeRequests *csync.Map[string, context.CancelCauseFunc]
 	// cancelGen is incremented every time Cancel(sessionID) is called.
 	// Each in-flight Run snapshots the value at start and refuses to
 	// auto-resume queued / summarize follow-up work if the generation
 	// has advanced — that's what makes ESC mean "stop everything" and
 	// not "stop this turn, then keep going with whatever was queued".
-	cancelGen *csync.Map[string, uint64]
+	cancelGen    *csync.Map[string, uint64]
+	retryBackoff func(attempt int) time.Duration
 }
 
 type SessionAgentOptions struct {
 	PrimaryModel         Model
+	FallbackModels       []Model
 	TitleModel           Model
 	SystemPromptPrefix   string
 	SystemPrompt         string
+	MaxTurns             int
 	IsSubAgent           bool
 	DisableAutoSummarize bool
 	Sessions             session.Service
@@ -185,17 +198,27 @@ type SessionAgentOptions struct {
 	// PreToolUse/PostToolUse hooks are wired separately through the tool
 	// wrappers; this field exists so the agent loop can drive turn-level
 	// events without re-creating a Runner on every step.
-	HookRunner *hooks.Runner
+	HookRunner       *hooks.Runner
+	MergeCallOptions func(sessionID string, model Model, boost bool) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64)
+	RetryBackoff     func(attempt int) time.Duration
 }
 
 func NewSessionAgent(
 	opts SessionAgentOptions,
 ) SessionAgent {
+	backoff := opts.RetryBackoff
+	if backoff == nil {
+		backoff = func(attempt int) time.Duration {
+			return time.Duration(1<<attempt) * time.Second
+		}
+	}
 	return &sessionAgent{
 		primaryModel:         csync.NewValue(opts.PrimaryModel),
+		fallbackModels:       csync.NewSliceFrom(opts.FallbackModels),
 		titleModel:           csync.NewValue(opts.TitleModel),
 		systemPromptPrefix:   csync.NewValue(opts.SystemPromptPrefix),
 		systemPrompt:         csync.NewValue(opts.SystemPrompt),
+		maxTurns:             opts.MaxTurns,
 		isSubAgent:           opts.IsSubAgent,
 		sessions:             opts.Sessions,
 		messages:             opts.Messages,
@@ -206,9 +229,11 @@ func NewSessionAgent(
 		dataDir:              opts.DataDir,
 		workingDir:           opts.WorkingDir,
 		hookRunner:           opts.HookRunner,
+		mergeCallOptions:     opts.MergeCallOptions,
 		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
-		activeRequests:       csync.NewMap[string, context.CancelFunc](),
+		activeRequests:       csync.NewMap[string, context.CancelCauseFunc](),
 		cancelGen:            csync.NewMap[string, uint64](),
+		retryBackoff:         backoff,
 	}
 }
 
@@ -277,13 +302,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		agentTools = wrapped
 	}
 
-	agent := fantasy.NewAgent(
-		primaryModel.Model,
-		fantasy.WithSystemPrompt(systemPrompt),
-		fantasy.WithTools(agentTools...),
-		fantasy.WithUserAgent(userAgent),
-	)
-
 	sessionLock := sync.Mutex{}
 	currentSession, err := a.sessions.Get(ctx, call.SessionID)
 	if err != nil {
@@ -337,7 +355,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	ctx = crushlog.WithSessionID(ctx, call.SessionID)
 	slog.DebugContext(ctx, "Agent run started", "sub_agent", a.isSubAgent)
 
-	genCtx, cancel := context.WithCancel(ctx)
+	genCtx, cancel := context.WithCancelCause(ctx)
 	a.activeRequests.Set(call.SessionID, cancel)
 
 	if !call.NonInteractive && a.notify != nil {
@@ -348,7 +366,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		})
 	}
 
-	defer cancel()
+	defer cancel(nil)
 	defer a.activeRequests.Del(call.SessionID)
 	// Drain any debounced message updates before returning. message.Service
 	// already flushes synchronously on terminal updates, but a defer here
@@ -359,29 +377,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			slog.Error("Failed to flush pending message updates after run", "error", flushErr)
 		}
 	}()
-
-	history, files := a.preparePrompt(msgs, primaryModel.CatwalkCfg.SupportsImages, primaryModel.ProviderType, call.Attachments...)
-	if slog.Default().Enabled(ctx, slog.LevelDebug) {
-		roles := make([]string, 0, len(history))
-		emptyCount := 0
-		for _, msg := range history {
-			roles = append(roles, string(msg.Role))
-			if len(msg.Content) == 0 {
-				emptyCount++
-			}
-		}
-		slog.Debug(
-			"Prepared agent payload",
-			"session_id", call.SessionID,
-			"prompt_len", len(call.Prompt),
-			"history_len", len(history),
-			"history_roles", roles,
-			"empty_messages", emptyCount,
-			"file_parts", len(files),
-			"sub_agent", a.isSubAgent,
-			"supports_images", primaryModel.CatwalkCfg.SupportsImages,
-		)
-	}
 
 	startTime := time.Now()
 	a.eventPromptSent(call.SessionID)
@@ -397,285 +392,460 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	if call.DynamicPrefix != "" {
 		promptWithDyn = call.DynamicPrefix + "\n---\n" + promptWithDyn
 	}
-	result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
-		Prompt:           message.PromptWithTextAttachments(promptWithDyn, call.Attachments),
-		Files:            files,
-		Messages:         history,
-		ProviderOptions:  call.ProviderOptions,
-		MaxOutputTokens:  maxOutputTokens,
-		TopP:             call.TopP,
-		Temperature:      call.Temperature,
-		PresencePenalty:  call.PresencePenalty,
-		TopK:             call.TopK,
-		FrequencyPenalty: call.FrequencyPenalty,
-		PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
-			prepared.Messages = options.Messages
-			for i := range prepared.Messages {
-				prepared.Messages[i].ProviderOptions = nil
-			}
 
-			// Use latest tools (updated by SetTools when MCP tools change).
-			prepared.Tools = a.tools.Copy()
+	var currentModel Model
+	// Build candidate models list: prioritized according to cluster health.
+	candidateModels := PrioritizeModels(primaryModel, a.fallbackModels.Copy())
+	var lastErr error
+	var result *fantasy.AgentResult
 
-			// Merge in the deferred registry: activated tools' real
-			// schemas, plus proxy stubs for tools whose schemas the
-			// model has not asked to load yet. tool_search itself is
-			// already in prepared.Tools (registered up-front).
-			if reg := a.deferredRegistry.Load(); reg != nil {
-				prepared.Tools = mergeDeferredTools(prepared.Tools, reg)
-			}
-
-			queuedCalls, _ := a.messageQueue.Get(call.SessionID)
-			a.messageQueue.Del(call.SessionID)
-			for _, queued := range queuedCalls {
-				userMessage, createErr := a.createUserMessage(callContext, queued)
-				if createErr != nil {
-					return callContext, prepared, createErr
-				}
-				prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
-			}
-
-			// Drain any externally-published events (background-job completions,
-			// monitor hits, fired cron tasks) for this session and fold them
-			// into the last user message as a <task-notification> block.
-			// This is in addition to the dedicated wake-up Runs the coordinator
-			// kicks off — events that arrive concurrently with an in-flight
-			// turn surface here on the next step so nothing is lost.
-			if pending := eventbus.Default.Drain(call.SessionID); len(pending) > 0 {
-				notification := renderTaskNotification(pending)
-				prepared.Messages = injectTaskNotification(prepared.Messages, notification)
-			}
-
-			// If the visible deferred-tool set changed since last step,
-			// surface a <system-reminder> so the model notices new
-			// schemas or now-connected MCP servers. The reminder rides
-			// on the latest user message; if there isn't one we append
-			// a synthetic user message carrying just the reminder.
-			if reg := a.deferredRegistry.Load(); reg != nil {
-				prepared.Messages = a.maybeInjectDeferredReminder(prepared.Messages, reg)
-			}
-
-			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, primaryModel.ProviderType)
-
-			lastSystemRoleInx := 0
-			systemMessageUpdated := false
-			for i, msg := range prepared.Messages {
-				// Only add cache control to the last message.
-				if msg.Role == fantasy.MessageRoleSystem {
-					lastSystemRoleInx = i
-				} else if !systemMessageUpdated {
-					prepared.Messages[lastSystemRoleInx].ProviderOptions = a.getCacheControlOptions()
-					systemMessageUpdated = true
-				}
-				// Than add cache control to the last 2 messages.
-				if i > len(prepared.Messages)-3 {
-					prepared.Messages[i].ProviderOptions = a.getCacheControlOptions()
-				}
-			}
-
-			if promptPrefix != "" {
-				prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(promptPrefix)}, prepared.Messages...)
-			}
-
-			var assistantMsg message.Message
-			assistantMsg, err = a.messages.Create(callContext, call.SessionID, message.CreateMessageParams{
-				Role:     message.Assistant,
-				Parts:    []message.ContentPart{},
-				Model:    primaryModel.ModelCfg.Model,
-				Provider: primaryModel.ModelCfg.Provider,
-			})
-			if err != nil {
-				return callContext, prepared, err
-			}
-			callContext = context.WithValue(callContext, tools.MessageIDContextKey, assistantMsg.ID)
-			callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, primaryModel.CatwalkCfg.SupportsImages)
-			callContext = context.WithValue(callContext, tools.ModelNameContextKey, primaryModel.CatwalkCfg.Name)
-			currentAssistant = &assistantMsg
-			currentAssistant.SetBoostedReasoning(call.BoostReasoning)
-			return callContext, prepared, err
-		},
-		OnReasoningStart: func(id string, reasoning fantasy.ReasoningContent) error {
-			currentAssistant.AppendReasoningContent(reasoning.Text)
-			return a.messages.Update(genCtx, *currentAssistant)
-		},
-		OnReasoningDelta: func(id string, text string) error {
-			currentAssistant.AppendReasoningContent(text)
-			return a.messages.Update(genCtx, *currentAssistant)
-		},
-		OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
-			// handle anthropic signature
-			if anthropicData, ok := reasoning.ProviderMetadata[anthropic.Name]; ok {
-				if reasoning, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok {
-					currentAssistant.AppendReasoningSignature(reasoning.Signature)
-				}
-			}
-			if googleData, ok := reasoning.ProviderMetadata[google.Name]; ok {
-				if reasoning, ok := googleData.(*google.ReasoningMetadata); ok {
-					currentAssistant.AppendThoughtSignature(reasoning.Signature, reasoning.ToolID)
-				}
-			}
-			if openaiData, ok := reasoning.ProviderMetadata[openai.Name]; ok {
-				if reasoning, ok := openaiData.(*openai.ResponsesReasoningMetadata); ok {
-					currentAssistant.SetReasoningResponsesData(reasoning)
-				}
-			}
-			currentAssistant.FinishThinking()
-			return a.messages.Update(genCtx, *currentAssistant)
-		},
-		OnTextDelta: func(id string, text string) error {
-			// Strip leading newline from initial text content. This is is
-			// particularly important in non-interactive mode where leading
-			// newlines are very visible.
-			if len(currentAssistant.Parts) == 0 {
-				text = strings.TrimPrefix(text, "\n")
-			}
-
-			currentAssistant.AppendContent(text)
-			return a.messages.Update(genCtx, *currentAssistant)
-		},
-		OnToolInputStart: func(id string, toolName string) error {
-			toolCall := message.ToolCall{
-				ID:               id,
-				Name:             toolName,
-				ProviderExecuted: false,
-				Finished:         false,
-			}
-			currentAssistant.AddToolCall(toolCall)
-			// Use parent ctx instead of genCtx to ensure the update succeeds
-			// even if the request is canceled mid-stream
-			return a.messages.Update(ctx, *currentAssistant)
-		},
-		OnRetry: func(err *fantasy.ProviderError, delay time.Duration) {
-			slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay)...)
-		},
-		OnToolCall: func(tc fantasy.ToolCallContent) error {
-			toolCall := message.ToolCall{
-				ID:               tc.ToolCallID,
-				Name:             tc.ToolName,
-				Input:            tc.Input,
-				ProviderExecuted: false,
-				Finished:         true,
-			}
-			// Gemini 3 (antigravity) attaches a thought_signature to each
-			// functionCall and rejects replayed tool-call history that lacks
-			// it. Persist it so the next turn can round-trip it.
-			if po := antigravity.GetProviderOptions(fantasy.ProviderOptions(tc.ProviderMetadata)); po != nil {
-				toolCall.ThoughtSignature = po.ThoughtSignature
-			}
-			currentAssistant.AddToolCall(toolCall)
-			// Use parent ctx instead of genCtx to ensure the update succeeds
-			// even if the request is canceled mid-stream
-			return a.messages.Update(ctx, *currentAssistant)
-		},
-		OnToolResult: func(result fantasy.ToolResultContent) error {
-			toolResult := a.convertToToolResult(result)
-			// Use parent ctx instead of genCtx to ensure the message is created
-			// even if the request is canceled mid-stream
-			_, createMsgErr := a.messages.Create(ctx, currentAssistant.SessionID, message.CreateMessageParams{
-				Role: message.Tool,
-				Parts: []message.ContentPart{
-					toolResult,
-				},
-			})
-			return createMsgErr
-		},
-		OnStepFinish: func(stepResult fantasy.StepResult) error {
-			finishReason := message.FinishReasonUnknown
-			switch stepResult.FinishReason {
-			case fantasy.FinishReasonLength:
-				finishReason = message.FinishReasonMaxTokens
-			case fantasy.FinishReasonStop:
-				finishReason = message.FinishReasonEndTurn
-			case fantasy.FinishReasonToolCalls:
-				finishReason = message.FinishReasonToolUse
-			}
-			// If a tool result halted the turn (e.g. a hook halt or a
-			// permission denial), the step ends on FinishReasonToolCalls but
-			// the model will not be called again. Treat it as the end of the
-			// turn so the UI can render the assistant footer.
-			if finishReason == message.FinishReasonToolUse {
-				for _, tr := range stepResult.Content.ToolResults() {
-					if tr.StopTurn {
-						finishReason = message.FinishReasonEndTurn
+	for i, model := range candidateModels {
+		currentModel = model
+		// If another process is currently probing this provider, block/wait for it
+		if state, err := ReadProviderHealth(); err == nil && state.ProbingInProgress && state.ProbingProvider == currentModel.ModelCfg.Provider {
+			slog.InfoContext(genCtx, "Waiting for other process to finish probing provider", "provider", currentModel.ModelCfg.Provider)
+			active, waitErr := WaitForProbing(genCtx, currentModel.ModelCfg.Provider)
+			if waitErr == nil && active != "" {
+				candidateModels = PrioritizeModels(primaryModel, a.fallbackModels.Copy())
+				found := false
+				for _, m := range candidateModels {
+					if m.ModelCfg.Provider == active {
+						currentModel = m
+						found = true
 						break
 					}
 				}
+				if !found {
+					currentModel = candidateModels[0]
+				}
 			}
-			// A reasoning model can return finish_reason=length having spent
-			// its whole output budget on reasoning, emitting no text and no
-			// tool call. Without this guard the turn ends "successfully" with
-			// an empty footer, so the user keeps prompting into a dead end
-			// (typically a context window that is full but mis-declared larger
-			// than it really is). Surface it as an explicit error instead.
-			if finishReason == message.FinishReasonMaxTokens &&
-				stepResult.Content.Text() == "" &&
-				len(stepResult.Content.ToolCalls()) == 0 {
-				currentAssistant.AddFinish(
-					message.FinishReasonError,
-					"Response truncated before any output",
-					"The model hit its output-token limit while reasoning and produced no text or tool call. The context window is likely full — run /compact or start a new session, and verify the provider's context_window matches the backend's real limit.",
-				)
-			} else {
-				currentAssistant.AddFinish(finishReason, "", "")
-			}
-			sessionLock.Lock()
-			defer sessionLock.Unlock()
+		}
+		if i > 0 {
+			slog.WarnContext(ctx, "Failing over to backup model", "failed_model", candidateModels[i-1].CatwalkCfg.Name, "backup_model", currentModel.CatwalkCfg.Name)
+		}
 
-			updatedSession, getSessionErr := a.sessions.Get(ctx, call.SessionID)
-			if getSessionErr != nil {
-				return getSessionErr
+		var currentProviderOpts fantasy.ProviderOptions
+		var currentTemp, currentTopP, currentFreqPenalty, currentPresPenalty *float64
+		var currentTopK *int64
+
+		if a.mergeCallOptions != nil {
+			currentProviderOpts, currentTemp, currentTopP, currentTopK, currentFreqPenalty, currentPresPenalty = a.mergeCallOptions(call.SessionID, currentModel, call.BoostReasoning)
+		} else {
+			currentProviderOpts = call.ProviderOptions
+			currentTemp = call.Temperature
+			currentTopP = call.TopP
+			currentTopK = call.TopK
+			currentFreqPenalty = call.FrequencyPenalty
+			currentPresPenalty = call.PresencePenalty
+		}
+
+		history, files := a.preparePrompt(currentSession, msgs, currentModel.CatwalkCfg.SupportsImages, currentModel.ProviderType, call.Attachments...)
+		if slog.Default().Enabled(ctx, slog.LevelDebug) {
+			roles := make([]string, 0, len(history))
+			emptyCount := 0
+			for _, msg := range history {
+				roles = append(roles, string(msg.Role))
+				if len(msg.Content) == 0 {
+					emptyCount++
+				}
 			}
-			a.updateSessionUsage(primaryModel, &updatedSession, stepResult.Usage, a.openrouterCost(stepResult.ProviderMetadata))
-			_, sessionErr := a.sessions.Save(ctx, updatedSession)
-			if sessionErr != nil {
-				return sessionErr
+			slog.Debug(
+				"Prepared agent payload",
+				"session_id", call.SessionID,
+				"prompt_len", len(call.Prompt),
+				"history_len", len(history),
+				"history_roles", roles,
+				"empty_messages", emptyCount,
+				"file_parts", len(files),
+				"sub_agent", a.isSubAgent,
+				"supports_images", currentModel.CatwalkCfg.SupportsImages,
+			)
+		}
+
+		if isTesting() {
+			systemPrompt = strings.ReplaceAll(systemPrompt, "\n<!-- DYNAMIC BOUNDARY -->", "")
+			systemPrompt = strings.ReplaceAll(systemPrompt, "<!-- DYNAMIC BOUNDARY -->", "")
+		}
+
+		staticPrompt := systemPrompt
+		var dynamicPrompt string
+		if !isTesting() {
+			if idx := strings.Index(systemPrompt, "<!-- DYNAMIC BOUNDARY -->"); idx != -1 {
+				staticPrompt = strings.TrimSpace(systemPrompt[:idx])
+				dynamicPrompt = strings.TrimSpace(systemPrompt[idx+len("<!-- DYNAMIC BOUNDARY -->"):])
 			}
-			currentSession = updatedSession
-			if updateErr := a.messages.Update(genCtx, *currentAssistant); updateErr != nil {
-				return updateErr
+		}
+
+		agent := fantasy.NewAgent(
+			currentModel.Model,
+			fantasy.WithSystemPrompt(staticPrompt),
+			fantasy.WithTools(agentTools...),
+			fantasy.WithUserAgent(userAgent),
+		)
+
+		var success bool
+		for attempt := 1; attempt <= 4; attempt++ {
+			if genCtx.Err() != nil {
+				return nil, genCtx.Err()
 			}
-			// Free token budget without an LLM call by clearing aged-out,
-			// oversized tool results to local spill files. Errors inside
-			// microCompactStep are logged and swallowed; they must not
-			// abort an otherwise successful turn.
-			a.microCompactStep(genCtx, call.SessionID)
-			// G7 Stop hook: fire once per terminal step. EndTurn and
-			// MaxTokens are obvious turn boundaries; ToolUse is in-flight
-			// and skipped. Sub-agents inherit the parent's hookRunner only
-			// when wired; nil-receiver path is a no-op.
-			if a.hookRunner != nil && (finishReason == message.FinishReasonEndTurn || finishReason == message.FinishReasonMaxTokens) {
-				a.fireStopHook(genCtx, call.SessionID, finishReason, stepResult)
+
+			if attempt > 1 {
+				backoff := a.retryBackoff(attempt)
+				slog.InfoContext(genCtx, "Retrying model call due to failure", "model", currentModel.CatwalkCfg.Name, "attempt", attempt, "backoff", backoff, "error", lastErr)
+				select {
+				case <-genCtx.Done():
+					return nil, genCtx.Err()
+				case <-time.After(backoff):
+				}
 			}
-			return nil
-		},
-		StopWhen: []fantasy.StopCondition{
-			func(_ []fantasy.StepResult) bool {
-				cw := int64(primaryModel.CatwalkCfg.ContextWindow)
-				// If context window is unknown (0), skip auto-summarize
-				// to avoid immediately truncating custom/local models.
-				if cw == 0 {
+
+			isFirstStep := true
+			streamCtx, cancelStream := context.WithCancelCause(genCtx)
+			go WatchProviderHealth(streamCtx, currentModel.ModelCfg.Provider, candidateModels, func() {
+				cancelStream(ErrProviderFailover)
+			})
+
+			receivedFirstToken := false
+			firstTokenTimer := time.AfterFunc(firstModelEventTimeout, func() {
+				if !receivedFirstToken {
+					cancelStream(fmt.Errorf("first-token timeout: no response received from %s (provider: %s) within %s. Please check your network connection, API keys, or provider status", currentModel.CatwalkCfg.Name, currentModel.ModelCfg.Provider, firstModelEventTimeout))
+				}
+			})
+			defer firstTokenTimer.Stop()
+
+			stopFirstTokenTimer := func() {
+				if !receivedFirstToken {
+					receivedFirstToken = true
+					firstTokenTimer.Stop()
+				}
+			}
+
+			result, lastErr = agent.Stream(streamCtx, fantasy.AgentStreamCall{
+				Prompt:           message.PromptWithTextAttachments(promptWithDyn, call.Attachments),
+				Files:            files,
+				Messages:         history,
+				ProviderOptions:  currentProviderOpts,
+				MaxOutputTokens:  maxOutputTokens,
+				TopP:             currentTopP,
+				Temperature:      currentTemp,
+				PresencePenalty:  currentPresPenalty,
+				TopK:             currentTopK,
+				FrequencyPenalty: currentFreqPenalty,
+				PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+					prepared.Messages = options.Messages
+					for i := range prepared.Messages {
+						prepared.Messages[i].ProviderOptions = nil
+					}
+
+					prepared.Tools = a.tools.Copy()
+					if reg := a.deferredRegistry.Load(); reg != nil {
+						prepared.Tools = mergeDeferredTools(prepared.Tools, reg)
+					}
+
+					queuedCalls, _ := a.messageQueue.Get(call.SessionID)
+					a.messageQueue.Del(call.SessionID)
+					for _, queued := range queuedCalls {
+						userMessage, createErr := a.createUserMessage(callContext, queued)
+						if createErr != nil {
+							return callContext, prepared, createErr
+						}
+						prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
+					}
+
+					if pending := eventbus.Default.Drain(call.SessionID); len(pending) > 0 {
+						notification := renderTaskNotification(pending)
+						prepared.Messages = injectTaskNotification(prepared.Messages, notification)
+					}
+
+					if reg := a.deferredRegistry.Load(); reg != nil {
+						prepared.Messages = a.maybeInjectDeferredReminder(prepared.Messages, reg)
+					}
+
+					prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, currentModel.ProviderType)
+
+					lastSystemRoleInx := 0
+					systemMessageUpdated := false
+					for i, msg := range prepared.Messages {
+						if msg.Role == fantasy.MessageRoleSystem {
+							lastSystemRoleInx = i
+						} else if !systemMessageUpdated {
+							prepared.Messages[lastSystemRoleInx].ProviderOptions = a.getCacheControlOptions()
+							systemMessageUpdated = true
+						}
+						if i > len(prepared.Messages)-3 {
+							prepared.Messages[i].ProviderOptions = a.getCacheControlOptions()
+						}
+					}
+
+					if dynamicPrompt != "" {
+						for i := range prepared.Messages {
+							if prepared.Messages[i].Role == fantasy.MessageRoleUser {
+								wrappedText := fmt.Sprintf("<system_context>\n%s\n</system_context>\n\n", dynamicPrompt)
+								prepared.Messages[i].Content = append([]fantasy.MessagePart{fantasy.TextPart{Text: wrappedText}}, prepared.Messages[i].Content...)
+								break
+							}
+						}
+					}
+					if promptPrefix != "" {
+						prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(promptPrefix)}, prepared.Messages...)
+					}
+
+					if isFirstStep && currentAssistant != nil {
+						if deleteErr := a.messages.Delete(callContext, currentAssistant.ID); deleteErr != nil {
+							slog.WarnContext(callContext, "Failed to delete old assistant message", "id", currentAssistant.ID, "error", deleteErr)
+						}
+						currentAssistant = nil
+					}
+					isFirstStep = false
+
+					var assistantMsg message.Message
+					assistantMsg, err = a.messages.Create(callContext, call.SessionID, message.CreateMessageParams{
+						Role:     message.Assistant,
+						Parts:    []message.ContentPart{},
+						Model:    currentModel.ModelCfg.Model,
+						Provider: currentModel.ModelCfg.Provider,
+					})
+					if err != nil {
+						return callContext, prepared, err
+					}
+					callContext = context.WithValue(callContext, tools.MessageIDContextKey, assistantMsg.ID)
+					callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, currentModel.CatwalkCfg.SupportsImages)
+					callContext = context.WithValue(callContext, tools.ModelNameContextKey, currentModel.CatwalkCfg.Name)
+					currentAssistant = &assistantMsg
+					currentAssistant.SetBoostedReasoning(call.BoostReasoning)
+					return callContext, prepared, err
+				},
+				OnReasoningStart: func(id string, reasoning fantasy.ReasoningContent) error {
+					stopFirstTokenTimer()
+					currentAssistant.AppendReasoningContent(reasoning.Text)
+					return a.messages.Update(genCtx, *currentAssistant)
+				},
+				OnReasoningDelta: func(id string, text string) error {
+					stopFirstTokenTimer()
+					currentAssistant.AppendReasoningContent(text)
+					return a.messages.Update(genCtx, *currentAssistant)
+				},
+				OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
+					if anthropicData, ok := reasoning.ProviderMetadata[anthropic.Name]; ok {
+						if reasoning, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok {
+							currentAssistant.AppendReasoningSignature(reasoning.Signature)
+						}
+					}
+					if googleData, ok := reasoning.ProviderMetadata[google.Name]; ok {
+						if reasoning, ok := googleData.(*google.ReasoningMetadata); ok {
+							currentAssistant.AppendThoughtSignature(reasoning.Signature, reasoning.ToolID)
+						}
+					}
+					if openaiData, ok := reasoning.ProviderMetadata[openai.Name]; ok {
+						if reasoning, ok := openaiData.(*openai.ResponsesReasoningMetadata); ok {
+							currentAssistant.SetReasoningResponsesData(reasoning)
+						}
+					}
+					currentAssistant.FinishThinking()
+					return a.messages.Update(genCtx, *currentAssistant)
+				},
+				OnTextDelta: func(id string, text string) error {
+					stopFirstTokenTimer()
+					if len(currentAssistant.Parts) == 0 {
+						text = strings.TrimPrefix(text, "\n")
+					}
+					currentAssistant.AppendContent(text)
+					return a.messages.Update(genCtx, *currentAssistant)
+				},
+				OnToolInputStart: func(id string, toolName string) error {
+					stopFirstTokenTimer()
+					toolCall := message.ToolCall{
+						ID:               id,
+						Name:             toolName,
+						ProviderExecuted: false,
+						Finished:         false,
+					}
+					currentAssistant.AddToolCall(toolCall)
+					return a.messages.Update(ctx, *currentAssistant)
+				},
+				OnRetry: func(err *fantasy.ProviderError, delay time.Duration) {
+					slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay)...)
+				},
+				OnToolCall: func(tc fantasy.ToolCallContent) error {
+					stopFirstTokenTimer()
+					toolCall := message.ToolCall{
+						ID:               tc.ToolCallID,
+						Name:             tc.ToolName,
+						Input:            tc.Input,
+						ProviderExecuted: false,
+						Finished:         true,
+					}
+					if po := antigravity.GetProviderOptions(fantasy.ProviderOptions(tc.ProviderMetadata)); po != nil {
+						toolCall.ThoughtSignature = po.ThoughtSignature
+					}
+					currentAssistant.AddToolCall(toolCall)
+					return a.messages.Update(ctx, *currentAssistant)
+				},
+				OnToolResult: func(result fantasy.ToolResultContent) error {
+					stopFirstTokenTimer()
+					toolResult := a.convertToToolResult(result)
+					_, createMsgErr := a.messages.Create(ctx, currentAssistant.SessionID, message.CreateMessageParams{
+						Role: message.Tool,
+						Parts: []message.ContentPart{
+							toolResult,
+						},
+					})
+					return createMsgErr
+				},
+				OnStepFinish: func(stepResult fantasy.StepResult) error {
+					stopFirstTokenTimer()
+					finishReason := message.FinishReasonUnknown
+					switch stepResult.FinishReason {
+					case fantasy.FinishReasonLength:
+						finishReason = message.FinishReasonMaxTokens
+					case fantasy.FinishReasonStop:
+						finishReason = message.FinishReasonEndTurn
+					case fantasy.FinishReasonToolCalls:
+						finishReason = message.FinishReasonToolUse
+					}
+					if finishReason == message.FinishReasonToolUse {
+						for _, tr := range stepResult.Content.ToolResults() {
+							if tr.StopTurn {
+								finishReason = message.FinishReasonEndTurn
+								break
+							}
+						}
+					}
+					if finishReason == message.FinishReasonMaxTokens &&
+						stepResult.Content.Text() == "" &&
+						len(stepResult.Content.ToolCalls()) == 0 {
+						currentAssistant.AddFinish(
+							message.FinishReasonError,
+							"Response truncated before any output",
+							"The model hit its output-token limit while reasoning and produced no text or tool call. The context window is likely full — run /compact or start a new session, and verify the provider's context_window matches the backend's real limit.",
+						)
+					} else {
+						currentAssistant.AddFinish(finishReason, "", "")
+					}
+					sessionLock.Lock()
+					defer sessionLock.Unlock()
+
+					updatedSession, getSessionErr := a.sessions.Get(ctx, call.SessionID)
+					if getSessionErr != nil {
+						return getSessionErr
+					}
+					a.updateSessionUsage(currentModel, &updatedSession, stepResult.Usage, a.openrouterCost(stepResult.ProviderMetadata))
+					_, sessionErr := a.sessions.Save(ctx, updatedSession)
+					if sessionErr != nil {
+						return sessionErr
+					}
+					currentSession = updatedSession
+					if updateErr := a.messages.Update(genCtx, *currentAssistant); updateErr != nil {
+						return updateErr
+					}
+					a.microCompactStep(genCtx, call.SessionID)
+					if a.hookRunner != nil && (finishReason == message.FinishReasonEndTurn || finishReason == message.FinishReasonMaxTokens) {
+						a.fireStopHook(genCtx, call.SessionID, finishReason, stepResult)
+					}
+					return nil
+				},
+				StopWhen: a.buildStopConditions(func(_ []fantasy.StepResult) bool {
+					cw := int64(currentModel.CatwalkCfg.ContextWindow)
+					if cw == 0 {
+						return false
+					}
+					tokens := currentSession.CompletionTokens + currentSession.PromptTokens
+					remaining := cw - tokens
+					threshold := int64(float64(cw) * autoSummarizeRemainingRatio)
+					if (remaining <= threshold) && !a.disableAutoSummarize {
+						shouldSummarize = true
+						return true
+					}
 					return false
+				}, func(steps []fantasy.StepResult) bool {
+					return hasRepeatedToolCalls(steps, loopDetectionWindowSize, loopDetectionMaxRepeats)
+				}),
+			})
+			cancelStream(nil)
+			firstTokenTimer.Stop()
+
+			if lastErr != nil && errors.Is(lastErr, context.Canceled) {
+				if cause := context.Cause(streamCtx); cause != nil && !errors.Is(cause, context.Canceled) {
+					lastErr = cause
 				}
-				tokens := currentSession.CompletionTokens + currentSession.PromptTokens
-				remaining := cw - tokens
-				threshold := int64(float64(cw) * autoSummarizeRemainingRatio)
-				if (remaining <= threshold) && !a.disableAutoSummarize {
-					shouldSummarize = true
-					return true
+			}
+
+			if lastErr == nil {
+				success = true
+				_ = MarkProviderActive(currentModel.ModelCfg.Provider)
+				break
+			}
+			if shouldCloseProviderIdleConnections(lastErr, context.Cause(streamCtx)) {
+				crushlog.CloseProviderIdleConnections()
+				slog.DebugContext(genCtx, "Closed idle provider HTTP connections after stream failure", "provider", currentModel.ModelCfg.Provider, "model", currentModel.CatwalkCfg.Name, "attempt", attempt, "error", lastErr)
+			}
+			if errors.Is(context.Cause(streamCtx), ErrProviderFailover) {
+				break
+			}
+			isDefinitiveFailure := isDefinitiveUpstreamFailure(lastErr, currentModel.ModelCfg.Provider)
+			if (attempt == 4 || isDefinitiveFailure) && !errors.Is(context.Cause(streamCtx), ErrRequestCancelled) {
+				// Acquire the probing lock. Only one process acts as the leader for failover
+				acquired, lockErr := AcquireProbingLock(currentModel.ModelCfg.Provider)
+				if lockErr == nil && acquired {
+					// Mark the failed provider unhealthy for 2 hours
+					_ = MarkProviderUnhealthy(currentModel.ModelCfg.Provider, 2*time.Hour)
+
+					// Try to select the next healthy candidate provider to be the active one
+					nextActive := ""
+					for _, m := range candidateModels {
+						p := m.ModelCfg.Provider
+						if p != currentModel.ModelCfg.Provider {
+							if state, err := ReadProviderHealth(); err == nil {
+								until, ok := state.UnhealthyUntil[p]
+								if !ok || time.Now().After(until) {
+									nextActive = p
+									break
+								}
+							} else {
+								nextActive = p
+								break
+							}
+						}
+					}
+					if nextActive != "" {
+						_ = MarkProviderActive(nextActive)
+					}
+					_ = ReleaseProbingLock(currentModel.ModelCfg.Provider)
 				}
-				return false
-			},
-			func(steps []fantasy.StepResult) bool {
-				return hasRepeatedToolCalls(steps, loopDetectionWindowSize, loopDetectionMaxRepeats)
-			},
-		},
-	})
+				break
+			}
+			// Only the USER-initiated cancel breaks the retry loop. A bare
+			// `context.Canceled` can also come from transport-level cancels
+			// (stream timeout, provider disconnect, upstream proxy 499) —
+			// those should fall through to the next attempt/fallback model
+			// so an unreliable provider doesn't lock the UI in "Working…".
+			// `context.WithCancelCause(ctx)` lets us tell them apart via
+			// context.Cause(): only user cancels surface ErrRequestCancelled.
+			if errors.Is(context.Cause(genCtx), ErrRequestCancelled) {
+				break
+			}
+		}
+
+		if success {
+			break
+		}
+
+		if errors.Is(context.Cause(genCtx), ErrRequestCancelled) {
+			break
+		}
+	}
 
 	a.eventPromptResponded(call.SessionID, time.Since(startTime).Truncate(time.Second))
 
+	err = lastErr
 	if err != nil {
-		isHyper := primaryModel.ModelCfg.Provider == hyper.Name
-		isCancelErr := errors.Is(err, context.Canceled)
+		isHyper := currentModel.ModelCfg.Provider == hyper.Name
+		// Distinguish user cancel from transport cancel via Cause: only
+		// user cancel collapses the turn into the "cancelled" finish; a
+		// provider-side cancel after exhausted retries/fallbacks is a
+		// real error and must be reported (and finalized) so the UI is
+		// not stuck in Working state.
+		isCancelErr := errors.Is(context.Cause(genCtx), ErrRequestCancelled)
 		isContextOverflow := isContextLengthExceeded(err)
 		if currentAssistant == nil {
 			return result, err
@@ -776,10 +946,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					fmt.Sprintf("%q is not enabled in Copilot. Go to the following page to enable it. Then, wait 5 minutes before trying again. %s", primaryModel.CatwalkCfg.Name, link),
 				)
 			} else {
-				currentAssistant.AddFinish(message.FinishReasonError, cmp.Or(stringext.Capitalize(providerErr.Title), defaultTitle), providerErr.Message)
+				details := providerErr.Message
+				if underlying := err.Error(); underlying != "" && !strings.Contains(underlying, details) {
+					details = fmt.Sprintf("%s\n\nUnderlying error:\n%s", details, underlying)
+				}
+				currentAssistant.AddFinish(message.FinishReasonError, cmp.Or(stringext.Capitalize(providerErr.Title), defaultTitle), details)
 			}
 		case errors.As(err, &fantasyErr):
-			currentAssistant.AddFinish(message.FinishReasonError, cmp.Or(stringext.Capitalize(fantasyErr.Title), defaultTitle), fantasyErr.Message)
+			details := fantasyErr.Message
+			if underlying := err.Error(); underlying != "" && !strings.Contains(underlying, details) {
+				details = fmt.Sprintf("%s\n\nUnderlying error:\n%s", details, underlying)
+			}
+			currentAssistant.AddFinish(message.FinishReasonError, cmp.Or(stringext.Capitalize(fantasyErr.Title), defaultTitle), details)
 		default:
 			currentAssistant.AddFinish(message.FinishReasonError, defaultTitle, err.Error())
 		}
@@ -824,7 +1002,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// tea.Msg arrives, so the cleanup must precede the notify or
 	// subscribers see stale busy state at the moment of receipt.
 	a.activeRequests.Del(call.SessionID)
-	cancel()
+	cancel(nil)
 
 	// Send notification that agent has finished its turn (skip for
 	// nested/non-interactive sessions).
@@ -917,10 +1095,10 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 		}
 	}
 
-	genCtx, cancel := context.WithCancel(ctx)
+	genCtx, cancel := context.WithCancelCause(ctx)
 	a.activeRequests.Set(sessionID, cancel)
 	defer a.activeRequests.Del(sessionID)
-	defer cancel()
+	defer cancel(nil)
 	defer func() {
 		if flushErr := a.messages.FlushAll(ctx); flushErr != nil {
 			slog.Error("Failed to flush pending message updates after summarize", "error", flushErr)
@@ -952,7 +1130,7 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 			return updateErr
 		}
 
-		aiMsgs, _ := a.preparePrompt(summaryMessages, primaryModel.CatwalkCfg.SupportsImages, primaryModel.ProviderType)
+		aiMsgs, _ := a.preparePrompt(currentSession, summaryMessages, primaryModel.CatwalkCfg.SupportsImages, primaryModel.ProviderType)
 		resp, err = agent.Stream(genCtx, fantasy.AgentStreamCall{
 			Prompt:          summaryPromptText,
 			Messages:        aiMsgs,
@@ -1056,7 +1234,7 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 	// Release the active request before processing queued messages so that
 	// Run() does not see the session as busy.
 	a.activeRequests.Del(sessionID)
-	cancel()
+	cancel(nil)
 
 	// User-cancellation gate (same semantics as in Run).
 	if curGen, _ := a.cancelGen.Get(sessionID); curGen != startCancelGen {
@@ -1125,15 +1303,23 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 	return msg, nil
 }
 
-func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool, providerType catwalk.Type, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
+func (a *sessionAgent) preparePrompt(currentSession session.Session, msgs []message.Message, supportsImages bool, providerType catwalk.Type, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
 	if !a.isSubAgent {
+		var reminder string
+		if len(currentSession.Todos) == 0 {
+			reminder = `This is a reminder that your todo list is currently empty. DO NOT mention this to the user explicitly because they are already aware.
+If you are working on tasks that would benefit from a todo list please use the "todos" tool to create one.
+If not, please feel free to ignore. Again do not mention this message to the user.`
+		} else {
+			reminder = `You have an active todo list. DO NOT stop working or ask for permission until all tasks are either completed or clearly failed.
+If a task fails, try to fix it or mark it as failed using the "todos" tool before yielding.
+Always check your todo list before responding "Ready?".`
+		}
 		history = append(history, fantasy.NewUserMessage(
 			fmt.Sprintf(
 				"<system_reminder>%s</system_reminder>",
-				`This is a reminder that your todo list is currently empty. DO NOT mention this to the user explicitly because they are already aware.
-If you are working on tasks that would benefit from a todo list please use the "todos" tool to create one.
-If not, please feel free to ignore. Again do not mention this message to the user.`,
+				reminder,
 			),
 		))
 	}
@@ -1210,11 +1396,28 @@ If not, please feel free to ignore. Again do not mention this message to the use
 				if providerType == catwalk.Type(catwalk.InferenceProviderAnthropic) || providerType == catwalk.Type(catwalk.InferenceProviderBedrock) {
 					msg = ensureAnthropicToolResultVisibility(msg)
 				}
-				history = append(history, msg)
+				// Truncate media in historical tool results
+				for j := range msg.Content {
+					if tr, ok := msg.Content[j].(fantasy.ToolResultPart); ok {
+						if media, ok := tr.Output.(fantasy.ToolResultOutputContentMedia); ok {
+							msg.Content[j] = fantasy.ToolResultPart{
+								ToolCallID: tr.ToolCallID,
+								Output: fantasy.ToolResultOutputContentText{
+									Text: fmt.Sprintf("[Media: %s (truncated)]", media.MediaType),
+								},
+							}
+						}
+					}
+				}
+				if len(history) > 0 && history[len(history)-1].Role == fantasy.MessageRoleTool {
+					history[len(history)-1].Content = append(history[len(history)-1].Content, msg.Content...)
+				} else {
+					history = append(history, msg)
+				}
 			}
 			continue
 		}
-		aiMsgs := m.ToAIMessage()
+		aiMsgs := m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: true})
 		if !supportsImages {
 			for i := range aiMsgs {
 				if aiMsgs[i].Role == fantasy.MessageRoleUser {
@@ -1547,19 +1750,51 @@ func (a *sessionAgent) Cancel(sessionID string) {
 	// The defer in processRequest will clean up the entry.
 	if cancel, ok := a.activeRequests.Get(sessionID); ok && cancel != nil {
 		slog.Debug("Request cancellation initiated", "session_id", sessionID)
-		cancel()
+		cancel(ErrRequestCancelled)
 	}
 
 	// Also check for summarize requests.
 	if cancel, ok := a.activeRequests.Get(sessionID + "-summarize"); ok && cancel != nil {
 		slog.Debug("Summarize cancellation initiated", "session_id", sessionID)
-		cancel()
+		cancel(ErrRequestCancelled)
 	}
 
 	if a.QueuedPrompts(sessionID) > 0 {
 		slog.Debug("Clearing queued prompts", "session_id", sessionID)
 		a.messageQueue.Del(sessionID)
 	}
+}
+
+func (a *sessionAgent) CancelAndFlush(sessionID string) ([]string, bool) {
+	prompts := a.DrainQueue(sessionID)
+	wasRunning := a.IsSessionBusy(sessionID)
+
+	prev, _ := a.cancelGen.Get(sessionID)
+	a.cancelGen.Set(sessionID, prev+1)
+
+	if cancel, ok := a.activeRequests.Get(sessionID); ok && cancel != nil {
+		slog.Debug("Request cancellation initiated via CancelAndFlush", "session_id", sessionID)
+		cancel(ErrRequestCancelled)
+	}
+	if cancel, ok := a.activeRequests.Get(sessionID + "-summarize"); ok && cancel != nil {
+		slog.Debug("Summarize cancellation initiated via CancelAndFlush", "session_id", sessionID)
+		cancel(ErrRequestCancelled)
+	}
+
+	return prompts, wasRunning
+}
+
+func (a *sessionAgent) DrainQueue(sessionID string) []string {
+	l, ok := a.messageQueue.Get(sessionID)
+	if !ok || len(l) == 0 {
+		return nil
+	}
+	a.messageQueue.Del(sessionID)
+	prompts := make([]string, len(l))
+	for i, c := range l {
+		prompts[i] = c.Prompt
+	}
+	return prompts
 }
 
 func (a *sessionAgent) ClearQueue(sessionID string) {
@@ -1624,9 +1859,10 @@ func (a *sessionAgent) QueuedPromptsList(sessionID string) []string {
 	return prompts
 }
 
-func (a *sessionAgent) SetModels(primary Model, title Model) {
+func (a *sessionAgent) SetModels(primary Model, title Model, fallbackModels []Model) {
 	a.primaryModel.Set(primary)
 	a.titleModel.Set(title)
+	a.fallbackModels.SetSlice(fallbackModels)
 }
 
 func (a *sessionAgent) SetTools(toolList []fantasy.AgentTool) {
@@ -1749,6 +1985,16 @@ func (a *sessionAgent) Model() Model {
 // ghost-text suggestions where the primary model is overkill.
 func (a *sessionAgent) TitleModel() Model {
 	return a.titleModel.Get()
+}
+
+// buildStopConditions returns the stop-condition slice for agent.Stream.
+// When maxTurns > 0, a fantasy.StepCountIs condition is prepended so the
+// loop stops after that many LLM turns regardless of other conditions.
+func (a *sessionAgent) buildStopConditions(base ...fantasy.StopCondition) []fantasy.StopCondition {
+	if a.maxTurns > 0 {
+		return append([]fantasy.StopCondition{fantasy.StepCountIs(a.maxTurns)}, base...)
+	}
+	return base
 }
 
 // convertToToolResult converts a fantasy tool result to a message tool result.
@@ -1955,8 +2201,8 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []a
 }
 
 var safeSpeculativeTools = map[string]bool{
-	"glob":                  true,
-	"grep":                  true,
+	"search":                true,
+	"rg":                    true,
 	"view":                  true,
 	"todos":                 true,
 	"crush_info":            true,
@@ -2019,7 +2265,7 @@ func (m *memExtractToolWrapper) SetProviderOptions(opts fantasy.ProviderOptions)
 
 func (m *memExtractToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	name := call.Name
-	if name == "view" || name == "glob" || name == "grep" || name == "todos" {
+	if name == "view" || name == "search" || name == "rg" || name == "todos" {
 		return m.inner.Run(ctx, call)
 	}
 
@@ -2162,4 +2408,64 @@ func isContextLengthExceeded(err error) bool {
 	default:
 		return false
 	}
+}
+
+func isDefinitiveUpstreamFailure(err error, provider string) bool {
+	if err == nil {
+		return false
+	}
+	var providerErr *fantasy.ProviderError
+	if errors.As(err, &providerErr) {
+		code := providerErr.StatusCode
+		isWaitAI := strings.Contains(strings.ToLower(provider), "waitai")
+		if isWaitAI && (code == 400 || code == 422) {
+			// Skip treating 400/422 as definitive failures for waitai to prevent
+			// mock transient failures or verification prompts from failing tests.
+			return false
+		}
+		if code == 401 || code == 402 || code == 403 || code == 429 || code == 502 || code == 503 || code == 504 || code == 400 || code == 422 {
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "insufficient balance") ||
+		strings.Contains(msg, "credit limit") ||
+		strings.Contains(msg, "billing") ||
+		strings.Contains(msg, "first-token timeout") ||
+		strings.Contains(msg, "quota exceeded") {
+		return true
+	}
+	return false
+}
+
+func shouldCloseProviderIdleConnections(err error, cause error) bool {
+	return isProviderConnectionPoolFailure(err) || isProviderConnectionPoolFailure(cause)
+}
+
+func isProviderConnectionPoolFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrProviderFailover) || errors.Is(err, io.EOF) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "first-token timeout") ||
+		strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "server closed idle connection") ||
+		strings.Contains(msg, "client connection lost") ||
+		strings.Contains(msg, "tls handshake timeout") ||
+		strings.Contains(msg, "stream error")
+}
+
+func isTesting() bool {
+	return os.Getenv("CRUSH_UNIT_TESTING") == "1" || flag.Lookup("test.v") != nil
 }

@@ -33,7 +33,7 @@ func TestExplorePromptEmphasizesCompressionAndEvidence(t *testing.T) {
 
 	require.Contains(t, text, "fast, read-only repository inspector and evidence collector")
 	require.Contains(t, text, "smallest set of durable facts")
-	require.Contains(t, text, "prompt text, dynamic prompt assembly, session scope, tool choice, memory, compression, or UI signaling")
+	require.Contains(t, text, "strategy, state, tool, or compression bugs")
 	require.Contains(t, text, "COMPRESSION")
-	require.Contains(t, text, "absolute file paths")
+	require.Contains(t, text, "Absolute file paths")
 }

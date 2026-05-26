@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/config"
@@ -27,9 +28,12 @@ type header struct {
 	logo        string
 	compactLogo string
 
-	com     *common.Common
-	width   int
-	compact bool
+	com                *common.Common
+	width              int
+	compact            bool
+	sessionID          string
+	sessionOpenedAt    time.Time
+	activeRunStartedAt time.Time
 }
 
 // newHeader creates a new header model.
@@ -71,6 +75,9 @@ func (h *header) drawHeader(
 	detailsOpen bool,
 	width int,
 	hyperCredits *int,
+	isBusy bool,
+	busyStatus string,
+	animFrame int,
 ) {
 	t := h.com.Styles
 	if width != h.width || compact != h.compact {
@@ -89,6 +96,21 @@ func (h *header) drawHeader(
 		return
 	}
 
+	if session.ID != h.sessionID {
+		h.sessionID = session.ID
+		h.sessionOpenedAt = time.Now()
+	}
+
+	var elapsedSec int64 = -1
+	if isBusy {
+		if h.activeRunStartedAt.IsZero() {
+			h.activeRunStartedAt = time.Now()
+		}
+		elapsedSec = int64(time.Since(h.activeRunStartedAt).Seconds())
+	} else {
+		h.activeRunStartedAt = time.Time{}
+	}
+
 	var b strings.Builder
 	b.WriteString(h.compactLogo)
 
@@ -105,6 +127,9 @@ func (h *header) drawHeader(
 		detailsOpen,
 		availDetailWidth,
 		hyperCredits,
+		elapsedSec,
+		busyStatus,
+		animFrame,
 	)
 
 	remainingWidth := width -
@@ -115,9 +140,18 @@ func (h *header) drawHeader(
 		diagToDetailsSpacing
 
 	if remainingWidth > 0 {
-		b.WriteString(t.Header.Diagonals.Render(
-			strings.Repeat(headerDiag, max(minHeaderDiags, remainingWidth)),
-		))
+		diagsText := strings.Repeat(headerDiag, max(minHeaderDiags, remainingWidth))
+		if isBusy {
+			b.WriteString(styles.ApplyScrollingForegroundGrad(
+				t.Header.Diagonals,
+				diagsText,
+				t.WorkingGradFromColor,
+				t.WorkingGradToColor,
+				animFrame,
+			))
+		} else {
+			b.WriteString(t.Header.Diagonals.Render(diagsText))
+		}
 		b.WriteString(" ")
 	}
 
@@ -138,10 +172,56 @@ func renderHeaderDetails(
 	detailsOpen bool,
 	availWidth int,
 	hyperCredits *int,
+	elapsedSec int64,
+	busyStatus string,
+	animFrame int,
 ) string {
 	t := com.Styles
 
 	var parts []string
+
+	// Display the concrete brain model, not only the model slot name.
+	styledModel := styles.ApplyBoldForegroundGrad(
+		t.Header.LogoGradCanvas,
+		brainHeaderModelLabel(com.Config()),
+		t.Header.LogoGradFromColor,
+		t.Header.LogoGradToColor,
+	)
+	parts = append(parts, styledModel)
+
+	// Display the animated color ball & session timer
+	if elapsedSec >= 0 {
+		colors := []string{
+			"#50FA7B", // Green
+			"#8BE9FD", // Cyan
+			"#FF79C6", // Pink
+			"#BD93F9", // Purple
+		}
+		selectedColor := colors[elapsedSec%int64(len(colors))]
+		ballStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(selectedColor))
+
+		// Blink the ball based on animFrame (alternates every 500ms, as animFrame advances every 100ms)
+		ballChar := "●"
+		if (animFrame/5)%2 == 0 {
+			ballChar = " "
+		}
+		ball := ballStyle.Render(ballChar)
+
+		durationText := ""
+		mins := elapsedSec / 60
+		secs := elapsedSec % 60
+		if mins > 0 {
+			durationText = fmt.Sprintf("%dm %ds", mins, secs)
+		} else {
+			durationText = fmt.Sprintf("%ds", secs)
+		}
+		timerContent := durationText
+		if busyStatus != "" {
+			timerContent = fmt.Sprintf("%s %s", busyStatus, durationText)
+		}
+		timerStr := fmt.Sprintf("%s %s", ball, t.Header.Percentage.Render(timerContent))
+		parts = append(parts, timerStr)
+	}
 
 	if lspErrorCount > 0 {
 		parts = append(parts, t.LSP.ErrorDiagnostic.Render(fmt.Sprintf("%s%d", styles.LSPErrorIcon, lspErrorCount)))
@@ -182,4 +262,27 @@ func renderHeaderDetails(
 
 	result := cwd + metadata
 	return ansi.Truncate(result, max(0, availWidth), "…")
+}
+
+func brainHeaderModelLabel(cfg *config.Config) string {
+	const role = "BRAIN"
+	if cfg == nil {
+		return role
+	}
+	agentCfg, ok := cfg.Agents[config.AgentBrain]
+	if !ok {
+		return role
+	}
+	selected, ok := cfg.SelectedModelForType(agentCfg.Model)
+	if !ok {
+		return strings.ToUpper(string(agentCfg.Model))
+	}
+	switch {
+	case selected.Provider != "" && selected.Model != "":
+		return fmt.Sprintf("%s %s/%s", role, selected.Provider, selected.Model)
+	case selected.Model != "":
+		return fmt.Sprintf("%s %s", role, selected.Model)
+	default:
+		return role
+	}
 }

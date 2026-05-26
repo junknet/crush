@@ -10,37 +10,37 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// Glob Tool
+// Search Tool
 // -----------------------------------------------------------------------------
 
-// GlobToolMessageItem is a message item that represents a glob tool call.
-type GlobToolMessageItem struct {
+// SearchToolMessageItem is a message item that represents an search tool call.
+type SearchToolMessageItem struct {
 	*baseToolMessageItem
 }
 
-var _ ToolMessageItem = (*GlobToolMessageItem)(nil)
+var _ ToolMessageItem = (*SearchToolMessageItem)(nil)
 
-// NewGlobToolMessageItem creates a new [GlobToolMessageItem].
-func NewGlobToolMessageItem(
+// NewSearchToolMessageItem creates a new [SearchToolMessageItem].
+func NewSearchToolMessageItem(
 	sty *styles.Styles,
 	toolCall message.ToolCall,
 	result *message.ToolResult,
 	canceled bool,
 ) ToolMessageItem {
-	return newBaseToolMessageItem(sty, toolCall, result, &GlobToolRenderContext{}, canceled)
+	return newBaseToolMessageItem(sty, toolCall, result, &SearchToolRenderContext{}, canceled)
 }
 
-// GlobToolRenderContext renders glob tool messages.
-type GlobToolRenderContext struct{}
+// SearchToolRenderContext renders search tool messages.
+type SearchToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
-func (g *GlobToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
+func (g *SearchToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if opts.IsPending() {
-		return pendingTool(sty, "Glob", opts.Compact)
+		return pendingTool(sty, tools.SearchToolName, opts.Compact)
 	}
 
-	var params tools.GlobParams
+	var params tools.SearchParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
 		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
 	}
@@ -50,7 +50,7 @@ func (g *GlobToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 		toolParams = append(toolParams, "path", params.Path)
 	}
 
-	header := toolHeader(sty, opts.Status, "Glob", cappedWidth, opts.Compact, toolParams...)
+	header := toolHeader(sty, opts.Status, tools.SearchToolName, cappedWidth, opts.Compact, toolParams...)
 	if opts.Compact {
 		return header
 	}
@@ -69,37 +69,37 @@ func (g *GlobToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 }
 
 // -----------------------------------------------------------------------------
-// Grep Tool
+// Rg Tool
 // -----------------------------------------------------------------------------
 
-// GrepToolMessageItem is a message item that represents a grep tool call.
-type GrepToolMessageItem struct {
+// RgToolMessageItem is a message item that represents an rg tool call.
+type RgToolMessageItem struct {
 	*baseToolMessageItem
 }
 
-var _ ToolMessageItem = (*GrepToolMessageItem)(nil)
+var _ ToolMessageItem = (*RgToolMessageItem)(nil)
 
-// NewGrepToolMessageItem creates a new [GrepToolMessageItem].
-func NewGrepToolMessageItem(
+// NewRgToolMessageItem creates a new [RgToolMessageItem].
+func NewRgToolMessageItem(
 	sty *styles.Styles,
 	toolCall message.ToolCall,
 	result *message.ToolResult,
 	canceled bool,
 ) ToolMessageItem {
-	return newBaseToolMessageItem(sty, toolCall, result, &GrepToolRenderContext{}, canceled)
+	return newBaseToolMessageItem(sty, toolCall, result, &RgToolRenderContext{}, canceled)
 }
 
-// GrepToolRenderContext renders grep tool messages.
-type GrepToolRenderContext struct{}
+// RgToolRenderContext renders rg tool messages.
+type RgToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
-func (g *GrepToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
+func (g *RgToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if opts.IsPending() {
-		return pendingTool(sty, "Grep", opts.Compact)
+		return pendingTool(sty, tools.RgToolName, opts.Compact)
 	}
 
-	var params tools.GrepParams
+	var params tools.RgParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
 		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
 	}
@@ -115,7 +115,7 @@ func (g *GrepToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 		toolParams = append(toolParams, "literal", "true")
 	}
 
-	header := toolHeader(sty, opts.Status, "Grep", cappedWidth, opts.Compact, toolParams...)
+	header := toolHeader(sty, opts.Status, tools.RgToolName, cappedWidth, opts.Compact, toolParams...)
 	if opts.Compact {
 		return header
 	}
@@ -161,7 +161,7 @@ type LSToolRenderContext struct{}
 func (l *LSToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if opts.IsPending() {
-		return pendingTool(sty, "List", opts.Compact)
+		return pendingTool(sty, tools.LSToolName, opts.Compact)
 	}
 
 	var params tools.LSParams
@@ -175,7 +175,7 @@ func (l *LSToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *To
 	}
 	path = fsext.PrettyPath(path)
 
-	header := toolHeader(sty, opts.Status, "List", cappedWidth, opts.Compact, path)
+	header := toolHeader(sty, opts.Status, tools.LSToolName, cappedWidth, opts.Compact, path)
 	if opts.Compact {
 		return header
 	}

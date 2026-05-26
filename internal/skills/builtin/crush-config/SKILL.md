@@ -327,7 +327,7 @@ When multiple hooks match, their decisions are aggregated:
 ```json
 {
   "permissions": {
-    "allowed_tools": ["view", "ls", "grep", "edit"]
+    "allowed_tools": ["view", "ls", "rg", "edit"]
   }
 }
 ```

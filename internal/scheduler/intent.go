@@ -36,6 +36,7 @@ const (
 	ProfilePlanAgent    WorkerProfile = "plan_agent"
 	ProfileWorkerAgent  WorkerProfile = "worker_agent"
 	ProfileExploreAgent WorkerProfile = "explore_agent"
+	ProfileAuditorAgent WorkerProfile = "auditor_agent"
 )
 
 // Ownership describes the path set a task is allowed to mutate.

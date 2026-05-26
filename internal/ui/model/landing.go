@@ -3,6 +3,8 @@ package model
 import (
 	"image"
 
+	"os"
+
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/workspace"
@@ -40,7 +42,7 @@ func (m *UI) landingView() string {
 	).Split(m.layout.main).Assign(new(image.Rectangle), &remainingHeightArea)
 
 	var content string
-	customSkills := m.customSkillStatusItems()
+	customSkills := m.skillStatusItems()
 	if len(customSkills) > 0 {
 		mcpLspSectionWidth := min(30, (width-2)/3)
 		lspSection := m.lspInfo(mcpLspSectionWidth, max(1, remainingHeightArea.Dy()), false)
@@ -54,11 +56,12 @@ func (m *UI) landingView() string {
 		content = lipgloss.JoinHorizontal(lipgloss.Left, lspSection, " ", mcpSection)
 	}
 
-	return lipgloss.NewStyle().
+	res := lipgloss.NewStyle().
 		Width(width).
-		Height(m.layout.main.Dy() - 1).
 		PaddingTop(1).
 		Render(
 			lipgloss.JoinVertical(lipgloss.Left, infoSection, "", content),
 		)
+	_ = os.WriteFile("/tmp/landing_view.txt", []byte(res), 0o644)
+	return res
 }

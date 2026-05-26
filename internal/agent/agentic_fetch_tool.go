@@ -131,7 +131,7 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 					}
 					tempFile.Close()
 
-					fullPrompt = fmt.Sprintf("%s\n\nThe web page from %s has been saved to: %s\n\nUse the view and grep tools to analyze this file and extract the requested information.", params.Prompt, params.URL, tempFilePath)
+					fullPrompt = fmt.Sprintf("%s\n\nThe web page from %s has been saved to: %s\n\nUse the view and rg tools to analyze this file and extract the requested information.", params.Prompt, params.URL, tempFilePath)
 				} else {
 					fullPrompt = fmt.Sprintf("%s\n\nWeb page URL: %s\n\n<webpage_content>\n%s\n</webpage_content>", params.Prompt, params.URL, content)
 				}
@@ -169,8 +169,8 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 			fetchTools := []fantasy.AgentTool{
 				webFetchTool,
 				webSearchTool,
-				tools.NewGlobTool(tmpDir),
-				tools.NewGrepTool(tmpDir, c.cfg.Config().Tools.Grep),
+				tools.NewSearchTool(c.permissions, tmpDir),
+				tools.NewRgTool(c.permissions, tmpDir, c.cfg.Config().Tools.Rg),
 				tools.NewSourcegraphTool(client),
 				tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, nil, tmpDir),
 			}

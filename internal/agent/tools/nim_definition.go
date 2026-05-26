@@ -25,7 +25,7 @@ const NimDefinitionToolName = "nim_definition"
 var nimDefinitionDescription string
 
 func NewNimDefinitionTool(lspManager *lsp.Manager) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		NimDefinitionToolName,
 		nimDefinitionDescription,
 		func(ctx context.Context, params NimDefinitionParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {

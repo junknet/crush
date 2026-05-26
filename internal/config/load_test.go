@@ -731,7 +731,7 @@ func TestConfig_setupAgentsWithDisabledTools(t *testing.T) {
 			DisabledTools: []string{
 				"edit",
 				"download",
-				"grep",
+				"rg",
 			},
 		},
 	}
@@ -785,7 +785,7 @@ func TestConfig_setupAgentsOverlaysCustomAgents(t *testing.T) {
 				Name:         "Review",
 				Description:  "Custom review agent",
 				Model:        SelectedModelTypeExplore,
-				AllowedTools: []string{"glob", "grep"},
+				AllowedTools: []string{"search", "rg"},
 				ContextPaths: []string{"docs"},
 			},
 		},
@@ -796,7 +796,7 @@ func TestConfig_setupAgentsOverlaysCustomAgents(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "Review", review.Name)
 	require.Equal(t, SelectedModelTypeExplore, review.Model)
-	require.Equal(t, []string{"glob", "grep"}, review.AllowedTools)
+	require.Equal(t, []string{"search", "rg"}, review.AllowedTools)
 	require.Contains(t, review.ContextPaths, "docs")
 	require.Equal(t, AgentBrain, cfg.DefaultAgent)
 }

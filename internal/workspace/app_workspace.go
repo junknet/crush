@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -20,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/relay"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 )
 
 // AppWorkspace implements the Workspace interface by delegating
@@ -89,6 +91,64 @@ func (w *AppWorkspace) ListAllUserMessages(ctx context.Context) ([]message.Messa
 	return w.app.Messages.ListAllUserMessages(ctx)
 }
 
+func (w *AppWorkspace) RepairSessionMessages(ctx context.Context, sessionID string) error {
+	if err := w.app.Messages.FlushAll(ctx); err != nil {
+		slog.Error("Failed to flush messages during repair", "error", err)
+	}
+
+	msgs, err := w.app.Messages.List(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+
+	for _, msg := range msgs {
+		if msg.Role != message.Assistant {
+			continue
+		}
+
+		if !msg.IsFinished() {
+			slog.Info("Repairing unfinished assistant message on load", "session_id", sessionID, "message_id", msg.ID)
+
+			// 1. Mark all of its tool calls as finished if they are not
+			toolCalls := msg.ToolCalls()
+			for i := range toolCalls {
+				tc := &toolCalls[i]
+				if !tc.Finished {
+					tc.Finished = true
+					tc.Input = "{}"
+					msg.AddToolCall(*tc)
+
+					// Create a fallback tool result in the DB so that the TUI can render a terminated result
+					toolResult := message.ToolResult{
+						ToolCallID: tc.ID,
+						Name:       tc.Name,
+						Content:    "Error: session was closed or crashed",
+						IsError:    true,
+					}
+					_, createErr := w.app.Messages.Create(ctx, msg.SessionID, message.CreateMessageParams{
+						Role: message.Tool,
+						Parts: []message.ContentPart{
+							toolResult,
+						},
+					})
+					if createErr != nil {
+						slog.Error("Failed to create fallback tool result during repair", "error", createErr)
+					}
+				}
+			}
+
+			// 2. Mark the assistant message itself as finished (canceled)
+			msg.AddFinish(message.FinishReasonCanceled, "Interrupted", "The session was closed or crashed during execution.")
+
+			// 3. Save/Update the assistant message in the DB
+			if err := w.app.Messages.Update(ctx, msg); err != nil {
+				slog.Error("Failed to save repaired assistant message", "error", err)
+			}
+		}
+	}
+	return nil
+}
+
 // -- Agent --
 
 func (w *AppWorkspace) AgentRun(ctx context.Context, sessionID, prompt string, planMode bool, attachments ...message.Attachment) error {
@@ -103,6 +163,13 @@ func (w *AppWorkspace) AgentCancel(sessionID string) {
 	if w.app.AgentCoordinator != nil {
 		w.app.AgentCoordinator.Cancel(sessionID)
 	}
+}
+
+func (w *AppWorkspace) AgentCancelAndFlush(sessionID string) ([]string, bool) {
+	if w.app.AgentCoordinator != nil {
+		return w.app.AgentCoordinator.CancelAndFlush(sessionID)
+	}
+	return nil, false
 }
 
 func (w *AppWorkspace) AgentIsBusy() bool {
@@ -227,6 +294,13 @@ func (w *AppWorkspace) InitBrainAgent(ctx context.Context) error {
 
 func (w *AppWorkspace) GetDefaultExploreModel(providerID string) config.SelectedModel {
 	return w.app.GetDefaultExploreModel(providerID)
+}
+
+func (w *AppWorkspace) BackgroundShellStats() shell.BackgroundShellStats {
+	if w.app.BackgroundShells == nil {
+		return shell.BackgroundShellStats{}
+	}
+	return w.app.BackgroundShells.Stats()
 }
 
 // -- Permissions --

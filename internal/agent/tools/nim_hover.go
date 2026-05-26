@@ -35,7 +35,7 @@ const NimHoverToolName = "nim_hover"
 var nimHoverDescription string
 
 func NewNimHoverTool(lspManager *lsp.Manager) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		NimHoverToolName,
 		nimHoverDescription,
 		func(ctx context.Context, params NimHoverParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {

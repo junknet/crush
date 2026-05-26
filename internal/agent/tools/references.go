@@ -34,7 +34,7 @@ const ReferencesToolName = "nim_references"
 var referencesDescription string
 
 func NewReferencesTool(lspManager *lsp.Manager) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		ReferencesToolName,
 		referencesDescription,
 		func(ctx context.Context, params ReferencesParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -48,7 +48,7 @@ func NewReferencesTool(lspManager *lsp.Manager) fantasy.AgentTool {
 
 			workingDir := cmp.Or(params.Path, ".")
 
-			matches, _, err := searchFiles(ctx, regexp.QuoteMeta(params.Symbol), workingDir, "", 100)
+			matches, _, err := SearchFiles(ctx, regexp.QuoteMeta(params.Symbol), workingDir, "", 100)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to search for symbol: %s", err)), nil
 			}
@@ -63,10 +63,10 @@ func NewReferencesTool(lspManager *lsp.Manager) fantasy.AgentTool {
 				locations, err := find(ctx, lspManager, params.Symbol, match)
 				if err != nil {
 					if strings.Contains(err.Error(), "no identifier found") {
-						// grep probably matched a comment, string value, or something else that's irrelevant
+						// Rg probably matched a comment, string value, or something else that's irrelevant.
 						continue
 					}
-					slog.Error("Failed to find references", "error", err, "symbol", params.Symbol, "path", match.path, "line", match.lineNum, "char", match.charNum)
+					slog.Error("Failed to find references", "error", err, "symbol", params.Symbol, "path", match.Path, "line", match.LineNum, "char", match.CharNum)
 					allErrs = errors.Join(allErrs, err)
 					continue
 				}
@@ -95,8 +95,8 @@ func (r *referencesTool) Name() string {
 	return ReferencesToolName
 }
 
-func find(ctx context.Context, lspManager *lsp.Manager, symbol string, match grepMatch) ([]protocol.Location, error) {
-	absPath, err := filepath.Abs(match.path)
+func find(ctx context.Context, lspManager *lsp.Manager, symbol string, match RgMatch) ([]protocol.Location, error) {
+	absPath, err := filepath.Abs(match.Path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get absolute path: %s", err)
 	}
@@ -110,15 +110,15 @@ func find(ctx context.Context, lspManager *lsp.Manager, symbol string, match gre
 	}
 
 	if client == nil {
-		slog.Warn("No LSP clients to handle", "path", match.path)
+		slog.Warn("No LSP clients to handle", "path", match.Path)
 		return nil, nil
 	}
 
 	return client.FindReferences(
 		ctx,
 		absPath,
-		match.lineNum,
-		match.charNum+getSymbolOffset(symbol),
+		match.LineNum,
+		match.CharNum+getSymbolOffset(symbol),
 		true,
 	)
 }

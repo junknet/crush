@@ -193,7 +193,7 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 		}
 	}
 
-	skillsCount := len(m.customSkillStatusItems())
+	skillsCount := len(m.skillStatusItems())
 
 	maxFiles, maxLSPs, maxMCPs, maxSkills := getDynamicHeightLimits(remainingHeight, filesCount, lspsCount, mcpsCount, skillsCount)
 

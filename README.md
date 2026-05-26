@@ -391,7 +391,7 @@ permissions. Use this with care.
     "allowed_tools": [
       "view",
       "ls",
-      "grep",
+      "rg",
       "edit",
       "mcp_context7_get-library-doc"
     ]

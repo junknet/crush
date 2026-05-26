@@ -70,10 +70,13 @@ func TestReadTextFileBoundaryCases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			gotContent, gotHasMore, err := readTextFile(context.Background(), filePath, tt.offset, tt.limit, 0)
+			gotFormatted, gotContent, gotHasMore, err := readTextFile(context.Background(), filePath, tt.offset, tt.limit, 0, false)
 			require.NoError(t, err)
 			require.Equal(t, tt.wantContent, gotContent)
 			require.Equal(t, tt.wantHasMore, gotHasMore)
+			if tt.wantContent != "" {
+				require.NotEmpty(t, gotFormatted)
+			}
 		})
 	}
 }
@@ -87,7 +90,7 @@ func TestReadTextFileTruncatesLongLines(t *testing.T) {
 	longLine := strings.Repeat("a", MaxLineLength+10)
 	require.NoError(t, os.WriteFile(filePath, []byte(longLine), 0o644))
 
-	content, hasMore, err := readTextFile(context.Background(), filePath, 0, 1, 0)
+	_, content, hasMore, err := readTextFile(context.Background(), filePath, 0, 1, 0, false)
 	require.NoError(t, err)
 	require.False(t, hasMore)
 	require.Equal(t, strings.Repeat("a", MaxLineLength)+"...", content)
@@ -102,7 +105,7 @@ func TestReadTextFileLineExceeding1MB(t *testing.T) {
 	hugeLine := strings.Repeat("A", 2*1024*1024) // 2MB — exceeds bufio.Scanner max
 	require.NoError(t, os.WriteFile(filePath, []byte(hugeLine), 0o644))
 
-	content, hasMore, err := readTextFile(context.Background(), filePath, 0, 1, 0)
+	_, content, hasMore, err := readTextFile(context.Background(), filePath, 0, 1, 0, false)
 	require.NoError(t, err)
 	require.False(t, hasMore)
 	require.Equal(t, strings.Repeat("A", MaxLineLength)+"...", content)
@@ -184,12 +187,12 @@ func TestReadTextFileEnforcesMaxContentSize(t *testing.T) {
 	}
 	require.NoError(t, os.WriteFile(filePath, []byte(strings.Join(lines, "\n")), 0o644))
 
-	content, hasMore, err := readTextFile(context.Background(), filePath, 0, len(lines), MaxLineLength)
+	_, content, hasMore, err := readTextFile(context.Background(), filePath, 0, len(lines), MaxLineLength, false)
 	require.ErrorAs(t, err, &contentTooLargeError{})
 	require.Empty(t, content)
 	require.False(t, hasMore)
 
-	content, hasMore, err = readTextFile(context.Background(), filePath, 2, 1, MaxLineLength)
+	_, content, hasMore, err = readTextFile(context.Background(), filePath, 2, 1, MaxLineLength, false)
 	require.NoError(t, err)
 	require.Equal(t, "target line", content)
 	require.False(t, hasMore)
@@ -202,7 +205,7 @@ func TestReadTextFileAllowsExactMaxContentSize(t *testing.T) {
 	filePath := filepath.Join(workingDir, "exact-size.txt")
 	require.NoError(t, os.WriteFile(filePath, []byte("abcd\nefgh"), 0o644))
 
-	content, hasMore, err := readTextFile(context.Background(), filePath, 0, 2, len("abcd\nefgh"))
+	_, content, hasMore, err := readTextFile(context.Background(), filePath, 0, 2, len("abcd\nefgh"), false)
 	require.NoError(t, err)
 	require.Equal(t, "abcd\nefgh", content)
 	require.False(t, hasMore)
@@ -311,6 +314,52 @@ func TestReadBuiltinFile(t *testing.T) {
 		require.NotEmpty(t, meta.ResourceDescription)
 	})
 
+	t.Run("folding Go", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		filePath := filepath.Join(tmpDir, "test.go")
+		content := `package main
+func main() {
+	fmt.Println("hi")
+}
+type Foo struct {
+	Bar int
+}
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(content), 0o644))
+		formatted, raw, hasMore, err := readTextFile(context.Background(), filePath, 0, 100, 0, true)
+		require.NoError(t, err)
+		require.False(t, hasMore)
+		require.Contains(t, formatted, "      |     ...")
+		require.Contains(t, formatted, "     2|func main() {")
+		require.Contains(t, formatted, "     4|}")
+		require.Contains(t, formatted, "     5|type Foo struct {")
+		require.Contains(t, formatted, "     7|}")
+		require.NotContains(t, formatted, "fmt.Println")
+		require.NotContains(t, raw, "fmt.Println")
+	})
+
+	t.Run("folding Nim", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		filePath := filepath.Join(tmpDir, "test.nim")
+		content := `proc foo() =
+  echo "hi"
+
+type
+  Bar = object
+    x: int
+`
+		require.NoError(t, os.WriteFile(filePath, []byte(content), 0o644))
+		formatted, _, hasMore, err := readTextFile(context.Background(), filePath, 0, 100, 0, true)
+		require.NoError(t, err)
+		require.False(t, hasMore)
+		require.Contains(t, formatted, "      |   ...")
+		require.Contains(t, formatted, "     1|proc foo() =")
+		require.Contains(t, formatted, "     4|type")
+		require.NotContains(t, formatted, "echo \"hi\"")
+	})
+
 	t.Run("respects offset", func(t *testing.T) {
 		t.Parallel()
 
@@ -353,4 +402,32 @@ func TestSniffImageMimeType(t *testing.T) {
 			require.Equal(t, tc.want, sniffImageMimeType(tc.data, tc.fallback))
 		})
 	}
+}
+
+func TestIsInSkillsPathWithSymlinks(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create actual target directory: tmpDir/real-skills/my-skill
+	realSkillsDir := filepath.Join(tmpDir, "real-skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(realSkillsDir, "my-skill"), 0o755))
+
+	// Create skill file: tmpDir/real-skills/my-skill/SKILL.md
+	skillFile := filepath.Join(realSkillsDir, "my-skill", "SKILL.md")
+	require.NoError(t, os.WriteFile(skillFile, []byte("name: my-skill"), 0o644))
+
+	// Create symlink skills directory: tmpDir/sym-skills -> tmpDir/real-skills
+	symSkillsDir := filepath.Join(tmpDir, "sym-skills")
+	require.NoError(t, os.Symlink(realSkillsDir, symSkillsDir))
+
+	skillsPaths := []string{symSkillsDir}
+
+	// Case 1: Matching using unresolved symlinked path
+	// File path: tmpDir/sym-skills/my-skill/SKILL.md
+	unresolvedPath := filepath.Join(symSkillsDir, "my-skill", "SKILL.md")
+	require.True(t, isInSkillsPath(unresolvedPath, skillsPaths), "Should match unresolved path under symlink")
+
+	// Case 2: Matching using fully resolved path
+	// File path: tmpDir/real-skills/my-skill/SKILL.md
+	resolvedPath := filepath.Join(realSkillsDir, "my-skill", "SKILL.md")
+	require.True(t, isInSkillsPath(resolvedPath, skillsPaths), "Should match resolved path")
 }

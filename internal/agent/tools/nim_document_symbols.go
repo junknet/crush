@@ -23,7 +23,7 @@ const NimDocumentSymbolsToolName = "nim_document_symbols"
 var nimDocumentSymbolsDescription string
 
 func NewNimDocumentSymbolsTool(lspManager *lsp.Manager) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		NimDocumentSymbolsToolName,
 		nimDocumentSymbolsDescription,
 		func(ctx context.Context, params NimDocumentSymbolsParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,11 @@ type Service interface {
 	// message known to the service. Intended for shutdown and
 	// session-switch paths.
 	FlushAll(ctx context.Context) error
+
+	// Prune scans the database and removes large binary data from the
+	// 'parts' JSON of old messages to save space. Focuses on messages
+	// older than 24 hours.
+	Prune(ctx context.Context) error
 }
 
 // pendingState holds the in-memory coalescing buffer for a single
@@ -298,6 +304,88 @@ func (s *service) FlushAll(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+// Prune implements [Service.Prune].
+func (s *service) Prune(ctx context.Context) error {
+	// We need to find all messages that might have large binary data.
+	// Since we don't have a global 'ListAllMessages', we'll collect session IDs
+	// from all user messages as a starting point.
+	userMessages, err := s.q.ListAllUserMessages(ctx)
+	if err != nil {
+		return err
+	}
+
+	sessionIDs := make(map[string]struct{})
+	for _, m := range userMessages {
+		sessionIDs[m.SessionID] = struct{}{}
+	}
+
+	cutoff := time.Now().Add(-24 * time.Hour).Unix()
+	const largeThreshold = 10 * 1024 // 10KB
+
+	for sessionID := range sessionIDs {
+		messages, err := s.q.ListMessagesBySession(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+
+		// Heuristic for 'seen': any message before the last assistant message
+		// has been seen by the model.
+		lastAssistantIdx := -1
+		for i := len(messages) - 1; i >= 0; i-- {
+			if messages[i].Role == string(Assistant) {
+				lastAssistantIdx = i
+				break
+			}
+		}
+
+		for i, dbMsg := range messages {
+			isOld := dbMsg.CreatedAt < cutoff
+			isSeen := lastAssistantIdx >= i
+
+			if !isOld && !isSeen {
+				continue
+			}
+
+			msg, err := s.fromDBItem(dbMsg)
+			if err != nil {
+				continue
+			}
+
+			changed := false
+			for j, part := range msg.Parts {
+				switch p := part.(type) {
+				case BinaryContent:
+					if len(p.Data) > largeThreshold {
+						p.Data = nil
+						msg.Parts[j] = p
+						changed = true
+					}
+				case ToolResult:
+					if len(p.Data) > largeThreshold {
+						p.Data = "(pruned)"
+						msg.Parts[j] = p
+						changed = true
+					}
+				case ImageURLContent:
+					if strings.HasPrefix(p.URL, "data:") && len(p.URL) > largeThreshold {
+						p.URL = "(pruned)"
+						msg.Parts[j] = p
+						changed = true
+					}
+				}
+			}
+
+			if changed {
+				if err := s.write(ctx, msg); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // flushOne drains a single message ID. When syncCaller is true the
