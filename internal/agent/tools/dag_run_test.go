@@ -15,7 +15,7 @@ import (
 
 func TestDagRunToolExecutesDependencyGraph(t *testing.T) {
 	workingDir := t.TempDir()
-	tool := NewDagRunTool(&mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runDagRunTool(t, tool, ctx, DagRunParams{
@@ -37,12 +37,12 @@ func TestDagRunToolExecutesDependencyGraph(t *testing.T) {
 func TestDagRunToolRunsReadSearchNodes(t *testing.T) {
 	workingDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "alpha.txt"), []byte("needle\n"), 0o644))
-	tool := NewDagRunTool(&mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runDagRunTool(t, tool, ctx, DagRunParams{
 		Nodes: []DagRunNode{
-			{ID: "files", Tool: "fd", Pattern: "alpha"},
+			{ID: "files", Tool: "rg", Pattern: "alpha", FilesOnly: true},
 			{ID: "hits", Tool: "rg", Pattern: "needle", LiteralText: true},
 			{ID: "read", Tool: "view", FilePath: "alpha.txt", Limit: 10},
 		},
@@ -59,7 +59,7 @@ func TestDagRunToolRunsReadSearchNodes(t *testing.T) {
 
 func TestDagRunToolBlocksForegroundSleepPolling(t *testing.T) {
 	workingDir := t.TempDir()
-	tool := NewDagRunTool(&mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runDagRunTool(t, tool, ctx, DagRunParams{

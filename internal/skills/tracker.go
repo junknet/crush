@@ -15,15 +15,15 @@ import (
 type Tracker struct {
 	mu          sync.RWMutex
 	loaded      map[string]bool
-	activeNames map[string]bool // Set of active skill names (post-dedup, post-filter)
+	activeNames map[string]string // Mapping from skill name to its SkillFilePath
 }
 
 // NewTracker creates a new skill tracker with the given active skill names.
 // Only skills in activeSkills can be marked as loaded.
 func NewTracker(activeSkills []*Skill) *Tracker {
-	activeNames := make(map[string]bool, len(activeSkills))
+	activeNames := make(map[string]string, len(activeSkills))
 	for _, s := range activeSkills {
-		activeNames[s.Name] = true
+		activeNames[s.Name] = s.SkillFilePath
 	}
 	return &Tracker{
 		loaded:      make(map[string]bool),
@@ -40,7 +40,7 @@ func (t *Tracker) MarkLoaded(name string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// Only track if this skill is actually active (not overridden by user skill).
-	if t.activeNames[name] {
+	if _, ok := t.activeNames[name]; ok {
 		t.loaded[name] = true
 	}
 }
@@ -72,6 +72,17 @@ func (t *Tracker) LoadedNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// GetPath returns the skill file path for the given skill name.
+// Returns empty string if the skill is not active.
+func (t *Tracker) GetPath(name string) string {
+	if t == nil {
+		return ""
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.activeNames[name]
 }
 
 // LoadedCount returns the number of unique skills that have been loaded.

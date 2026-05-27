@@ -84,9 +84,10 @@ func (iuc ImageURLContent) String() string {
 func (ImageURLContent) isPart() {}
 
 type BinaryContent struct {
-	Path     string
-	MIMEType string
-	Data     []byte
+	Path       string `json:"path"`
+	MIMEType   string `json:"mime_type"`
+	Data       []byte `json:"data"`
+	IsInternal bool   `json:"is_internal"`
 }
 
 func (bc BinaryContent) String(p catwalk.InferenceProvider) string {
@@ -473,24 +474,49 @@ func (m *Message) AddBinary(mimeType string, data []byte) {
 func PromptWithTextAttachments(prompt string, attachments []Attachment) string {
 	var sb strings.Builder
 	sb.WriteString(prompt)
-	addedAttachments := false
-	for _, content := range attachments {
-		if !content.IsText() {
+
+	var userAttachments []Attachment
+	var systemAttachments []Attachment
+
+	for _, a := range attachments {
+		if !a.IsText() {
 			continue
 		}
-		if !addedAttachments {
-			sb.WriteString("\n<system_info>The files below have been attached by the user, consider them in your response</system_info>\n")
-			addedAttachments = true
-		}
-		if content.FilePath != "" {
-			fmt.Fprintf(&sb, "<file path='%s'>\n", content.FilePath)
+		if a.IsInternal {
+			systemAttachments = append(systemAttachments, a)
 		} else {
-			sb.WriteString("<file>\n")
+			userAttachments = append(userAttachments, a)
 		}
-		sb.WriteString("\n")
-		sb.Write(content.Content)
-		sb.WriteString("\n</file>\n")
 	}
+
+	if len(userAttachments) > 0 {
+		sb.WriteString("\n<system_info>The files below have been attached by the user, consider them in your response</system_info>\n")
+		for _, content := range userAttachments {
+			if content.FilePath != "" {
+				fmt.Fprintf(&sb, "<file path='%s'>\n", content.FilePath)
+			} else {
+				sb.WriteString("<file>\n")
+			}
+			sb.WriteString("\n")
+			sb.Write(content.Content)
+			sb.WriteString("\n</file>\n")
+		}
+	}
+
+	if len(systemAttachments) > 0 {
+		sb.WriteString("\n<system_info>The following files are relevant cross-session memories retrieved for the current request. Use them if they provide helpful context from previous interactions.</system_info>\n")
+		for _, content := range systemAttachments {
+			if content.FilePath != "" {
+				fmt.Fprintf(&sb, "<file path='%s'>\n", content.FilePath)
+			} else {
+				sb.WriteString("<file>\n")
+			}
+			sb.WriteString("\n")
+			sb.Write(content.Content)
+			sb.WriteString("\n</file>\n")
+		}
+	}
+
 	return sb.String()
 }
 
@@ -515,9 +541,10 @@ func (m *Message) ToAIMessage(opts ...ToAIMessageOptions) []fantasy.Message {
 				continue
 			}
 			textAttachments = append(textAttachments, Attachment{
-				FilePath: content.Path,
-				MimeType: content.MIMEType,
-				Content:  content.Data,
+				FilePath:   content.Path,
+				MimeType:   content.MIMEType,
+				Content:    content.Data,
+				IsInternal: content.IsInternal,
 			})
 		}
 		text = PromptWithTextAttachments(text, textAttachments)

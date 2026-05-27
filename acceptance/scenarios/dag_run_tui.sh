@@ -6,7 +6,7 @@ need_tui
 need_waitai
 
 FINAL_MARKER="TUI_DAG_DONE_7391"
-PROMPT="${PROMPT:-Your first tool call must be dag_run. Do not use bash, rg, fd, or view directly. Use one dag_run call with max_parallel=3 and these nodes: (1) fd node id files pattern dag_run path internal/agent/tools, (2) rg node id symbol pattern DagRunToolName path internal/agent/tools/dag_run.go literal_text=true, (3) view node id docs file_path internal/agent/tools/dag_run.md limit 80, (4) run node id hold language python script that imports time, sleeps for 4 seconds, then prints status-visible. After the tool result, reply exactly with the concatenation of these seven fragments and then mention the completed node count: TUI, _, DAG, _, DONE, _, 7391.}"
+PROMPT="${PROMPT:-Your first tool call must be dag_run. Do not use bash, rg, or view directly. Use one dag_run call with max_parallel=3 and these nodes: (1) rg node id files pattern dag_run path internal/agent/tools files_only=true, (2) rg node id symbol pattern DagRunToolName path internal/agent/tools/dag_run.go literal_text=true, (3) view node id docs file_path internal/agent/tools/dag_run.md limit 80, (4) run node id hold language python script that imports time, sleeps for 4 seconds, then prints status-visible. After the tool result, reply exactly with the concatenation of these seven fragments and then mention the completed node count: TUI, _, DAG, _, DONE, _, 7391.}"
 
 log "starting crush against WaitAI"
 "$TUI" start "$SESS" 160 45 -- \
@@ -24,7 +24,7 @@ log "waiting for visible tool activity"
 status_seen=0
 for _ in $(seq 1 80); do
   screen=$("$TUI" text "$SESS" 2>/dev/null || true)
-  if echo "$screen" | grep -E -q 'tools [1-9][0-9]* running|tool-parallel [2-9][0-9]*|active (fd|rg|view|run|dag_run)'; then
+  if echo "$screen" | grep -E -q 'tools [1-9][0-9]* running|tool-parallel [2-9][0-9]*|active (rg|view|run|dag_run)'; then
     printf '%s\n' "$screen" > "$ART/tool_activity.txt"
     "$TUI" png "$SESS" "$ART/tool_activity.png" >>"$LOG" 2>&1 || fail "tool activity png capture failed"
     status_seen=1

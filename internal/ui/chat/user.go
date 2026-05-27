@@ -67,8 +67,7 @@ func (m *UserMessageItem) RawRender(width int) string {
 		content = strings.TrimSuffix(result, "\n")
 	}
 
-	if len(m.message.BinaryContent()) > 0 {
-		attachmentsStr := m.renderAttachments(cappedWidth)
+	if attachmentsStr := m.renderAttachments(cappedWidth); attachmentsStr != "" {
 		if content == "" {
 			content = attachmentsStr
 		} else {
@@ -123,10 +122,16 @@ func (m *UserMessageItem) ID() string {
 func (m *UserMessageItem) renderAttachments(width int) string {
 	var attachments []message.Attachment
 	for _, at := range m.message.BinaryContent() {
+		if at.IsInternal {
+			continue
+		}
 		attachments = append(attachments, message.Attachment{
 			FileName: at.Path,
 			MimeType: at.MIMEType,
 		})
+	}
+	if len(attachments) == 0 {
+		return ""
 	}
 	return m.attachments.Render(attachments, false, width)
 }

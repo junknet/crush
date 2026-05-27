@@ -290,7 +290,6 @@ type Options struct {
 	Progress                  *bool        `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
-	DisableSuggestion         bool         `json:"disable_suggestion,omitempty" jsonschema:"description=Disable ghost-text autocomplete suggestions in the prompt input,default=false"`
 }
 
 type MCPs map[string]MCPConfig
@@ -774,7 +773,6 @@ func allToolNames() []string {
 		"nim_workspace_symbols",
 		"fetch",
 		"agentic_fetch",
-		"fd",
 		"rg",
 		"ls",
 		"run",
@@ -803,7 +801,7 @@ func resolveExploreTools(tools []string) []string {
 	// constrains it to read-only inspection commands. Direct mutators
 	// (edit/multiedit/write/download/todos) and nim_restart are excluded.
 	exploreTools := []string{
-		"bash", "fd", "rg", "ls", "sourcegraph", "view",
+		"bash", "rg", "ls", "sourcegraph", "view",
 		"nim_call_hierarchy",
 		"nim_check_file",
 		"nim_definition",
@@ -866,7 +864,7 @@ func (c *Config) SetupAgents() {
 		AgentExplore: {
 			ID:           AgentExplore,
 			Name:         "Explore",
-			Description:  "A fast tool-oriented agent for fd/rg search and inspection.",
+			Description:  "A fast tool-oriented agent for rg search and inspection.",
 			Model:        SelectedModelTypeExplore,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: resolveExploreTools(allowedTools),
@@ -878,7 +876,7 @@ func (c *Config) SetupAgents() {
 			// a half-finished "going to look at X" line that looked like a
 			// truncated return to the parent.
 			MaxTurns:      16,
-			ParallelTools: []string{"fd", "rg", "view", "ls", "bash", "nu"},
+			ParallelTools: []string{"rg", "view", "ls", "bash", "nu"},
 		},
 		AgentAuditor: {
 			ID:           AgentAuditor,

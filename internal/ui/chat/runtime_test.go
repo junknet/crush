@@ -31,27 +31,3 @@ func TestRuntimeActivityItemRendersCompactionMetadata(t *testing.T) {
 	require.Contains(t, rendered, "5.9K tokens")
 	require.False(t, item.Finished())
 }
-
-func TestRuntimeActivityItemRendersTerminalMonitor(t *testing.T) {
-	t.Parallel()
-
-	sty := styles.CharmtonePantera()
-	item := NewRuntimeActivityItem(&sty, RuntimeActivitySnapshot{
-		ID:              "runtime:monitor:session-a:001",
-		Kind:            RuntimeActivityMonitor,
-		Status:          RuntimeActivityDone,
-		Title:           "monitor hit 001",
-		Detail:          "pattern \"done\" · done in 42s",
-		StartedAt:       time.Now().Add(-42 * time.Second),
-		FinishedAt:      time.Now(),
-		ProgressPercent: -1,
-		LineCount:       7,
-	})
-
-	rendered := ansi.Strip(item.RawRender(100))
-
-	require.Contains(t, rendered, "monitor hit 001")
-	require.Contains(t, rendered, "7 lines")
-	require.Contains(t, rendered, "pattern \"done\"")
-	require.True(t, item.Finished())
-}

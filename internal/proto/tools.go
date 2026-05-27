@@ -99,20 +99,6 @@ const AgenticFetchToolName = tools.AgenticFetchToolName
 // agentic_fetch tool.
 type AgenticFetchPermissionsParams = tools.AgenticFetchPermissionsParams
 
-const FdToolName = "fd"
-
-// FdParams represents the parameters for the fd tool.
-type FdParams struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
-}
-
-// FdResponseMetadata represents the metadata for a fd tool response.
-type FdResponseMetadata struct {
-	NumberOfFiles int  `json:"number_of_files"`
-	Truncated     bool `json:"truncated"`
-}
-
 const RgToolName = "rg"
 
 // RgParams represents the parameters for the rg tool.
@@ -121,6 +107,7 @@ type RgParams struct {
 	Path        string `json:"path"`
 	Include     string `json:"include"`
 	LiteralText bool   `json:"literal_text"`
+	FilesOnly   bool   `json:"files_only"`
 }
 
 // RgResponseMetadata represents the metadata for an rg tool response.

@@ -59,6 +59,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/ultraviolet/layout"
 	"github.com/charmbracelet/ultraviolet/screen"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/editor"
 	xstrings "github.com/charmbracelet/x/exp/strings"
 )
@@ -182,6 +183,8 @@ type (
 	creditsUpdatedMsg struct {
 		credits int
 	}
+	// todoRecentlyCompletedMsg is sent when a task completed-at TTL expires.
+	todoRecentlyCompletedMsg struct{}
 )
 
 // UI represents the main user interface model.
@@ -339,17 +342,6 @@ type UI struct {
 		index    int
 		draft    string
 	}
-
-	// ghostText is the current autocomplete suggestion rendered after the
-	// cursor in dim style. Empty when no suggestion is active. Updated
-	// via [suggestionUpdatedMsg]; accepted with Tab/Right-arrow at
-	// end-of-buffer; dismissed by any other key.
-	ghostText string
-	// suggestionCtx is the lifecycle context owning the suggestion
-	// subscription goroutine; cancelled on UI shutdown.
-	suggestionCtx    context.Context
-	suggestionCancel context.CancelFunc
-	suggestionEvents <-chan workspace.AgentSuggestionEvent
 }
 
 // New creates a new instance of the [UI] model.
@@ -472,11 +464,6 @@ func (m *UI) Init() tea.Cmd {
 	if m.com.IsHyper() {
 		cmds = append(cmds, m.fetchHyperCredits())
 	}
-	// Kick off the ghost-text suggestion subscription. The first call sets
-	// up the broker channel and returns immediately with a sentinel msg;
-	// Update() reschedules itself so we keep draining for the lifetime of
-	// the UI.
-	cmds = append(cmds, m.startSuggestionSubscription())
 	return tea.Batch(cmds...)
 }
 
@@ -821,11 +808,16 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.session != nil && msg.Payload.ID == m.session.ID {
 			prevHasInProgress := hasInProgressTodo(m.session.Todos)
 			m.session = &msg.Payload
+			m.renderPills()
 			if !prevHasInProgress && hasInProgressTodo(m.session.Todos) {
 				m.todoIsSpinning = true
 				cmds = append(cmds, m.todoSpinner.Tick)
 				m.updateLayoutAndSize()
 			}
+			// Schedule a re-render to handle recently completed TTL
+			cmds = append(cmds, tea.Tick(chat.TodoRecentlyCompletedTTL, func(time.Time) tea.Msg {
+				return todoRecentlyCompletedMsg{}
+			}))
 		}
 	case pubsub.Event[message.Message]:
 		// Check if this is a child session message for an agent tool.
@@ -903,10 +895,11 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case pubsub.Event[shell.BackgroundJobEvent]:
-		if m.shouldHandleBackgroundJobEvent(msg.Payload) {
-			if cmd := m.handleBackgroundJobEvent(msg.Payload); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
+		// Background job and monitor output is runtime status, not
+		// conversation content. Receiving the event is enough to trigger a
+		// redraw; runtimeStatusLine reads the current workspace counters.
+		if !m.shouldHandleBackgroundJobEvent(msg.Payload) {
+			break
 		}
 	case pubsub.Event[permission.PermissionRequest]:
 		if cmd := m.openPermissionsDialog(msg.Payload); cmd != nil {
@@ -920,17 +913,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case pubsub.Event[permission.PermissionNotification]:
 		m.handlePermissionNotification(msg.Payload)
-	case suggestionUpdatedMsg:
-		// Only adopt the suggestion when it matches the current session;
-		// background generations for a session we've since switched away
-		// from would surface stale ghost text.
-		if m.session != nil && msg.sessionID == m.session.ID {
-			m.ghostText = msg.text
-		}
-		// Re-arm the subscription so we keep draining future events.
-		if cmd := m.waitForSuggestion(); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
+	case todoRecentlyCompletedMsg:
+		m.renderPills()
 	case ctrlCTimerExpiredMsg:
 		m.ctrlCArmed = false
 		m.ctrlCArmedAt = time.Time{}
@@ -979,7 +963,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			x -= m.layout.main.Min.X
 			y -= m.layout.main.Min.Y
 			if !image.Pt(msg.X, msg.Y).In(m.layout.sidebar) {
-				if handled, cmd := m.chat.HandleMouseDown(x, y); handled {
+				if handled, cmd := m.chat.HandleMouseDown(ansi.MouseButton(msg.Button), x, y); handled {
 					m.lastClickTime = time.Now()
 					if cmd != nil {
 						cmds = append(cmds, cmd)
@@ -1039,7 +1023,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Adjust for chat area position
 			x -= m.layout.main.Min.X
 			y -= m.layout.main.Min.Y
-			if m.chat.HandleMouseUp(x, y) && m.chat.HasHighlight() {
+			if m.chat.HandleMouseUp(ansi.MouseButton(msg.Button), x, y) && m.chat.HasHighlight() {
 				cmds = append(cmds, tea.Tick(doubleClickThreshold, func(t time.Time) tea.Msg {
 					if time.Since(m.lastClickTime) >= doubleClickThreshold {
 						return copyChatHighlightMsg{}
@@ -1404,6 +1388,9 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 }
 
 func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
+	if msg.Button != tea.MouseLeft {
+		return nil
+	}
 	switch {
 	case m.state != uiChat:
 		return nil
@@ -2196,38 +2183,6 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				return tea.Batch(cmds...)
 			}
 
-			// Ghost-text accept: Tab and Right-Arrow at end of buffer commit
-			// the active suggestion into the textarea. Enter on an empty
-			// buffer also accepts (mirrors free-code's UX). Must run before
-			// the regular Tab focus switch / SendMessage handlers below.
-			if m.ghostSuffix() != "" {
-				keyStr := msg.String()
-				switch keyStr {
-				case "tab":
-					m.acceptGhost("tab")
-					return tea.Batch(cmds...)
-				case "right":
-					if cursorAtEndOfBuffer(&m.textarea) {
-						m.acceptGhost("right")
-						return tea.Batch(cmds...)
-					}
-				case "enter":
-					if strings.TrimSpace(m.textarea.Value()) == "" {
-						m.acceptGhost("enter")
-						return tea.Batch(cmds...)
-					}
-				}
-				// Any non-navigation keypress dismisses the ghost so we
-				// don't render stale dim text on top of fresh input.
-				switch keyStr {
-				case "up", "down", "left", "home", "end", "pgup", "pgdown",
-					"ctrl+a", "ctrl+e", "ctrl+left", "ctrl+right":
-					// Navigation keeps the ghost.
-				default:
-					m.dismissGhost()
-				}
-			}
-
 			switch {
 			case msg.String() == "backspace" && m.textarea.Value() == "" && len(m.attachments.List()) > 0:
 				// Backspace on empty input removes the most-recent attachment.
@@ -2341,10 +2296,6 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 
 				m.randomizePlaceholders()
 				m.historyReset()
-				// A new user turn invalidates any pending ghost from the
-				// previous turn; coordinator will publish a fresh one once
-				// the assistant replies.
-				m.ghostText = ""
 
 				return tea.Batch(m.sendMessage(value, attachments...), m.loadPromptHistory())
 			case key.Matches(msg, m.keyMap.Chat.NewSession):
@@ -3033,6 +2984,15 @@ func (m *UI) updateLayoutAndSize() {
 // the view scrolled to the bottom. The returned command, if non-nil, must be
 // batched by the caller.
 func (m *UI) handleTextareaHeightChange(prevHeight int) tea.Cmd {
+	if m.state == uiChat {
+		if m.textarea.Height() != prevHeight {
+			m.updateLayoutAndSize()
+		}
+		// User requested that any input change pulls TUI to bottom and locks it.
+		// ForceScrollToBottomAndAnimate both scrolls and sets follow=true.
+		return m.chat.ForceScrollToBottomAndAnimate()
+	}
+
 	if m.textarea.Height() == prevHeight {
 		return nil
 	}
@@ -3773,107 +3733,6 @@ func tokensFromTraceForRuntimeActivity(trace agentruntime.TaskTrace) (int64, boo
 	}
 }
 
-func (m *UI) handleBackgroundJobEvent(ev shell.BackgroundJobEvent) tea.Cmd {
-	if ev.ID == "" || !isMonitorRuntimeEvent(ev.Kind) {
-		return nil
-	}
-	sessionID := m.sessionIDForRuntimeActivity(ev.SessionID)
-	id := monitorActivityID(sessionID, ev.ID)
-	if ev.Kind == shell.BackgroundKindMonitorLine &&
-		m.chat != nil &&
-		m.chat.MessageItem(id) == nil {
-		stats := m.com.Workspace.BackgroundShellStats()
-		if stats.ActiveMonitors <= 0 {
-			return nil
-		}
-	}
-	lineCount := m.existingMonitorLineCount(id)
-	startedAt := time.Now()
-	if item := m.runtimeActivities[id]; item != nil && !item.Snapshot().StartedAt.IsZero() {
-		startedAt = item.Snapshot().StartedAt
-	}
-	return m.upsertRuntimeActivity(monitorActivitySnapshot(sessionID, ev, startedAt, lineCount+1))
-}
-
-func isMonitorRuntimeEvent(kind shell.BackgroundEventKind) bool {
-	return kind == shell.BackgroundKindMonitorLine ||
-		kind == shell.BackgroundKindMonitorHit ||
-		kind == shell.BackgroundKindMonitorEOF ||
-		kind == shell.BackgroundKindMonitorTimeout
-}
-
-func (m *UI) sessionIDForRuntimeActivity(eventSessionID string) string {
-	if eventSessionID != "" {
-		return eventSessionID
-	}
-	if m != nil && m.session != nil {
-		return m.session.ID
-	}
-	return ""
-}
-
-func (m *UI) existingMonitorLineCount(id string) int {
-	if m == nil {
-		return 0
-	}
-	if item := m.runtimeActivities[id]; item != nil {
-		return item.Snapshot().LineCount
-	}
-	return 0
-}
-
-func monitorActivitySnapshot(sessionID string, ev shell.BackgroundJobEvent, startedAt time.Time, lineCount int) chat.RuntimeActivitySnapshot {
-	status := chat.RuntimeActivityRunning
-	title := "monitor " + ev.ID
-	detail := strings.TrimSpace(ev.MatchLine)
-	if detail == "" {
-		detail = strings.TrimSpace(ev.Description)
-	}
-	if detail == "" {
-		detail = strings.TrimSpace(ev.Command)
-	}
-	switch ev.Kind {
-	case shell.BackgroundKindMonitorHit:
-		status = chat.RuntimeActivityDone
-		title = "monitor hit " + ev.ID
-	case shell.BackgroundKindMonitorEOF:
-		status = chat.RuntimeActivityFailed
-		title = "monitor ended " + ev.ID
-		if detail == "" {
-			detail = strings.TrimSpace(ev.OutputTail)
-		}
-	case shell.BackgroundKindMonitorTimeout:
-		status = chat.RuntimeActivityFailed
-		title = "monitor timeout " + ev.ID
-		if detail == "" {
-			detail = strings.TrimSpace(ev.OutputTail)
-		}
-	}
-	if ev.Pattern != "" && detail != "" {
-		detail = fmt.Sprintf("pattern %q · %s", ev.Pattern, detail)
-	} else if ev.Pattern != "" {
-		detail = fmt.Sprintf("pattern %q", ev.Pattern)
-	}
-	return chat.RuntimeActivitySnapshot{
-		ID:              monitorActivityID(sessionID, ev.ID),
-		Kind:            chat.RuntimeActivityMonitor,
-		Status:          status,
-		Title:           title,
-		Detail:          detail,
-		StartedAt:       startedAt,
-		FinishedAt:      monitorFinishedAt(status),
-		ProgressPercent: -1,
-		LineCount:       max(0, lineCount),
-	}
-}
-
-func monitorFinishedAt(status chat.RuntimeActivityStatus) time.Time {
-	if status == chat.RuntimeActivityRunning {
-		return time.Time{}
-	}
-	return time.Now()
-}
-
 func (m *UI) upsertRuntimeActivity(snapshot chat.RuntimeActivitySnapshot) tea.Cmd {
 	if m == nil || m.chat == nil || snapshot.ID == "" {
 		return nil
@@ -3891,10 +3750,6 @@ func (m *UI) upsertRuntimeActivity(snapshot chat.RuntimeActivitySnapshot) tea.Cm
 
 func compactionActivityID(sessionID string) string {
 	return "runtime:compaction:" + sessionID
-}
-
-func monitorActivityID(sessionID string, jobID string) string {
-	return "runtime:monitor:" + sessionID + ":" + jobID
 }
 
 func (m *UI) recordToolRuntimeTrace(trace agentruntime.TaskTrace) {
@@ -4376,9 +4231,6 @@ func maxDuration(left, right time.Duration) time.Duration {
 // that looks like static UI chrome.
 func (m *UI) renderEditorView(width int) string {
 	editorBody := m.textarea.View()
-	if g := m.ghostSuffix(); g != "" {
-		editorBody = appendGhostToEditor(editorBody, g)
-	}
 	if len(m.attachments.List()) == 0 {
 		return strings.Join([]string{
 			editorBody,
@@ -4396,152 +4248,6 @@ func (m *UI) renderEditorView(width int) string {
 		editorBody,
 		"", // margin at bottom of editor
 	}, "\n")
-}
-
-// ghostSuffix returns the ghost-text the editor should show appended to
-// the textarea content. Returns "" when no suggestion is active, the
-// textarea has content the user is overlapping with the suggestion, or
-// the user has scrolled the cursor off the end of the buffer.
-func (m *UI) ghostSuffix() string {
-	if m.ghostText == "" {
-		return ""
-	}
-	// Only show ghost when the focus is on the editor and the cursor sits
-	// at the very end of the buffer; otherwise the rendering would inject
-	// dim text into the middle of what the user is editing.
-	if !m.textarea.Focused() {
-		return ""
-	}
-	// If the user has already typed a prefix that matches the suggestion,
-	// hide that prefix from the ghost so accept-on-tab still produces the
-	// intended final string.
-	val := m.textarea.Value()
-	suggestion := m.ghostText
-	if val != "" && strings.HasPrefix(suggestion, val) {
-		return strings.TrimPrefix(suggestion, val)
-	}
-	// If the buffer doesn't start the suggestion verbatim, only show the
-	// ghost on an empty buffer — otherwise it's confusing to see dim
-	// content next to unrelated user input.
-	if val != "" {
-		return ""
-	}
-	return suggestion
-}
-
-// appendGhostToEditor splices the ghost string into the last visible line of
-// the rendered textarea. Bubble Tea textarea.View() returns a multi-line
-// string with trailing padding; we attach the ghost to the end of the line
-// the cursor lives on, which is the last non-empty line. The styling
-// applied here is intentionally minimal (faint dim) so it never competes
-// with the user's real input.
-func appendGhostToEditor(editorBody, ghost string) string {
-	style := lipgloss.NewStyle().Faint(true)
-	dim := style.Render(ghost)
-	lines := strings.Split(editorBody, "\n")
-	// Walk from the bottom to find the last non-empty line; that's where
-	// the cursor visually sits.
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) != "" {
-			lines[i] = lines[i] + dim
-			return strings.Join(lines, "\n")
-		}
-	}
-	// All lines were blank (empty buffer). Drop the ghost on line 0.
-	if len(lines) == 0 {
-		return dim
-	}
-	lines[0] = lines[0] + dim
-	return strings.Join(lines, "\n")
-}
-
-// suggestionUpdatedMsg is the tea.Msg fired when the workspace suggestion
-// subscription delivers a new (possibly empty) ghost-text candidate.
-type suggestionUpdatedMsg struct {
-	sessionID string
-	text      string
-}
-
-// startSuggestionSubscription wires the workspace's suggestion service to
-// the tea program. It is safe to call when the workspace doesn't expose
-// suggestions (client mode or disabled) — in that case it returns a nil
-// command and ghostText stays empty for the whole session.
-func (m *UI) startSuggestionSubscription() tea.Cmd {
-	svc := m.com.Workspace.AgentSuggestion()
-	if svc == nil {
-		return nil
-	}
-	if m.suggestionCancel != nil {
-		// Already running (e.g. Init called twice during a test).
-		return m.waitForSuggestion()
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	m.suggestionCtx = ctx
-	m.suggestionCancel = cancel
-	m.suggestionEvents = svc.Subscribe(ctx)
-	return m.waitForSuggestion()
-}
-
-// waitForSuggestion blocks (in a tea.Cmd goroutine) on the next event
-// from the suggestion channel and dispatches it back to Update. After the
-// msg is processed, Update re-calls this to keep draining.
-func (m *UI) waitForSuggestion() tea.Cmd {
-	ch := m.suggestionEvents
-	if ch == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		ev, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return suggestionUpdatedMsg{sessionID: ev.SessionID, text: ev.Text}
-	}
-}
-
-// acceptGhost commits the current ghost suffix into the textarea buffer
-// and clears it. method is "tab" or "right" for telemetry.
-func (m *UI) acceptGhost(method string) tea.Cmd {
-	suffix := m.ghostSuffix()
-	if suffix == "" {
-		return nil
-	}
-	// Insert at the current position; the suffix is computed against the
-	// existing value so InsertString appends it correctly.
-	m.textarea.InsertString(suffix)
-	if svc := m.com.Workspace.AgentSuggestion(); svc != nil && m.session != nil {
-		svc.MarkAccepted(m.session.ID, method, len(suffix))
-	}
-	m.ghostText = ""
-	return nil
-}
-
-// cursorAtEndOfBuffer reports whether the textarea cursor is positioned
-// at the end of the input — the only state where consuming a Right-Arrow
-// keystroke as "accept ghost" is safe (otherwise we would silently break
-// in-line navigation). bubbles v2 textarea does not expose a public byte
-// cursor offset; we approximate by checking that the cursor sits on the
-// last line. Combined with the ghostSuffix() != "" guard at the call
-// site this is conservative enough for the prompt-style single-line use.
-func cursorAtEndOfBuffer(ta *textarea.Model) bool {
-	if ta == nil {
-		return false
-	}
-	return ta.Line() == ta.LineCount()-1
-}
-
-// dismissGhost discards the current ghost suggestion. Called when the
-// user types any character other than the accept keys, or when a new
-// turn starts.
-func (m *UI) dismissGhost() {
-	if m.ghostText == "" {
-		return
-	}
-	length := len(m.ghostText)
-	m.ghostText = ""
-	if svc := m.com.Workspace.AgentSuggestion(); svc != nil && m.session != nil {
-		svc.MarkRejected(m.session.ID, length)
-	}
 }
 
 // cacheSidebarLogo renders and caches the sidebar logo at the specified width.

@@ -17,8 +17,8 @@ Common shell builtins and core utils available on Windows.
 
 <usage_notes>
 - Command required, working_dir optional (defaults to current directory)
-- IMPORTANT: Use `rg`/`fd`/`agent` tools instead of `grep`/`find` commands. Use `view`/`ls` tools instead of `cat`/`head`/`tail`/`ls`.
-- **NEVER use `grep`, `rg`, or `find` under `bash` for repository search**. Use the `rg` tool for content, `fd` for filenames/paths, and `ast_grep` for structural code search.
+- IMPORTANT: Use `rg`/`agent` tools instead of `grep`/`find` commands. Use `view`/`ls` tools instead of `cat`/`head`/`tail`/`ls`.
+- **NEVER use `grep`, `rg`, or `find` under `bash` for repository search**. Use the `rg` tool for content and filenames/paths, and `ast_grep` for structural code search.
 - **NEVER use foreground sleep polling**: commands like `sleep 10 && status-check`, `sleep 20; job-output`, or long standalone `sleep` are blocked. Use `run_in_background=true` and `monitor`, or `schedule_wakeup` for a pure time delay.
 - Chain with ';' or '&&', avoid newlines except in quoted strings
 - Each command runs in independent shell (no state persistence between calls)

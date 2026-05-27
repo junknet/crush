@@ -89,11 +89,7 @@ func (m *mockSessionService) IsAgentToolSession(sessionID string) bool {
 	return ok
 }
 
-func (m *mockSessionService) PrepareSpeculativeSession(ctx context.Context, sessionID, specID string) error {
-	return nil
-}
-
-func (m *mockSessionService) PromoteSpeculativeSession(ctx context.Context, sessionID string) error {
+func (m *mockSessionService) PrepareDerivedSession(ctx context.Context, sessionID, derivedID string) error {
 	return nil
 }
 

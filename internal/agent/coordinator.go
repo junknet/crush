@@ -25,7 +25,6 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agentprompt "github.com/charmbracelet/crush/internal/agent/prompt"
-	"github.com/charmbracelet/crush/internal/agent/suggestion"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/event"
@@ -136,10 +135,6 @@ type Coordinator interface {
 	Summarize(context.Context, string) error
 	Model() Model
 	UpdateModels(ctx context.Context) error
-	// Suggestion returns the ghost-text suggestion service, or nil when
-	// disabled by config / not yet wired.
-	Suggestion() *suggestion.Service
-	PromoteSpeculativeSession(ctx context.Context, sessionID string) error
 }
 
 type coordinator struct {
@@ -165,15 +160,10 @@ type coordinator struct {
 	activeSkills []*skills.Skill // Post-filter: active skills only.
 	skillTracker *skills.Tracker
 
-	// Suggestion service for ghost-text autocomplete. Fed after each
-	// successful brain turn; nil when DisableSuggestion is true in config.
-	suggestion *suggestion.Service
-
 	readyWg errgroup.Group
 
-	speculativeMu      sync.Mutex
-	speculativeCancels map[string]context.CancelFunc
-	activeCancels      map[string]context.CancelCauseFunc
+	activeMu      sync.Mutex
+	activeCancels map[string]context.CancelCauseFunc
 }
 
 func NewCoordinator(
@@ -193,22 +183,21 @@ func NewCoordinator(
 	skillTracker := skills.NewTracker(activeSkills)
 
 	c := &coordinator{
-		cfg:                cfg,
-		sessions:           sessions,
-		messages:           messages,
-		permissions:        permissions,
-		history:            history,
-		filetracker:        filetracker,
-		lspManager:         lspManager,
-		bgManager:          bgManager,
-		notify:             notify,
-		agents:             make(map[string]SessionAgent),
-		allSkills:          allSkills,
-		activeSkills:       activeSkills,
-		skillTracker:       skillTracker,
-		runtime:            agentruntime.NewSession(cfg.WorkingDir(), nil),
-		speculativeCancels: make(map[string]context.CancelFunc),
-		activeCancels:      make(map[string]context.CancelCauseFunc),
+		cfg:           cfg,
+		sessions:      sessions,
+		messages:      messages,
+		permissions:   permissions,
+		history:       history,
+		filetracker:   filetracker,
+		lspManager:    lspManager,
+		bgManager:     bgManager,
+		notify:        notify,
+		agents:        make(map[string]SessionAgent),
+		allSkills:     allSkills,
+		activeSkills:  activeSkills,
+		skillTracker:  skillTracker,
+		runtime:       agentruntime.NewSession(cfg.WorkingDir(), nil),
+		activeCancels: make(map[string]context.CancelCauseFunc),
 	}
 
 	agentName := config.AgentBrain
@@ -282,23 +271,6 @@ func NewCoordinator(
 		c.agents[config.AgentAuditor] = auditorAgent
 	}
 
-	// Wire suggestion service. Uses the brain agent's title (utility)
-	// model so ghost-text predictions don't burn the user's primary
-	// model budget. Disabled via Options.DisableSuggestion.
-	disableSugg := cfg.Config().Options != nil && cfg.Config().Options.DisableSuggestion
-	c.suggestion = suggestion.New(messages, func() fantasy.LanguageModel {
-		brain, ok := c.agents[config.AgentBrain]
-		if !ok || brain == nil {
-			return nil
-		}
-		sa, ok := brain.(*sessionAgent)
-		if !ok {
-			return nil
-		}
-		m := sa.TitleModel()
-		return m.Model
-	}, disableSugg)
-
 	// Drive event-driven re-wakeups: when a backgrounded shell job finishes or
 	// a monitor fires, automatically continue the session that launched it
 	// instead of leaving the agent idle waiting for the user to poll.
@@ -356,16 +328,6 @@ func (c *coordinator) installNotificationHookBridge() {
 	})
 }
 
-// Suggestion exposes the ghost-text suggestion service so the TUI can
-// subscribe to fresh suggestions and acknowledge accept/reject events. May
-// return nil if suggestion is disabled or NewCoordinator failed early.
-func (c *coordinator) Suggestion() *suggestion.Service {
-	if c == nil {
-		return nil
-	}
-	return c.suggestion
-}
-
 // watchScheduledWakeups resumes a session when a schedule_wakeup timer fires,
 // handing the agent the reason it asked to be woken for.
 func (c *coordinator) watchScheduledWakeups(ctx context.Context) {
@@ -416,15 +378,19 @@ func (c *coordinator) watchBackgroundJobs(ctx context.Context) {
 			if job.SessionID == "" {
 				continue
 			}
-			// Mirror the wake-up onto the unified eventbus so PrepareStep can
-			// drain it as a <task-notification> system-reminder for the next
-			// turn, in addition to the c.Run continuation below.
-			publishBackgroundJobToEventBus(job)
-
-			// Do not wake the agent for streaming output lines
+			// Streaming output lines are high-frequency status noise. They do
+			// not wake the agent and must not be mirrored into eventbus, or
+			// the next model turn receives a stale pile of monitor_line
+			// notifications.
 			if job.Kind == shell.BackgroundKindMonitorLine {
 				continue
 			}
+
+			// Mirror terminal wake-ups onto the unified eventbus so
+			// PrepareStep can drain them as a <task-notification>
+			// system-reminder for the next turn, in addition to the c.Run
+			// continuation below.
+			publishBackgroundJobToEventBus(job)
 
 			prompt := buildBackgroundWakePrompt(job)
 			slog.DebugContext(ctx, "Background job finished — waking session",
@@ -496,9 +462,6 @@ func publishBackgroundJobToEventBus(job shell.BackgroundJobEvent) {
 		kind = "monitor_eof"
 	case shell.BackgroundKindMonitorTimeout:
 		kind = "monitor_timeout"
-	case shell.BackgroundKindMonitorLine:
-		kind = "monitor_line"
-		priority = eventbus.PriorityLater
 	}
 	payload := map[string]any{
 		"shell_id":     job.ID,
@@ -520,24 +483,17 @@ func publishBackgroundJobToEventBus(job shell.BackgroundJobEvent) {
 
 // Run implements Coordinator.
 func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, planMode bool, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
-	c.speculativeMu.Lock()
-	if cancel, ok := c.speculativeCancels[sessionID]; ok {
-		cancel()
-		delete(c.speculativeCancels, sessionID)
-	}
-	c.speculativeMu.Unlock()
-
 	runCtx, runCancel := context.WithCancelCause(ctx)
-	c.speculativeMu.Lock()
+	c.activeMu.Lock()
 	if c.activeCancels == nil {
 		c.activeCancels = make(map[string]context.CancelCauseFunc)
 	}
 	c.activeCancels[sessionID] = runCancel
-	c.speculativeMu.Unlock()
+	c.activeMu.Unlock()
 	defer func() {
-		c.speculativeMu.Lock()
+		c.activeMu.Lock()
 		delete(c.activeCancels, sessionID)
-		c.speculativeMu.Unlock()
+		c.activeMu.Unlock()
 		runCancel(nil)
 	}()
 
@@ -753,29 +709,10 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 
 	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
 
-	// Kick off ghost-text suggestion generation for this session after a
-	// successful brain turn. Only the user-facing brain run fires it —
-	// plan/worker/explore sub-agents are internal so a suggestion off
-	// them would be confusing UX. Always non-blocking; uses context.Background
-	// so cancelling this Run doesn't abort the suggestion call (it has
-	// its own timeout via the suggestion service).
 	if originalErr == nil && result != nil && rootProfile == scheduler.ProfileBrainAgent {
-		sid := sessionID
 		if !readOnlyTurn {
+			sid := sessionID
 			go c.triggerMemoryExtraction(context.Background(), sid)
-		}
-
-		if c.suggestion != nil {
-			go func() {
-				prediction, err := c.suggestion.Generate(context.Background(), sid)
-				if err != nil {
-					slog.Debug("Suggestion generation failed", "session", sid, "error", err)
-					return
-				}
-				if prediction != "" {
-					c.StartSpeculativeRun(context.Background(), sid, prediction)
-				}
-			}()
 		}
 	}
 
@@ -1159,12 +1096,11 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewJobKillTool(c.bgManager),
 		tools.NewMonitorTool(c.bgManager),
 		tools.NewScheduleWakeupTool(c.cfg.Config().Options.DataDirectory),
-		tools.NewDagRunTool(c.permissions, c.cfg.WorkingDir()),
+		tools.NewDagRunTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
-		tools.NewFdTool(c.permissions, c.cfg.WorkingDir()),
 		tools.NewRgTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Rg),
 		tools.NewAstGrepTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.AstGrep),
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
@@ -1177,7 +1113,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	)
 
 	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).
-	if len(c.cfg.Config().LSP) > 0 || c.cfg.Config().Options.AutoLSP == nil || *c.cfg.Config().Options.AutoLSP {
+	if false { // Temporarily disabled by user request
 		allTools = append(allTools,
 			tools.NewDiagnosticsTool(c.lspManager),
 			tools.NewReferencesTool(c.lspManager),
@@ -1720,91 +1656,33 @@ func isExactoSupported(modelID string) bool {
 
 func (c *coordinator) Cancel(sessionID string) {
 	c.currentAgent.Cancel(sessionID)
-	c.speculativeMu.Lock()
-	if cancel, ok := c.speculativeCancels[sessionID]; ok {
-		cancel()
-		delete(c.speculativeCancels, sessionID)
-	}
+	c.activeMu.Lock()
 	if cancel, ok := c.activeCancels[sessionID]; ok {
 		cancel(ErrRequestCancelled)
 		delete(c.activeCancels, sessionID)
 	}
-	c.speculativeMu.Unlock()
+	c.activeMu.Unlock()
 }
 
 func (c *coordinator) CancelAndFlush(sessionID string) ([]string, bool) {
 	prompts, wasRunning := c.currentAgent.CancelAndFlush(sessionID)
-	c.speculativeMu.Lock()
-	if cancel, ok := c.speculativeCancels[sessionID]; ok {
-		cancel()
-		delete(c.speculativeCancels, sessionID)
-	}
+	c.activeMu.Lock()
 	if cancel, ok := c.activeCancels[sessionID]; ok {
 		cancel(ErrRequestCancelled)
 		delete(c.activeCancels, sessionID)
 	}
-	c.speculativeMu.Unlock()
+	c.activeMu.Unlock()
 	return prompts, wasRunning
 }
 
 func (c *coordinator) CancelAll() {
 	c.currentAgent.CancelAll()
-	c.speculativeMu.Lock()
-	for _, cancel := range c.speculativeCancels {
-		cancel()
-	}
-	c.speculativeCancels = make(map[string]context.CancelFunc)
+	c.activeMu.Lock()
 	for _, cancel := range c.activeCancels {
 		cancel(ErrRequestCancelled)
 	}
 	c.activeCancels = make(map[string]context.CancelCauseFunc)
-	c.speculativeMu.Unlock()
-}
-
-func (c *coordinator) StartSpeculativeRun(ctx context.Context, sessionID string, prediction string) {
-	c.speculativeMu.Lock()
-	if cancel, ok := c.speculativeCancels[sessionID]; ok {
-		cancel()
-	}
-	specCtx, specCancel := context.WithCancel(ctx)
-	c.speculativeCancels[sessionID] = specCancel
-	c.speculativeMu.Unlock()
-
-	go func() {
-		defer func() {
-			c.speculativeMu.Lock()
-			delete(c.speculativeCancels, sessionID)
-			c.speculativeMu.Unlock()
-		}()
-
-		specID := sessionID + "-speculate"
-		if err := c.sessions.PrepareSpeculativeSession(specCtx, sessionID, specID); err != nil {
-			slog.Debug("Failed to prepare speculative session", "session", sessionID, "error", err)
-			return
-		}
-
-		slog.Debug("Starting background speculative run", "session", sessionID, "prediction", prediction)
-		if _, err := c.Run(specCtx, specID, prediction, false); err != nil {
-			slog.Debug("Speculative run failed or cancelled", "session", sessionID, "error", err)
-		} else {
-			slog.Debug("Speculative run completed successfully", "session", sessionID)
-		}
-	}()
-}
-
-func (c *coordinator) PromoteSpeculativeSession(ctx context.Context, sessionID string) error {
-	c.speculativeMu.Lock()
-	if cancel, ok := c.speculativeCancels[sessionID]; ok {
-		cancel()
-		delete(c.speculativeCancels, sessionID)
-	}
-	c.speculativeMu.Unlock()
-
-	if err := c.messages.FlushAll(ctx); err != nil {
-		slog.Error("Failed to flush messages during promotion", "session", sessionID, "error", err)
-	}
-
-	return c.sessions.PromoteSpeculativeSession(ctx, sessionID)
+	c.activeMu.Unlock()
 }
 
 func (c *coordinator) ClearQueue(sessionID string) {
@@ -2292,7 +2170,7 @@ func (c *coordinator) attachAutoExplorePreflight(taskScheduler *scheduler.AgentS
 
 func buildAutoExplorePrompt(prompt, workingDir string) string {
 	return strings.TrimSpace(fmt.Sprintf(`Read-only repository exploration preflight.
-Use fd, rg, view, ast_grep, read-only LSP tools, or read-only dag_run nodes in parallel where useful.
+Use rg, view, ast_grep, read-only LSP tools, or read-only dag_run nodes in parallel where useful.
 Do not edit files, write memories, restart services, or run mutating shell commands.
 
 Working directory:
@@ -2743,8 +2621,8 @@ func (c *coordinator) triggerMemoryExtraction(ctx context.Context, sessionID str
 		return
 	}
 
-	specID := sessionID + "-mem-extract"
-	if err := c.sessions.PrepareSpeculativeSession(ctx, sessionID, specID); err != nil {
+	derivedID := sessionID + "-mem-extract"
+	if err := c.sessions.PrepareDerivedSession(ctx, sessionID, derivedID); err != nil {
 		slog.Debug("Failed to prepare memory extraction session", "session", sessionID, "error", err)
 		return
 	}
@@ -2786,7 +2664,7 @@ Efficiency rules:
 - If there is nothing durable to save, write nothing and reply briefly.
 
 Tool policy:
-- Allowed: fd, rg, view, write, edit inside the memory directory.
+- Allowed: rg, view, write, edit inside the memory directory.
 - Forbidden: writes outside the memory directory, mutating shell, agent spawning, unrelated tools.`
 
 	slog.Debug("Starting background memory extraction", "session", sessionID)
@@ -2795,7 +2673,7 @@ Tool policy:
 	defer cancel()
 
 	_, err = exploreAgent.Run(runCtx, SessionAgentCall{
-		SessionID: specID,
+		SessionID: derivedID,
 		Prompt:    extractionPrompt,
 	})
 	if err != nil {
@@ -2804,7 +2682,7 @@ Tool policy:
 		slog.Debug("Background memory extraction finished successfully", "session", sessionID)
 	}
 
-	_ = c.sessions.Delete(runCtx, specID)
+	_ = c.sessions.Delete(runCtx, derivedID)
 }
 
 func hasMemoryWrites(msgs []message.Message, memoryDir string) bool {
@@ -2873,18 +2751,12 @@ func (c *coordinator) relevantMemoryAttachments(ctx context.Context, sessionID, 
 	}
 	attachments := make([]message.Attachment, 0, len(memories))
 	for _, memory := range memories {
-		content := fmt.Sprintf(
-			"Cross-session relevant memory. Use it only when it helps the current request.\n\nMemory: %s\nType: %s\nDescription: %s\n\n%s",
-			memory.Header.Path,
-			memory.Header.Type,
-			memory.Header.Description,
-			memory.Content,
-		)
 		attachments = append(attachments, message.Attachment{
-			FilePath: memory.Header.Path,
-			FileName: memory.Header.Filename,
-			MimeType: "text/markdown",
-			Content:  []byte(content),
+			FilePath:   memory.Header.Path,
+			FileName:   memory.Header.Filename,
+			MimeType:   "text/markdown",
+			Content:    []byte(memory.Content),
+			IsInternal: true,
 		})
 	}
 	slog.Debug("Attached relevant memories", "session", sessionID, "count", len(attachments))

@@ -79,11 +79,11 @@ func TestMemExtractToolWrapper(t *testing.T) {
 
 	// 1. Run safe filename search tool.
 	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
-		Name:  "fd",
-		Input: "{}",
+		Name:  "rg",
+		Input: `{"files_only":true}`,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "fd run", resp.Content)
+	assert.Equal(t, "rg run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
 	// 2. Run write tool targeting memory dir
@@ -147,7 +147,7 @@ func TestReadOnlyDagRunPolicy(t *testing.T) {
 	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
 		Name: tools.DagRunToolName,
 		Input: `{"nodes":[
-			{"id":"files","tool":"fd","pattern":"*.go"},
+			{"id":"files","tool":"rg","pattern":"*.go","files_only":true},
 			{"id":"matches","tool":"rg","pattern":"ContextWindow","path":"internal"}
 		]}`,
 	})
@@ -160,7 +160,7 @@ func TestReadOnlyDagRunPolicy(t *testing.T) {
 		Input: `{"nodes":[{"id":"shell","tool":"shell","command":"date"}]}`,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, resp.Content, "only allow fd, rg, and view")
+	assert.Contains(t, resp.Content, "only allow rg and view")
 	assert.True(t, resp.StopTurn)
 }
 
@@ -173,4 +173,20 @@ func TestPromptReadOnlyAndExplorePreflightDetection(t *testing.T) {
 
 	require.True(t, promptNeedsExplorePreflight("/home/junknet/linege/nim-src 去这里分析bug 定位llvm IR问题设计 这个任务做评估"))
 	require.False(t, promptNeedsExplorePreflight("改 README 标题"))
+}
+
+type dummyTool struct{}
+
+func (d *dummyTool) Info() fantasy.ToolInfo {
+	return fantasy.ToolInfo{Name: "dummy"}
+}
+
+func (d *dummyTool) ProviderOptions() fantasy.ProviderOptions {
+	return fantasy.ProviderOptions{}
+}
+
+func (d *dummyTool) SetProviderOptions(fantasy.ProviderOptions) {}
+
+func (d *dummyTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+	return fantasy.ToolResponse{Content: call.Name + " run"}, nil
 }

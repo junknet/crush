@@ -26,6 +26,7 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/crush/internal/workspace"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 )
 
@@ -463,7 +464,7 @@ func TestRuntimeTraceAddsCompactionActivity(t *testing.T) {
 	require.True(t, item.Snapshot().TokensAreExact)
 }
 
-func TestBackgroundMonitorEventAddsRuntimeActivity(t *testing.T) {
+func TestBackgroundMonitorEventStaysOutOfChat(t *testing.T) {
 	t.Parallel()
 
 	ui := newTestUIWithConfig(t, nil)
@@ -481,11 +482,8 @@ func TestBackgroundMonitorEventAddsRuntimeActivity(t *testing.T) {
 		},
 	})
 
-	item, ok := ui.chat.MessageItem(monitorActivityID("session-1", "001")).(*uichat.RuntimeActivityItem)
-	require.True(t, ok)
-	require.Equal(t, uichat.RuntimeActivityRunning, item.Snapshot().Status)
-	require.Equal(t, 1, item.Snapshot().LineCount)
-	require.Contains(t, item.Snapshot().Detail, "sample 50")
+	require.Nil(t, ui.chat.MessageItem("runtime:monitor:session-1:001"))
+	require.Contains(t, ui.runtimeStatusLine(), "monitor 1")
 
 	_, _ = ui.Update(pubsub.Event[shell.BackgroundJobEvent]{
 		Type: pubsub.UpdatedEvent,
@@ -498,9 +496,8 @@ func TestBackgroundMonitorEventAddsRuntimeActivity(t *testing.T) {
 		},
 	})
 
-	require.Equal(t, uichat.RuntimeActivityDone, item.Snapshot().Status)
-	require.Contains(t, item.Snapshot().Detail, `pattern "done"`)
-	require.True(t, item.Finished())
+	require.Nil(t, ui.chat.MessageItem("runtime:monitor:session-1:001"))
+	require.Contains(t, ui.runtimeStatusLine(), "monitor 1")
 }
 
 func TestRuntimeStatusLineUsesLatestLLMTraceContextUsage(t *testing.T) {
@@ -772,7 +769,7 @@ func TestMouseDragAtViewportEdgeAutoScrolls(t *testing.T) {
 	ui.layout.main = uv.Rect(0, 5, 20, 3)
 
 	startIdx, startLine := ui.chat.list.ScrollOffset()
-	handled, _ := ui.chat.HandleMouseDown(2, 1)
+	handled, _ := ui.chat.HandleMouseDown(ansi.MouseButton1, 2, 1)
 	require.True(t, handled)
 
 	_, cmd := ui.Update(tea.MouseMotionMsg{X: 2, Y: 5})
@@ -849,11 +846,11 @@ func TestDoubleClickUserInputBlockCopiesWholeMessage(t *testing.T) {
 	item := uichat.NewUserMessageItem(ui.com.Styles, msg, renderer)
 	ui.chat.SetMessages(item)
 
-	handled, firstCmd := ui.chat.HandleMouseDown(2, 0)
+	handled, firstCmd := ui.chat.HandleMouseDown(ansi.MouseButton1, 2, 0)
 	require.True(t, handled)
 	require.NotNil(t, firstCmd)
 
-	handled, secondCmd := ui.chat.HandleMouseDown(2, 0)
+	handled, secondCmd := ui.chat.HandleMouseDown(ansi.MouseButton1, 2, 0)
 	require.True(t, handled)
 	require.NotNil(t, secondCmd)
 	require.False(t, ui.chat.HasHighlight())
@@ -867,7 +864,7 @@ func TestEscapeStopsMouseAutoScroll(t *testing.T) {
 	ui.chat.ForceScrollToBottom()
 	ui.layout.main = uv.Rect(0, 5, 20, 3)
 
-	handled, _ := ui.chat.HandleMouseDown(2, 1)
+	handled, _ := ui.chat.HandleMouseDown(ansi.MouseButton1, 2, 1)
 	require.True(t, handled)
 	_, cmd := ui.Update(tea.MouseMotionMsg{X: 2, Y: 5})
 	require.NotNil(t, cmd)
@@ -1167,4 +1164,23 @@ func TestPlanModeAcceptOutsidePlanModeIsRejected(t *testing.T) {
 
 	require.Empty(t, ws.lastAgentRunPrompt, "/accept outside plan mode must be a no-op")
 	require.Equal(t, session.ModeExecute, ui.currentSessionMode())
+}
+
+func TestInputAnyChangeScrollsToBottom(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.state = uiChat
+	ui.focus = uiFocusEditor
+	ui.session = &session.Session{ID: "test-session"}
+
+	// Simulate some chat history
+	setScrollableChatItems(ui, 20, 10)
+	ui.chat.ScrollToTop()
+	require.False(t, ui.chat.AtBottom())
+	require.False(t, ui.chat.Follow())
+
+	// Verify the logic directly
+	ui.handleTextareaHeightChange(ui.textarea.Height())
+	require.True(t, ui.chat.Follow(), "Any input change should lock scroll to bottom")
 }

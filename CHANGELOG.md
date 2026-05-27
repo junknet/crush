@@ -43,7 +43,7 @@
   - `sendMessageMsg` / `RelayPromptMsg` 用 `ForceScrollToBottom` 替代 `ScrollToBottom` (`ui.go:707`) — 用户明确发消息 = 强意图回底,buffered 滚轮事件不再可能在 commit 之间抢回旧位置。free-code REPL `repinScroll` 等价模式。
 - **ESC cancel 保 draft** (`ui.go:3670`,`cancelAgent`) — 按 ESC 取消 agent 时,把 textarea 当前内容 snapshot 到 `promptHistory.draft` 并 `index=-1`。之前按 ↑ 会直接吞掉未发送文本跳到上一条 user msg;现在 ESC 后 ↑ 从草稿开始往回翻。
 - **Sub-agent narration ban + MaxTurns 8→16** (`config.go:868`, `explore.md.tpl`) — 复杂调研常常 8 turn 不够,explore 中途吐出 "现在查看 X..." 这种 narration 然后 budget 用完,parent 看着像"返回不完整"。MaxTurns 提到 16,prompt 显式 ban "tool 之间写 prose",final report 才允许 prose。
-- **`rg` mandate** (`bash.md.tpl`, `grep.md.tpl`, `plan.md.tpl`, `explore.md.tpl`) — 提示词显式禁用 `grep` / `find`,要求用 `rg` (Grep 工具内部就是 ripgrep)、`rg --files | rg PATTERN`、`fd`。bash 的 usage_notes 同步改成"NEVER use grep/find"。
+- **`rg` mandate** (`bash.md.tpl`, `grep.md.tpl`, `plan.md.tpl`, `explore.md.tpl`) — 提示词显式禁用 `grep` / `find`,要求用 `rg` (Grep 工具内部就是 ripgrep) 和 `rg files_only=true`。bash 的 usage_notes 同步改成"NEVER use grep/find"。
 - **Attachment chip 缩进对齐 prompt** (`ui.go:renderEditorView`) — `[image]` chip 用 `lipgloss.PaddingLeft(promptWidth)` 缩进 4 列对齐 `::: ` prompt 列,视觉上 chip 像输入文字的延续(free-code inline-token 风格的轻量复刻)。
 - **Plan agent 提示词** (`plan.md.tpl`) — 写明闭环:plan 结束后 UI 自动预填 `/accept`,plan 要写得 self-contained(brain 接手能不问就实施)。output 块改成强制结构化七段。
 
@@ -102,10 +102,9 @@
 
 ## Wave 2 — Async + 渐进装载 (2026-05-23)
 
-### Added — F4 / F5 / F6
+### Added — F5 / F6
 | 代号 | 描述 | 主要文件 |
 |:---|:---|:---|
-| **F4** | Ghost text 自动补全:assistant 回复完 1-3s 后猜下一句,Tab/Right/Enter 接受。复用 brain title model | `internal/agent/suggestion/` + UI `ghostText` field |
 | **F5** | ToolSearch + deferred MCP 渐进装载:MCP 工具默认只送 name+desc;`tool_search` 按 `select:` / 关键词 / `+term` 加载 schema。system-reminder 每轮注入 deferred 列表 + connecting servers | `tools/deferred.go` + `tools/tool_search.go` |
 | **F6** | 持久 Cron + 统一事件总线:`schedule_wakeup` 支持 5 字段 cron;落盘 `scheduled_tasks.json`;1s tick + 抖动(±10%/15min 上限/整点±90s)+ 7天 TTL;bash done / monitor / cron fire publish 到 eventbus;PrepareStep drain 为 `<task-notification>` 注入 | `internal/eventbus/` + `tools/cron.go` + `task_notification.go` |
 
@@ -130,7 +129,7 @@
 | outputStyles 三套预设 (Explanatory/Learning) | 独狼场景无团队/教学受众 |
 | Task* 工具套件持久化 + DAG | `todos.go` 已满足 |
 | sg / sd / nushell | Crush 不做 AST 重构;shell 是子进程不是宿主 |
-| fd 替换 rg | rg 已 cover 99%,普通项目差距 < 5% |
+| 独立文件查找工具 | rg files_only 已 cover 99%,普通项目差距 < 5% |
 | Notification / PostToolUse / Stop hooks | 仅 PreToolUse 在用,无业务驱动 |
 
 ---
@@ -142,7 +141,6 @@
 | Anthropic cache 命中率(第 3 轮起) | ≥ 0.6 | **0.77** |
 | OpenAI cached_tokens 比例(第 2 轮起) | ≥ 0.3 | 0.45+ |
 | Bash spill 落盘时间(20K 行) | < 200ms | < 80ms |
-| Ghost text 生成延迟 | < 3s | 1.2s |
 | Mobile → TUI 同步延迟 | < 1s | < 500ms |
 | Session offline → 红 dot | 12-13s | 13s |
 | Dead session 从抽屉移除 | 20-21s | 20-22s |
@@ -176,7 +174,6 @@
 | M5 | 时间冷工具结果就地清理(不走 LLM) |
 | M7 | `~/.claude/projects/<slug>/memory/` + 4 类 frontmatter |
 | F1/F3 | `findActualString` + `desanitizeMatchString` + `stripTrailingWhitespace` |
-| F4 | `PromptSuggestion` 服务 + forked agent + inlineGhostText 渲染 |
 | F5 | `defer_loading=true` + `select:` / 关键词加权 / `+term` 必需 |
 | F6 | `cronScheduler` 1s 轮询 + `messageQueueManager` 统一汇聚 |
 | F8 | drawer cwd grouping |

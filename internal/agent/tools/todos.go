@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/session"
@@ -50,8 +51,12 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 
 			isNew := len(currentSession.Todos) == 0
 			oldStatusByContent := make(map[string]session.TodoStatus)
+			oldCompletedAtByContent := make(map[string]int64)
 			for _, todo := range currentSession.Todos {
 				oldStatusByContent[todo.Content] = todo.Status
+				if todo.Status == session.TodoStatusCompleted {
+					oldCompletedAtByContent[todo.Content] = todo.CompletedAt
+				}
 			}
 
 			for _, item := range params.Todos {
@@ -67,6 +72,7 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 			var justStarted string
 			completedCount := 0
 
+			now := time.Now().UnixMilli()
 			for i, item := range params.Todos {
 				todos[i] = session.Todo{
 					Content:    item.Content,
@@ -79,8 +85,14 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 
 				if newStatus == session.TodoStatusCompleted {
 					completedCount++
-					if existed && oldStatus != session.TodoStatusCompleted {
+					if oldAt, ok := oldCompletedAtByContent[item.Content]; ok {
+						todos[i].CompletedAt = oldAt
+					} else if existed && oldStatus != session.TodoStatusCompleted {
+						todos[i].CompletedAt = now
 						justCompleted = append(justCompleted, item.Content)
+					} else if !existed {
+						// New task created as completed
+						todos[i].CompletedAt = now
 					}
 				}
 

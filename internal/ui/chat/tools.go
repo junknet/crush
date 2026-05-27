@@ -215,6 +215,8 @@ func NewToolMessageItem(
 		item = NewJobOutputToolMessageItem(sty, toolCall, result, canceled)
 	case tools.JobKillToolName:
 		item = NewJobKillToolMessageItem(sty, toolCall, result, canceled)
+	case tools.MonitorToolName:
+		item = NewMonitorToolMessageItem(sty, toolCall, result, canceled)
 	case tools.ViewToolName:
 		item = NewViewToolMessageItem(sty, toolCall, result, canceled)
 	case tools.WriteToolName:
@@ -223,8 +225,6 @@ func NewToolMessageItem(
 		item = NewEditToolMessageItem(sty, toolCall, result, canceled)
 	case tools.MultiEditToolName:
 		item = NewMultiEditToolMessageItem(sty, toolCall, result, canceled)
-	case tools.FdToolName:
-		item = NewFdToolMessageItem(sty, toolCall, result, canceled)
 	case tools.RgToolName:
 		item = NewRgToolMessageItem(sty, toolCall, result, canceled)
 	case tools.LSToolName:
@@ -1222,15 +1222,8 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 			if params.LiteralText {
 				parts = append(parts, "**Literal:** true")
 			}
-			return strings.Join(parts, "\n")
-		}
-	case tools.FdToolName:
-		var params tools.FdParams
-		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
-			var parts []string
-			parts = append(parts, fmt.Sprintf("**Pattern:** %s", params.Pattern))
-			if params.Path != "" {
-				parts = append(parts, fmt.Sprintf("**Path:** %s", params.Path))
+			if params.FilesOnly {
+				parts = append(parts, "**Files only:** true")
 			}
 			return strings.Join(parts, "\n")
 		}
@@ -1324,7 +1317,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatWebFetchResultForCopy()
 	case agent.AgentToolName:
 		return t.formatAgentResultForCopy()
-	case tools.DownloadToolName, tools.RgToolName, tools.FdToolName, tools.LSToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
+	case tools.DownloadToolName, tools.RgToolName, tools.LSToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
 		return fmt.Sprintf("```\n%s\n```", t.result.Content)
 	default:
 		return t.result.Content
@@ -1663,8 +1656,6 @@ func prettifyToolName(name string) string {
 		return tools.WebFetchToolName
 	case tools.WebSearchToolName:
 		return tools.WebSearchToolName
-	case tools.FdToolName:
-		return tools.FdToolName
 	case tools.RgToolName:
 		return tools.RgToolName
 	case tools.LSToolName:

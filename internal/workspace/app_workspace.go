@@ -9,7 +9,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent"
-	"github.com/charmbracelet/crush/internal/agent/suggestion"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/commands"
@@ -219,62 +218,6 @@ func (w *AppWorkspace) AgentClearQueue(sessionID string) {
 	if w.app.AgentCoordinator != nil {
 		w.app.AgentCoordinator.ClearQueue(sessionID)
 	}
-}
-
-func (w *AppWorkspace) AgentSuggestion() AgentSuggestionService {
-	if w.app.AgentCoordinator == nil {
-		return nil
-	}
-	svc := w.app.AgentCoordinator.Suggestion()
-	if svc == nil {
-		return nil
-	}
-	return &appSuggestionService{
-		svc:   svc,
-		coord: w.app.AgentCoordinator,
-	}
-}
-
-// appSuggestionService adapts *suggestion.Service to the workspace-level
-// AgentSuggestionService interface so the TUI doesn't import the agent
-// package transitively.
-type appSuggestionService struct {
-	svc   *suggestion.Service
-	coord agent.Coordinator
-}
-
-func (a *appSuggestionService) Subscribe(ctx context.Context) <-chan AgentSuggestionEvent {
-	src := a.svc.Subscribe(ctx)
-	out := make(chan AgentSuggestionEvent, 16)
-	go func() {
-		defer close(out)
-		for ev := range src {
-			select {
-			case <-ctx.Done():
-				return
-			case out <- AgentSuggestionEvent{
-				SessionID: ev.Payload.SessionID,
-				Text:      ev.Payload.Text,
-			}:
-			}
-		}
-	}()
-	return out
-}
-
-func (a *appSuggestionService) Latest(sessionID string) (string, bool) {
-	return a.svc.Latest(sessionID)
-}
-
-func (a *appSuggestionService) MarkAccepted(sessionID, method string, length int) {
-	a.svc.MarkAccepted(sessionID, method, length)
-	if a.coord != nil {
-		_ = a.coord.PromoteSpeculativeSession(context.Background(), sessionID)
-	}
-}
-
-func (a *appSuggestionService) MarkRejected(sessionID string, length int) {
-	a.svc.MarkRejected(sessionID, length)
 }
 
 func (w *AppWorkspace) AgentSummarize(ctx context.Context, sessionID string) error {

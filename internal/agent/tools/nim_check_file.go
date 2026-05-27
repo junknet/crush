@@ -29,13 +29,17 @@ func NewNimCheckFileTool(lspManager *lsp.Manager) fantasy.AgentTool {
 			if params.FilePath == "" {
 				return fantasy.NewTextErrorResponse("file_path is required"), nil
 			}
-			if lspManager.Clients().Len() == 0 {
-				return fantasy.NewTextErrorResponse("no LSP clients available"), nil
-			}
 
 			absPath, err := filepath.Abs(params.FilePath)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("failed to get absolute path: %s", err)), nil
+			}
+
+			// Ensure LSP is started for this file.
+			lspManager.Start(ctx, absPath)
+
+			if lspManager.Clients().Len() == 0 {
+				return fantasy.NewTextErrorResponse("no LSP clients available"), nil
 			}
 
 			// Reuse the same didChange+wait pipeline that nim_diagnostics uses,

@@ -22,6 +22,16 @@ func Dir() string {
 	return homedir
 }
 
+// SetDir overrides the user home directory. Used for testing.
+func SetDir(dir string) {
+	homedir = dir
+}
+
+// ResetDir resets the user home directory to its original value. Used for testing.
+func ResetDir() {
+	homedir, homedirErr = os.UserHomeDir()
+}
+
 // Config returns the user config directory.
 func Config() string {
 	return cmp.Or(

@@ -100,3 +100,18 @@ func TestTracker_OverriddenBuiltinNotTracked(t *testing.T) {
 	tracker.MarkLoaded("nonexistent-builtin")
 	require.False(t, tracker.IsLoaded("nonexistent-builtin"))
 }
+
+func TestTracker_PathMapping(t *testing.T) {
+	t.Parallel()
+
+	activeSkills := []*Skill{
+		{
+			Name:          "test-skill",
+			SkillFilePath: "/path/to/test-skill/SKILL.md",
+		},
+	}
+	tracker := NewTracker(activeSkills)
+
+	require.Equal(t, "/path/to/test-skill/SKILL.md", tracker.GetPath("test-skill"))
+	require.Equal(t, "", tracker.GetPath("non-existent"))
+}

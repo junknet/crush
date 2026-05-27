@@ -136,7 +136,10 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	return joinToolParts(header, sty.Tool.Body.Render(body))
 }
 
-const todoInProgressBlinkInterval = 450 * time.Millisecond
+const (
+	todoInProgressBlinkInterval = 450 * time.Millisecond
+	TodoRecentlyCompletedTTL    = 30 * time.Second
+)
 
 // RenderTodoInProgressIcon alternates between the pending empty box and the
 // completed solid box so running todos read as active without changing width.
@@ -272,13 +275,19 @@ func formatHiddenTodosSummary(sty *styles.Styles, todos []session.Todo) string {
 
 // sortTodos sorts todos so active and open work stays visible first.
 func sortTodos(todos []session.Todo) {
+	now := time.Now().UnixMilli()
 	slices.SortStableFunc(todos, func(a, b session.Todo) int {
-		return statusOrder(a.Status) - statusOrder(b.Status)
+		return statusOrder(a.Status, a.CompletedAt, now) - statusOrder(b.Status, b.CompletedAt, now)
 	})
 }
 
 // statusOrder returns the sort order for a todo status.
-func statusOrder(s session.TodoStatus) int {
+func statusOrder(s session.TodoStatus, completedAt int64, now int64) int {
+	if s == session.TodoStatusCompleted && completedAt > 0 {
+		if now-completedAt < TodoRecentlyCompletedTTL.Milliseconds() {
+			return -1 // Recently completed at the very top
+		}
+	}
 	switch s {
 	case session.TodoStatusInProgress:
 		return 0

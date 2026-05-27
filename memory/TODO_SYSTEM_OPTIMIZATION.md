@@ -22,12 +22,12 @@
 
 ### 4. Semantic Folding & Parallelism
 - **Folding**: view tool now supports fold: true for Go/Nim, collapsing function bodies to reduce context size.
-- **Parallelism**: Mandatory Speculative Parallelism rules added to all Agent templates.
+- **Parallelism**: Mandatory parallel discovery rules added to all Agent templates.
 
 ## Architectural Learnings
 
 ### Tool Sovereignty
-- Moved from Go-native implementations of grep/glob/ls to industrial CLI tools (rg, fd, ls).
+- Moved from Go-native implementations of grep/glob/ls to industrial CLI tools (rg, ls).
 - Result: >1000x acceleration in search and listing on large repos like nim-src.
 
 ### PTC (Foreman) usage

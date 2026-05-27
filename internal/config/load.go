@@ -44,6 +44,8 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 
 	cfg.setDefaults(workingDir, dataDir)
 
+	mergeClaudeMCPs(cfg, workingDir)
+
 	store := &ConfigStore{
 		config:      cfg,
 		workingDir:  workingDir,
@@ -1112,6 +1114,52 @@ func normalizeHookEvent(name string) string {
 		return "PreToolUse"
 	default:
 		return name
+	}
+}
+
+type claudeConfig struct {
+	MCPServers map[string]struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args,omitempty"`
+		Env     map[string]string `json:"env,omitempty"`
+	} `json:"mcpServers"`
+}
+
+func mergeClaudeMCPs(cfg *Config, workingDir string) {
+	candidates := []string{
+		filepath.Join(home.Dir(), ".claude", "config.json"),
+		filepath.Join(workingDir, ".claude", "config.json"),
+	}
+
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+
+		var claude claudeConfig
+		if err := json.Unmarshal(data, &claude); err != nil {
+			slog.Debug("Failed to unmarshal Claude config", "path", path, "error", err)
+			continue
+		}
+
+		if cfg.MCP == nil {
+			cfg.MCP = make(MCPs)
+		}
+
+		for name, server := range claude.MCPServers {
+			if _, ok := cfg.MCP[name]; ok {
+				// Crush's own config takes precedence
+				continue
+			}
+
+			cfg.MCP[name] = MCPConfig{
+				Type:    MCPStdio,
+				Command: server.Command,
+				Args:    server.Args,
+				Env:     server.Env,
+			}
+		}
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/filepathext"
+	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/shell"
 	"golang.org/x/sync/errgroup"
@@ -28,12 +29,13 @@ type DagRunParams struct {
 
 type DagRunNode struct {
 	ID          string   `json:"id" description:"Unique node ID used by dependencies and output interpolation"`
-	Tool        string   `json:"tool" description:"Node tool: fd, rg, view, run, or shell"`
+	Tool        string   `json:"tool" description:"Node tool: rg, view, run, or shell"`
 	DependsOn   []string `json:"depends_on,omitempty" description:"Node IDs that must complete before this node runs"`
-	Pattern     string   `json:"pattern,omitempty" description:"fd/rg pattern"`
-	Path        string   `json:"path,omitempty" description:"fd/rg search path"`
+	Pattern     string   `json:"pattern,omitempty" description:"rg pattern"`
+	Path        string   `json:"path,omitempty" description:"rg search path"`
 	Include     string   `json:"include,omitempty" description:"rg include glob"`
 	LiteralText bool     `json:"literal_text,omitempty" description:"rg literal search"`
+	FilesOnly   bool     `json:"files_only,omitempty" description:"rg filename search"`
 	FilePath    string   `json:"file_path,omitempty" description:"view file path"`
 	Offset      int      `json:"offset,omitempty" description:"view line offset"`
 	Limit       int      `json:"limit,omitempty" description:"view line limit"`
@@ -81,7 +83,7 @@ var dagRunDescription string
 
 var dagRunInterpolationPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_.-]+)\.output\}`)
 
-func NewDagRunTool(permissions permission.Service, workingDir string) fantasy.AgentTool {
+func NewDagRunTool(lspManager *lsp.Manager, permissions permission.Service, workingDir string) fantasy.AgentTool {
 	return fantasy.NewParallelAgentTool(
 		DagRunToolName,
 		dagRunDescription,
@@ -118,7 +120,7 @@ func NewDagRunTool(permissions permission.Service, workingDir string) fantasy.Ag
 			defer cancel()
 
 			startedAt := time.Now()
-			results := executeDagRun(runCtx, workingDir, params.Nodes, dagRunMaxParallelValue(params.MaxParallel))
+			results := executeDagRun(runCtx, lspManager, workingDir, params.Nodes, dagRunMaxParallelValue(params.MaxParallel))
 			response := buildDagRunResponse(startedAt, dagRunMaxParallelValue(params.MaxParallel), results)
 			body, err := json.MarshalIndent(response, "", "  ")
 			if err != nil {
@@ -140,10 +142,6 @@ func validateDagRunNodes(nodes []DagRunNode) error {
 		}
 		seen[node.ID] = struct{}{}
 		switch node.Tool {
-		case "fd":
-			if node.Pattern == "" {
-				return fmt.Errorf("node %s: pattern is required for fd", node.ID)
-			}
 		case "rg":
 			if node.Pattern == "" {
 				return fmt.Errorf("node %s: pattern is required for rg", node.ID)
@@ -151,6 +149,10 @@ func validateDagRunNodes(nodes []DagRunNode) error {
 		case "view":
 			if node.FilePath == "" {
 				return fmt.Errorf("node %s: file_path is required for view", node.ID)
+			}
+		case "nim_check_file":
+			if node.FilePath == "" {
+				return fmt.Errorf("node %s: file_path is required for nim_check_file", node.ID)
 			}
 		case "run":
 			if strings.TrimSpace(node.Script) == "" {
@@ -240,7 +242,7 @@ func dagRunTimeout(seconds int) time.Duration {
 	return timeout
 }
 
-func executeDagRun(ctx context.Context, workingDir string, nodes []DagRunNode, maxParallel int) map[string]DagRunNodeResult {
+func executeDagRun(ctx context.Context, lspManager *lsp.Manager, workingDir string, nodes []DagRunNode, maxParallel int) map[string]DagRunNodeResult {
 	remaining := make(map[string]DagRunNode, len(nodes))
 	for _, node := range nodes {
 		remaining[node.ID] = node
@@ -276,7 +278,7 @@ func executeDagRun(ctx context.Context, workingDir string, nodes []DagRunNode, m
 				resultsMu.Lock()
 				dependencyOutputs := dagRunDependencyOutputs(node, results)
 				resultsMu.Unlock()
-				result := executeDagRunNode(groupCtx, workingDir, node, dependencyOutputs)
+				result := executeDagRunNode(groupCtx, lspManager, workingDir, node, dependencyOutputs)
 				resultsMu.Lock()
 				results[node.ID] = result
 				resultsMu.Unlock()
@@ -323,10 +325,10 @@ func dagRunDependencyOutputs(node DagRunNode, results map[string]DagRunNodeResul
 	return outputs
 }
 
-func executeDagRunNode(ctx context.Context, workingDir string, node DagRunNode, dependencyOutputs map[string]string) DagRunNodeResult {
+func executeDagRunNode(ctx context.Context, lspManager *lsp.Manager, workingDir string, node DagRunNode, dependencyOutputs map[string]string) DagRunNodeResult {
 	startedAt := time.Now()
 	result := DagRunNodeResult{ID: node.ID, Tool: node.Tool, Status: "completed"}
-	output, err := executeDagRunNodeOutput(ctx, workingDir, interpolateDagRunNode(node, dependencyOutputs))
+	output, err := executeDagRunNodeOutput(ctx, lspManager, workingDir, interpolateDagRunNode(node, dependencyOutputs))
 	result.DurationMs = time.Since(startedAt).Milliseconds()
 	result.Output, result.Truncated = truncateDagRunOutput(output, dagRunNodeOutputMaxBytes)
 	if err != nil {
@@ -337,31 +339,64 @@ func executeDagRunNode(ctx context.Context, workingDir string, node DagRunNode, 
 	return result
 }
 
-func executeDagRunNodeOutput(ctx context.Context, workingDir string, node DagRunNode) (string, error) {
+func executeDagRunNodeOutput(ctx context.Context, lspManager *lsp.Manager, workingDir string, node DagRunNode) (string, error) {
 	switch node.Tool {
-	case "fd":
-		searchPath := filepathext.SmartJoin(workingDir, node.Path)
-		files, truncated, err := runFdSearch(ctx, node.Pattern, searchPath, 100)
+	case "nim_check_file":
+		if node.FilePath == "" {
+			return "", fmt.Errorf("file_path is required for nim_check_file")
+		}
+		absPath, err := filepath.Abs(node.FilePath)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("failed to get absolute path: %w", err)
 		}
-		output := strings.Join(files, "\n")
-		if output == "" {
-			output = "No files found"
+		// Ensure LSP is started for this file.
+		lspManager.Start(ctx, absPath)
+
+		if lspManager.Clients().Len() == 0 {
+			return "", fmt.Errorf("no LSP clients available")
 		}
-		if truncated {
-			output += "\n(Results are truncated.)"
+		notifyLSPs(ctx, lspManager, absPath)
+		fileDiags := collectFileDiagnostics(absPath, lspManager)
+		if len(fileDiags) == 0 {
+			return fmt.Sprintf("%s: clean (0 diagnostics).", absPath), nil
 		}
-		return output, nil
+		sortDiagnostics(fileDiags)
+		errors := countSeverity(fileDiags, "Error")
+		warnings := countSeverity(fileDiags, "Warn")
+		hints := countSeverity(fileDiags, "Hint")
+		var out strings.Builder
+		fmt.Fprintf(&out, "%s — %d error(s), %d warning(s), %d hint(s):\n", absPath, errors, warnings, hints)
+		for _, d := range fileDiags {
+			out.WriteString(d)
+			out.WriteString("\n")
+		}
+		return out.String(), nil
 	case "rg":
 		searchPattern := node.Pattern
 		if node.LiteralText {
 			searchPattern = escapeRegexPattern(searchPattern)
 		}
 		searchPath := filepathext.SmartJoin(workingDir, node.Path)
-		matches, truncated, err := RgSearch(ctx, searchPattern, searchPath, node.Include, 100)
+		var matches []RgMatch
+		var truncated bool
+		var err error
+		if node.FilesOnly {
+			matches, truncated, err = RgSearchFiles(ctx, searchPattern, searchPath, node.Include, 100)
+		} else {
+			matches, truncated, err = RgSearch(ctx, searchPattern, searchPath, node.Include, 100)
+		}
 		if err != nil {
 			return "", err
+		}
+		if node.FilesOnly {
+			if len(matches) == 0 {
+				return "No files found", nil
+			}
+			var out strings.Builder
+			for _, match := range matches {
+				fmt.Fprintf(&out, "%s\n", filepath.ToSlash(match.Path))
+			}
+			return strings.TrimRight(out.String(), "\n"), nil
 		}
 		return formatDagRunRgMatches(matches, truncated), nil
 	case "view":
@@ -426,6 +461,7 @@ func interpolateDagRunNode(node DagRunNode, outputs map[string]string) DagRunNod
 	node.Path = interpolate(node.Path)
 	node.Include = interpolate(node.Include)
 	node.FilePath = interpolate(node.FilePath)
+	node.FilesOnly = node.FilesOnly // boolean, no interpolation needed
 	node.Language = interpolate(node.Language)
 	node.Script = interpolate(node.Script)
 	node.Command = interpolate(node.Command)

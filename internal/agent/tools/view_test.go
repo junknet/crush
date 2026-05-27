@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/stretchr/testify/require"
 )
 
@@ -274,6 +275,38 @@ func runViewTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, para
 }
 
 var _ filetracker.Service = mockFileTracker{}
+
+func TestVirtualSkillPathResolution(t *testing.T) {
+	t.Parallel()
+
+	workingDir := t.TempDir()
+	skillDir := filepath.Join(workingDir, "user-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	skillFile := filepath.Join(skillDir, "SKILL.md")
+	content := "---" + "\n" + "name: user-skill" + "\n" + "description: A user skill" + "\n" + "---" + "\n" + "User skill content"
+	require.NoError(t, os.WriteFile(skillFile, []byte(content), 0o644))
+
+	skill, err := skills.Parse(skillFile)
+	require.NoError(t, err)
+
+	tracker := skills.NewTracker([]*skills.Skill{skill})
+	permissions := &mockViewPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
+	tool := NewViewTool(nil, permissions, mockFileTracker{}, tracker, workingDir, workingDir)
+
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+	resp := runViewTool(t, tool, ctx, ViewParams{
+		FilePath: "crush://skills/user-skill/SKILL.md",
+	})
+
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "User skill content")
+
+	var meta ViewResponseMetadata
+	require.NoError(t, json.Unmarshal([]byte(resp.Metadata), &meta))
+	require.Equal(t, skillFile, meta.FilePath)
+	require.Equal(t, ViewResourceSkill, meta.ResourceType)
+	require.Equal(t, "user-skill", meta.ResourceName)
+}
 
 func TestReadBuiltinFile(t *testing.T) {
 	t.Parallel()

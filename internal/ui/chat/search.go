@@ -20,54 +20,6 @@ type SearchToolMessageItem struct {
 
 var _ ToolMessageItem = (*SearchToolMessageItem)(nil)
 
-// NewFdToolMessageItem creates a new [SearchToolMessageItem].
-func NewFdToolMessageItem(
-	sty *styles.Styles,
-	toolCall message.ToolCall,
-	result *message.ToolResult,
-	canceled bool,
-) ToolMessageItem {
-	return newBaseToolMessageItem(sty, toolCall, result, &SearchToolRenderContext{}, canceled)
-}
-
-// SearchToolRenderContext renders search tool messages.
-type SearchToolRenderContext struct{}
-
-// RenderTool implements the [ToolRenderer] interface.
-func (g *SearchToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
-	cappedWidth := cappedMessageWidth(width)
-	if opts.IsPending() {
-		return pendingTool(sty, tools.FdToolName, opts.Compact)
-	}
-
-	var params tools.FdParams
-	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
-		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
-	}
-
-	toolParams := []string{params.Pattern}
-	if params.Path != "" {
-		toolParams = append(toolParams, "path", params.Path)
-	}
-
-	header := toolHeader(sty, opts.Status, tools.FdToolName, cappedWidth, opts.Compact, toolParams...)
-	if opts.Compact {
-		return header
-	}
-
-	if earlyState, ok := toolEarlyStateContent(sty, opts, cappedWidth); ok {
-		return joinToolParts(header, earlyState)
-	}
-
-	if !opts.HasResult() || opts.Result.Content == "" {
-		return header
-	}
-
-	bodyWidth := cappedWidth - toolBodyLeftPaddingTotal
-	body := sty.Tool.Body.Render(toolOutputPlainContent(sty, opts.Result.Content, bodyWidth, opts.ExpandedContent))
-	return joinToolParts(header, body)
-}
-
 // -----------------------------------------------------------------------------
 // Rg Tool
 // -----------------------------------------------------------------------------
@@ -113,6 +65,9 @@ func (g *RgToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *To
 	}
 	if params.LiteralText {
 		toolParams = append(toolParams, "literal", "true")
+	}
+	if params.FilesOnly {
+		toolParams = append(toolParams, "files_only", "true")
 	}
 
 	header := toolHeader(sty, opts.Status, tools.RgToolName, cappedWidth, opts.Compact, toolParams...)

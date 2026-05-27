@@ -263,6 +263,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	if call.SessionID == "" {
 		return nil, ErrSessionMissing
 	}
+	if isSystemPrompt(ctx) {
+		call.IsSystem = true
+	}
 
 	// Queue the message if busy
 	if a.IsSessionBusy(call.SessionID) {
@@ -306,13 +309,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		agentTools[len(agentTools)-1].SetProviderOptions(a.getCacheControlOptions())
 	}
 
-	if strings.HasSuffix(call.SessionID, "-speculate") {
-		wrapped := make([]fantasy.AgentTool, len(agentTools))
-		for i, tool := range agentTools {
-			wrapped[i] = &speculativeToolWrapper{inner: tool}
-		}
-		agentTools = wrapped
-	} else if strings.HasSuffix(call.SessionID, "-mem-extract") {
+	if strings.HasSuffix(call.SessionID, "-mem-extract") {
 		memoryDir := filepath.Join(a.dataDir, "projects", memdir.WorkspaceSlug(a.workingDir), "memory")
 		wrapped := make([]fantasy.AgentTool, len(agentTools))
 		for i, tool := range agentTools {
@@ -378,10 +375,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	traceID := uuid.NewString()
 	ctx = crushlog.WithTraceID(ctx, traceID)
 	ctx = crushlog.WithSessionID(ctx, call.SessionID)
-
-	if isSystemPrompt(ctx) {
-		call.IsSystem = true
-	}
 
 	slog.DebugContext(ctx, "Agent run started", "sub_agent", a.isSubAgent)
 
@@ -591,6 +584,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						userMessage, createErr := a.createUserMessage(callContext, queued)
 						if createErr != nil {
 							return callContext, prepared, createErr
+						}
+						if queued.IsSystem {
+							text := message.PromptWithTextAttachments(queued.Prompt, queued.Attachments)
+							if strings.TrimSpace(text) != "" {
+								prepared.Messages = append(prepared.Messages, fantasy.NewUserMessage(text))
+							}
+							continue
 						}
 						prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
 					}
@@ -1046,6 +1046,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					existing = []SessionAgentCall{}
 				}
 				call.Prompt = fmt.Sprintf("The previous session was interrupted because it got too long, the initial user request was: `%s`", call.Prompt)
+				call.IsSystem = true
 				existing = append(existing, call)
 				a.messageQueue.Set(call.SessionID, existing)
 			}
@@ -1498,7 +1499,12 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 	parts := []message.ContentPart{message.TextContent{Text: call.Prompt}}
 	var attachmentParts []message.ContentPart
 	for _, attachment := range call.Attachments {
-		attachmentParts = append(attachmentParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
+		attachmentParts = append(attachmentParts, message.BinaryContent{
+			Path:       attachment.FilePath,
+			MIMEType:   attachment.MimeType,
+			Data:       attachment.Content,
+			IsInternal: attachment.IsInternal,
+		})
 	}
 	parts = append(parts, attachmentParts...)
 	role := message.User
@@ -2229,8 +2235,8 @@ func (a *sessionAgent) Model() Model {
 }
 
 // TitleModel returns the small/utility model paired with this agent. Used
-// for non-conversational background work like title generation and
-// ghost-text suggestions where the primary model is overkill.
+// for non-conversational background work like title generation where the
+// primary model is overkill.
 func (a *sessionAgent) TitleModel() Model {
 	return a.titleModel.Get()
 }
@@ -2448,52 +2454,6 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []a
 	return fields
 }
 
-var safeSpeculativeTools = map[string]bool{
-	"search":                true,
-	"rg":                    true,
-	"view":                  true,
-	"todos":                 true,
-	"crush_info":            true,
-	"diagnostics":           true,
-	"references":            true,
-	"nim_macro_expand":      true,
-	"nim_safe_to_delete":    true,
-	"nim_project_maps":      true,
-	"nim_definition":        true,
-	"nim_hover":             true,
-	"nim_document_symbols":  true,
-	"nim_workspace_symbols": true,
-	"nim_check_file":        true,
-	"nim_call_hierarchy":    true,
-	"read_mcp_resource":     true,
-	"list_mcp_resources":    true,
-}
-
-type speculativeToolWrapper struct {
-	inner fantasy.AgentTool
-}
-
-func (s *speculativeToolWrapper) Info() fantasy.ToolInfo {
-	return s.inner.Info()
-}
-
-func (s *speculativeToolWrapper) ProviderOptions() fantasy.ProviderOptions {
-	return s.inner.ProviderOptions()
-}
-
-func (s *speculativeToolWrapper) SetProviderOptions(opts fantasy.ProviderOptions) {
-	s.inner.SetProviderOptions(opts)
-}
-
-func (s *speculativeToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	if !safeSpeculativeTools[call.Name] {
-		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is not allowed during speculative execution.", call.Name))
-		resp.StopTurn = true
-		return resp, nil
-	}
-	return s.inner.Run(ctx, call)
-}
-
 var readOnlyBlockedTools = map[string]struct{}{
 	tools.BashToolName:           {},
 	tools.DownloadToolName:       {},
@@ -2538,7 +2498,7 @@ func (r *readOnlyToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (f
 		return r.inner.Run(ctx, call)
 	}
 	if _, blocked := readOnlyBlockedTools[call.Name]; blocked {
-		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because this turn is read-only. Use view, ls, fd, rg, ast_grep, sourcegraph, fetch, or read-only LSP tools instead.", call.Name))
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because this turn is read-only. Use view, ls, rg, ast_grep, sourcegraph, fetch, or read-only LSP tools instead.", call.Name))
 		resp.StopTurn = true
 		return resp, nil
 	}
@@ -2577,10 +2537,10 @@ func readOnlyDagRunToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bo
 	}
 	for _, node := range params.Nodes {
 		switch strings.ToLower(strings.TrimSpace(node.Tool)) {
-		case "fd", "rg", "view":
+		case "rg", "view":
 			continue
 		default:
-			resp := fantasy.NewTextErrorResponse(fmt.Sprintf("dag_run node %s uses %q, but read-only turns only allow fd, rg, and view nodes.", node.ID, node.Tool))
+			resp := fantasy.NewTextErrorResponse(fmt.Sprintf("dag_run node %s uses %q, but read-only turns only allow rg and view nodes.", node.ID, node.Tool))
 			resp.StopTurn = true
 			return resp, true
 		}
@@ -2607,7 +2567,7 @@ func (m *memExtractToolWrapper) SetProviderOptions(opts fantasy.ProviderOptions)
 
 func (m *memExtractToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	name := call.Name
-	if name == "view" || name == "fd" || name == "rg" || name == "todos" {
+	if name == "view" || name == "rg" || name == "todos" {
 		return m.inner.Run(ctx, call)
 	}
 

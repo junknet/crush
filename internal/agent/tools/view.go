@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -146,7 +147,6 @@ func foldLines(lines []string, filePath string) []viewLine {
 	return result
 }
 
-
 type ViewResourceType string
 
 const (
@@ -194,14 +194,33 @@ func NewViewTool(
 				return fantasy.NewTextErrorResponse("file_path is required"), nil
 			}
 
-			// Handle builtin skill files (crush: prefix).
+			// Handle skill files (crush://skills/ prefix).
 			if strings.HasPrefix(params.FilePath, skills.BuiltinPrefix) {
-				resp, err := readBuiltinFile(params, skillTracker)
-				return resp, err
+				// Try to resolve virtual skill paths (e.g. crush://skills/e2e-test/SKILL.md)
+				// to their actual filesystem paths if they are user skills.
+				pathWithoutPrefix := strings.TrimPrefix(params.FilePath, skills.BuiltinPrefix)
+				parts := strings.Split(pathWithoutPrefix, "/")
+				if len(parts) >= 1 {
+					name := parts[0]
+					if resolved := skillTracker.GetPath(name); resolved != "" {
+						// If it resolves to an absolute filesystem path, use it.
+						// Builtin skills resolve to a crush:// path themselves.
+						if !strings.HasPrefix(resolved, skills.BuiltinPrefix) {
+							params.FilePath = resolved
+						}
+					}
+				}
+
+				// If it's still a crush:// path, it's a builtin skill.
+				if strings.HasPrefix(params.FilePath, skills.BuiltinPrefix) {
+					resp, err := readBuiltinFile(params, skillTracker)
+					return resp, err
+				}
 			}
 
 			// Handle relative paths
 			filePath := filepathext.SmartJoin(workingDir, params.FilePath)
+			slog.Debug("View tool reading file", "path", filePath, "original", params.FilePath)
 
 			// Check if file is outside working directory and request permission if needed
 			absWorkingDir, err := filepath.Abs(workingDir)
@@ -463,7 +482,6 @@ func readTextFile(ctx context.Context, filePath string, offset, limit, maxConten
 	return strings.Join(resultLines, "\n"), strings.Join(rawResultLines, "\n"), hasMore, nil
 }
 
-
 func getImageMimeType(filePath string) (bool, string) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
@@ -553,7 +571,7 @@ func readBuiltinFile(params ViewParams, skillTracker *skills.Tracker) (fantasy.T
 
 	data, err := fs.ReadFile(builtinFS, embeddedPath)
 	if err != nil {
-		return fantasy.NewTextErrorResponse(fmt.Sprintf("Builtin file not found: %s", params.FilePath)), nil
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("Internal builtin skill file not found: %s. Please check <available_skills> for the correct location of this skill.", params.FilePath)), nil
 	}
 
 	content := string(data)

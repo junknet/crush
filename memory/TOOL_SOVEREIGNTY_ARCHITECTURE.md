@@ -8,8 +8,7 @@ Stop writing "garbage" Go code for tasks that industrial-grade CLI tools already
 ### 1. 1:1 Tool-Command Mapping
 All search and listing tools now map directly to their Rust/C-powered counterparts. Transparent Go-native recursion and manual .gitignore parsing have been abolished.
 
-- **rg (ripgrep)**: The content-search tool. Replaces "search" and "grep".
-- **fd (fd-find)**: The file-finding tool. Replaces "glob".
+- **rg (ripgrep)**: The content and filename search tool. Replaces "search", "grep", and "glob".
 - **ls (ripgrep --files)**: The listing tool. Optimized for local tree rendering.
 - **ast_grep (ast-grep)**: The structural search tool. Essential for LSP-broken repos.
 - **nu (nushell)**: The structured execution layer. Returns JSON-parsed data directly to the Agent.

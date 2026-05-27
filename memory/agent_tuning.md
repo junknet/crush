@@ -25,7 +25,7 @@ AgentExplore: {
 ### Tool Preference: rg over grep/find
 - **bash.md.tpl**: Explicitly ban `grep` in bash (slow, ignores .gitignore, breaks on binary). Recommend `rg -a` for ad-hoc binary searches.
 - **grep.md.tpl**: Clarify that the tool IS `rg` (ripgrep), not traditional grep. Binary-safe, .gitignore-respecting, with JSON output.
-- **explore.md.tpl rules**: Use `rg` for text search (rule #6), `rg --files | rg PATTERN` or `fd` for filenames (rule #7), not `grep`/`find`.
+- **explore.md.tpl rules**: Use `rg` for text search (rule #6) and `rg files_only=true` for filenames (rule #7), not `grep`/`find`.
 
 ## Plan Agent Prompt Rewrite (May 2026)
 
@@ -63,12 +63,9 @@ crush-dev
 CGO_ENABLED=0 GOEXPERIMENT=greenteagc go build -trimpath -o /tmp/crush-verify ./
 cp /tmp/crush-verify ~/.cache/crush-prod/crush
 
-# Minimal test (no VCR, short timeout):
+# Minimal test (short timeout):
 go test ./internal/ui/... ./internal/config/... -count=1 -timeout=60s -short
 ```
-
-### Pre-existing Test Timeouts
-- `TestWorkerAgent` (internal/agent/coordinator_test.go) uses VCR cassettes; needs 3m+ for LLM interaction. Not a blocker; ignore in `task test:record` flow.
 
 ## Known Deferred Work
 

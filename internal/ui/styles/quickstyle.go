@@ -784,7 +784,8 @@ func quickStyle(o quickStyleOpts) Styles {
 		BorderForeground(o.primary).BorderStyle(lipgloss.NormalBorder())
 	s.Messages.UserFocused = s.Messages.NoContent.PaddingLeft(1).BorderLeft(true).
 		BorderForeground(o.primary).BorderStyle(messageFocussedBorder)
-	s.Messages.AssistantBlurred = s.Messages.NoContent.PaddingLeft(2)
+	s.Messages.AssistantBlurred = s.Messages.NoContent.PaddingLeft(1).BorderLeft(true).
+		BorderForeground(o.fgMostSubtle).BorderStyle(lipgloss.NormalBorder())
 	s.Messages.AssistantFocused = s.Messages.NoContent.PaddingLeft(1).BorderLeft(true).
 		BorderForeground(o.successMostSubtle).BorderStyle(messageFocussedBorder)
 	// A turn whose reasoning was boosted (the "思考" keyword) gets a left bar in
@@ -802,10 +803,12 @@ func quickStyle(o quickStyleOpts) Styles {
 		BorderStyle(messageFocussedBorder).
 		BorderLeft(true).
 		BorderForeground(o.successMostSubtle)
-	s.Messages.ToolCallBlurred = muted.PaddingLeft(2)
+	s.Messages.ToolCallBlurred = muted.PaddingLeft(1).BorderLeft(true).
+		BorderForeground(o.fgMostSubtle).BorderStyle(lipgloss.NormalBorder())
 	// No padding or border for compact tool calls within messages
 	s.Messages.ToolCallCompact = muted
-	s.Messages.SectionHeader = base.PaddingLeft(2)
+	s.Messages.SectionHeader = base.PaddingLeft(1).BorderLeft(true).
+		BorderForeground(o.fgMostSubtle).BorderStyle(lipgloss.NormalBorder())
 	s.Messages.AssistantInfoIcon = subtle
 	s.Messages.AssistantInfoModel = muted
 	s.Messages.AssistantInfoProvider = subtle

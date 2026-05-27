@@ -55,29 +55,6 @@ type AgentModel struct {
 	ModelCfg   config.SelectedModel
 }
 
-// AgentSuggestionEvent is delivered when a fresh ghost-text suggestion is
-// ready (Text empty = clear current ghost).
-type AgentSuggestionEvent struct {
-	SessionID string
-	Text      string
-}
-
-// AgentSuggestionService is the subset of the suggestion service exposed
-// to the TUI. Kept narrow so client-mode (remote workspace) implementations
-// can satisfy it with a stub or future RPC bridge.
-type AgentSuggestionService interface {
-	// Subscribe yields suggestion events for the lifetime of ctx.
-	Subscribe(ctx context.Context) <-chan AgentSuggestionEvent
-	// Latest returns the most recent suggestion for a session, if any.
-	Latest(sessionID string) (string, bool)
-	// MarkAccepted records that the user accepted the suggestion via the
-	// given method ("tab", "right", "enter"); also clears it.
-	MarkAccepted(sessionID, method string, length int)
-	// MarkRejected records that the user dismissed the suggestion; also
-	// clears it.
-	MarkRejected(sessionID string, length int)
-}
-
 // Workspace is the main abstraction consumed by the TUI and CLI. It
 // groups every operation a frontend needs to perform against a running
 // workspace, regardless of whether the workspace is in-process or
@@ -114,10 +91,6 @@ type Workspace interface {
 	InitBrainAgent(ctx context.Context) error
 	GetDefaultExploreModel(providerID string) config.SelectedModel
 	BackgroundShellStats() shell.BackgroundShellStats
-
-	// AgentSuggestion returns the ghost-text suggestion service, or nil
-	// when disabled / not wired (e.g. client mode without local agent).
-	AgentSuggestion() AgentSuggestionService
 
 	// Permissions
 	PermissionGrant(perm permission.PermissionRequest)

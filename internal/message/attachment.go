@@ -6,10 +6,11 @@ import (
 )
 
 type Attachment struct {
-	FilePath string
-	FileName string
-	MimeType string
-	Content  []byte
+	FilePath   string
+	FileName   string
+	MimeType   string
+	Content    []byte
+	IsInternal bool
 }
 
 func (a Attachment) IsText() bool  { return strings.HasPrefix(a.MimeType, "text/") }

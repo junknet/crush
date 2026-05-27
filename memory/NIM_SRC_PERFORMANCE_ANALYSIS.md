@@ -16,13 +16,13 @@ Analysis of JSONL traces from May 2026 revealed several critical performance hot
 ## 2. Optimization Strategy (Implemented)
 
 ### Workflow Design
-- **Speculative Parallelism**: MANDATORY rules in System Prompts forcing models to emit multiple view, rg, or fd calls in Turn 1.
+- **Parallel Discovery**: MANDATORY rules in System Prompts forcing models to emit multiple view or rg calls in Turn 1.
 - **Two-Phase Exploration**: SOP for Explore agent to identify candidates first, then batch load content.
 - **PTC for Regex Scans**: Use PTC (api.sh("rg --json ...")) for in-process filtering instead of returning raw Grep output to the LLM.
 
 ### Tool Enhancements
 - **Semantic Folding**: view (fold: true) implemented to compress Go/Nim function bodies using regex-based AST tracking. Reduces context by 40-70% for large files.
-- **Tool Sovereignty**: Unified all search/list logic on rg, fd, and ast_grep, completely removing slow Go-native recursion.
+- **Tool Sovereignty**: Unified all search/list logic on rg and ast_grep, completely removing slow Go-native recursion.
 
 ## 3. Key Files & Commands
 - Project Root: /home/junknet/linege/nim-src

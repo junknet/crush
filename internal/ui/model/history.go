@@ -9,7 +9,10 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 )
 
-const summaryPromptHistoryPrefix = "Compress the conversation into durable memory for the next agent."
+const (
+	summaryPromptHistoryPrefix     = "Compress the conversation into durable memory for the next agent."
+	interruptedPromptHistoryPrefix = "The previous session was interrupted because it got too long"
+)
 
 // promptHistoryLoadedMsg is sent when prompt history is loaded.
 type promptHistoryLoadedMsg struct {
@@ -58,7 +61,13 @@ func shouldIncludePromptHistoryText(text string) bool {
 	if trimmed == "" {
 		return false
 	}
-	return !strings.HasPrefix(trimmed, summaryPromptHistoryPrefix)
+	if strings.HasPrefix(trimmed, summaryPromptHistoryPrefix) {
+		return false
+	}
+	if strings.HasPrefix(trimmed, interruptedPromptHistoryPrefix) {
+		return false
+	}
+	return true
 }
 
 // handleHistoryUp handles up arrow for history navigation.

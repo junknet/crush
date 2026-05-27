@@ -17,7 +17,6 @@ type RuntimeActivityKind string
 
 const (
 	RuntimeActivityConversationCompaction RuntimeActivityKind = "conversation_compaction"
-	RuntimeActivityMonitor                RuntimeActivityKind = "monitor"
 )
 
 // RuntimeActivityStatus records whether a runtime activity is still active.
@@ -45,7 +44,7 @@ type RuntimeActivitySnapshot struct {
 }
 
 // RuntimeActivityItem renders live runtime work, such as conversation
-// compaction or monitor watches, as an updatable chat item.
+// compaction, as an updatable chat item.
 type RuntimeActivityItem struct {
 	*list.Versioned
 	*highlightableMessageItem

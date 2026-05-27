@@ -4,16 +4,17 @@ Use this when several independent reads/searches/short scripts can run in one
 structured execution graph instead of many LLM turns.
 
 Supported node tools:
-- `fd`: filename/path search (`pattern`, optional `path`)
-- `rg`: content search (`pattern`, optional `path`, `include`, `literal_text`)
+- `rg`: content and filename search (`pattern`, optional `path`, `include`, `literal_text`, `files_only`)
 - `view`: read a text file (`file_path`, optional `offset`, `limit`, `fold`)
 - `run`: short script (`language`: shell/python/node, `script`)
 - `shell`: short shell command (`command`)
 
 Parameters:
-- `nodes`: DAG nodes, each with unique `id`, `tool`, optional `depends_on`
+- `nodes`: DAG nodes, each with unique `id` (REQUIRED), `tool` (REQUIRED), optional `depends_on`
 - `max_parallel`: max concurrent ready nodes, default 4, max 16
 - `timeout_seconds`: whole-DAG timeout, default 120, max 600
+
+IMPORTANT: Every node MUST have a non-empty `id` string (e.g., "list_files", "read_config"). The execution will FAIL if any node lacks an ID.
 
 Dependency output interpolation:
 - Use `${node_id.output}` inside string fields to insert a dependency output.

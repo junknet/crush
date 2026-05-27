@@ -29,7 +29,7 @@
 **Glob Tool (`glob.go`)**
 - Added iodriver import
 - Prepended driver check in `globFiles`: if driver is non-nil and not KindLocal, call `driver.Glob(ctx, GlobOpts{...})`
-- Falls back to existing rg/doublestar for local
+- Falls back to existing rg for local
 - Compile + tests: ✅ PASS
 
 **Grep Tool (`grep.go`)**

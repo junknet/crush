@@ -134,3 +134,48 @@ func TestModelFailoverAndRetry(t *testing.T) {
 	assert.Equal(t, message.Assistant, msgs[1].Role)
 	assert.Equal(t, "Hello from fallback model", msgs[1].Content().Text)
 }
+
+func TestSystemPromptRunCreatesHiddenSystemMessage(t *testing.T) {
+	env := testEnv(t)
+
+	model := Model{
+		Model: &mockModel{
+			provider:  "test-provider",
+			modelName: "test-model",
+			streamFunc: func(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+				return singleDeltaStream("continued"), nil
+			},
+		},
+		CatwalkCfg: catwalk.Model{
+			Name:             "test-model",
+			ContextWindow:    200000,
+			DefaultMaxTokens: 10000,
+		},
+	}
+
+	agent := NewSessionAgent(SessionAgentOptions{
+		PrimaryModel: model,
+		TitleModel:   model,
+		Sessions:     env.sessions,
+		Messages:     env.messages,
+		WorkingDir:   env.workingDir,
+	})
+
+	sess, err := env.sessions.Create(t.Context(), "Test Session", session.ModeExecute)
+	require.NoError(t, err)
+
+	_, err = agent.Run(WithSystemPrompt(t.Context()), SessionAgentCall{
+		Prompt:          "automatic continuation",
+		SessionID:       sess.ID,
+		MaxOutputTokens: 1000,
+	})
+	require.NoError(t, err)
+
+	msgs, err := env.messages.List(t.Context(), sess.ID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+	require.Equal(t, message.System, msgs[0].Role)
+	require.Equal(t, "automatic continuation", msgs[0].Content().Text)
+	require.Equal(t, message.Assistant, msgs[1].Role)
+	require.Equal(t, "continued", msgs[1].Content().Text)
+}

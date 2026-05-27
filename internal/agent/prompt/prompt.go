@@ -41,7 +41,8 @@ type PromptDat struct {
 	// MemoryIndex is the rendered <auto_memory>...</auto_memory> block
 	// from the per-workspace MEMORY.md index. Empty when no index exists
 	// or the index was emptied to its header comment.
-	MemoryIndex string
+	MemoryIndex        string
+	ClaudeGlobalPrompt string
 }
 
 type ContextFile struct {
@@ -235,6 +236,12 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		Platform:      platform,
 		AvailSkillXML: availSkillXML,
 		MemoryIndex:   memoryIndex,
+	}
+
+	// Discover Claude's global prompt
+	claudeGlobalPromptPath := filepath.Join(home.Dir(), ".claude", "global_prompt.md")
+	if content, err := os.ReadFile(claudeGlobalPromptPath); err == nil {
+		data.ClaudeGlobalPrompt = string(content)
 	}
 
 	for _, contextFiles := range files {

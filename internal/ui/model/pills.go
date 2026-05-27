@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -45,6 +46,23 @@ func hasIncompleteTodos(todos []session.Todo) bool {
 	return session.HasIncompleteTodos(todos)
 }
 
+// hasActiveTodos returns true if there are any non-completed todos
+// or any recently completed todos.
+func hasActiveTodos(todos []session.Todo) bool {
+	if hasIncompleteTodos(todos) {
+		return true
+	}
+	now := time.Now().UnixMilli()
+	for _, todo := range todos {
+		if todo.Status == session.TodoStatusCompleted && todo.CompletedAt > 0 {
+			if now-todo.CompletedAt < chat.TodoRecentlyCompletedTTL.Milliseconds() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hasInProgressTodo returns true if there is at least one in-progress todo.
 func hasInProgressTodo(todos []session.Todo) bool {
 	for _, todo := range todos {
@@ -72,7 +90,7 @@ func queuePill(queue int, focused, panelFocused bool, t *styles.Styles) string {
 
 // todoPill renders the todo progress pill with the current task name.
 func todoPill(todos []session.Todo, inProgressIcon string, focused, panelFocused bool, t *styles.Styles) string {
-	if !hasIncompleteTodos(todos) {
+	if !hasActiveTodos(todos) {
 		return ""
 	}
 
@@ -157,7 +175,7 @@ func (m *UI) togglePillsExpanded() tea.Cmd {
 	if !m.hasSession() {
 		return nil
 	}
-	hasPills := hasIncompleteTodos(m.session.Todos) || m.promptQueue > 0
+	hasPills := hasActiveTodos(m.session.Todos) || m.promptQueue > 0
 	if !hasPills {
 		return nil
 	}
@@ -184,10 +202,10 @@ func (m *UI) switchPillSection(dir int) tea.Cmd {
 	if !m.pillsExpanded || !m.hasSession() {
 		return nil
 	}
-	hasIncompleteTodos := hasIncompleteTodos(m.session.Todos)
+	hasActive := hasActiveTodos(m.session.Todos)
 	hasQueue := m.promptQueue > 0
 
-	if dir < 0 && m.focusedPillSection == pillSectionQueue && hasIncompleteTodos {
+	if dir < 0 && m.focusedPillSection == pillSectionQueue && hasActive {
 		m.focusedPillSection = pillSectionTodos
 		m.updateLayoutAndSize()
 		return nil
@@ -205,9 +223,9 @@ func (m *UI) pillsAreaHeight() int {
 	if !m.hasSession() {
 		return 0
 	}
-	hasIncomplete := hasIncompleteTodos(m.session.Todos)
+	hasActive := hasActiveTodos(m.session.Todos)
 	hasQueue := m.promptQueue > 0
-	hasPills := hasIncomplete || hasQueue
+	hasPills := hasActive || hasQueue
 	if !hasPills {
 		return 0
 	}
@@ -215,7 +233,7 @@ func (m *UI) pillsAreaHeight() int {
 	pillsAreaHeight := pillHeightWithBorder
 	if m.pillsExpanded {
 		maxExpandedRows := m.maxExpandedPillRows()
-		if m.focusedPillSection == pillSectionTodos && hasIncomplete {
+		if m.focusedPillSection == pillSectionTodos && hasActive {
 			pillsAreaHeight += m.renderedTodoListHeight(maxExpandedRows)
 		} else if m.focusedPillSection == pillSectionQueue && hasQueue {
 			pillsAreaHeight += min(m.promptQueue, maxExpandedRows)
@@ -261,10 +279,10 @@ func (m *UI) renderPills() {
 	paddingLeft := 3
 	contentWidth := max(width-paddingLeft, 0)
 
-	hasIncomplete := hasIncompleteTodos(m.session.Todos)
+	hasActive := hasActiveTodos(m.session.Todos)
 	hasQueue := m.promptQueue > 0
 
-	if !hasIncomplete && !hasQueue {
+	if !hasActive && !hasQueue {
 		return
 	}
 
@@ -275,7 +293,7 @@ func (m *UI) renderPills() {
 	inProgressIcon := chat.RenderTodoInProgressIcon(t)
 
 	var pills []string
-	if hasIncomplete {
+	if hasActive {
 		pills = append(pills, todoPill(m.session.Todos, inProgressIcon, todosFocused, m.pillsExpanded, t))
 	}
 	if hasQueue {
@@ -285,7 +303,7 @@ func (m *UI) renderPills() {
 	var expandedList string
 	maxExpandedRows := m.maxExpandedPillRows()
 	if m.pillsExpanded {
-		if todosFocused && hasIncomplete {
+		if todosFocused && hasActive {
 			expandedList = todoList(m.session.Todos, t, contentWidth, maxExpandedRows)
 		} else if queueFocused && hasQueue {
 			if m.com.Workspace.AgentIsReady() {
@@ -312,7 +330,9 @@ func (m *UI) renderPills() {
 
 	pillsArea := pillsRow
 	if expandedList != "" {
-		pillsArea = lipgloss.JoinVertical(lipgloss.Left, pillsRow, expandedList)
+		// Indent the list to align with the pill labels (which have 1px border + 1px padding).
+		indentedList := lipgloss.NewStyle().PaddingLeft(2).Render(expandedList)
+		pillsArea = lipgloss.JoinVertical(lipgloss.Left, pillsRow, indentedList)
 	}
 
 	m.pillsView = t.Pills.Area.MaxWidth(width).PaddingLeft(paddingLeft).Render(pillsArea)

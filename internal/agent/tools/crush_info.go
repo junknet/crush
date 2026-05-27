@@ -4,12 +4,15 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/skills"
 )
@@ -49,6 +52,7 @@ func buildCrushInfo(cfg *config.ConfigStore, lspManager *lsp.Manager, allSkills 
 	writeMCP(&b, mcp.GetStates(), cfg)
 	writeSkills(&b, allSkills, activeSkills, skillTracker, cfg)
 	writeHooks(&b, cfg)
+	writeGlobalPrompt(&b)
 	writePermissions(&b, cfg)
 	writeDisabledTools(&b, cfg)
 	writeOptions(&b, cfg)
@@ -427,6 +431,8 @@ func writeOptions(b *strings.Builder, cfg *config.ConfigStore) {
 	}
 	var opts []kv
 
+	opts = append(opts, kv{"home_dir", home.Dir()})
+	opts = append(opts, kv{"env_home", os.Getenv("HOME")})
 	opts = append(opts, kv{"data_directory", c.Options.DataDirectory})
 	opts = append(opts, kv{"debug", fmt.Sprintf("%v", c.Options.Debug)})
 	autoLSP := c.Options.AutoLSP == nil || *c.Options.AutoLSP
@@ -499,6 +505,21 @@ func writeHooks(b *strings.Builder, cfg *config.ConfigStore) {
 		b.WriteString(line + "\n")
 	}
 
+	b.WriteString("\n")
+}
+
+func writeGlobalPrompt(b *strings.Builder) {
+	path := filepath.Join(home.Dir(), ".claude", "global_prompt.md")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(b, "[claude_global_prompt]\nerror reading %s: %v\n\n", path, err)
+		return
+	}
+	b.WriteString("[claude_global_prompt]\n")
+	b.WriteString(string(content))
+	if !strings.HasSuffix(string(content), "\n") {
+		b.WriteString("\n")
+	}
 	b.WriteString("\n")
 }
 

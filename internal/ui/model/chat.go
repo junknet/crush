@@ -674,7 +674,10 @@ func (m *Chat) HandleKeyMsg(key tea.KeyMsg) (bool, tea.Cmd) {
 // It detects single, double, and triple clicks for text selection.
 // Returns whether the click was handled and an optional command for delayed
 // single-click actions.
-func (m *Chat) HandleMouseDown(x, y int) (bool, tea.Cmd) {
+func (m *Chat) HandleMouseDown(btn ansi.MouseButton, x, y int) (bool, tea.Cmd) {
+	if btn != ansi.MouseButton1 {
+		return false, nil
+	}
 	if m.list.Len() == 0 {
 		return false, nil
 	}
@@ -791,7 +794,10 @@ func (m *Chat) HandleDelayedClick(msg DelayedClickMsg) bool {
 }
 
 // HandleMouseUp handles mouse up events for the chat component.
-func (m *Chat) HandleMouseUp(x, y int) bool {
+func (m *Chat) HandleMouseUp(btn ansi.MouseButton, x, y int) bool {
+	if btn != ansi.MouseButton1 {
+		return false
+	}
 	if !m.mouseDown {
 		return false
 	}

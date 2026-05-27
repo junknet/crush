@@ -11,6 +11,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
+	"github.com/charmbracelet/crush/internal/home"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,6 +98,62 @@ func TestConfig_ConfigureProvidersEnrichesCustomModelMetadata(t *testing.T) {
 // TestLookupConfigs_SingleLocation verifies the single-location model:
 // lookupConfigs resolves only the global config base candidates and the
 // runtime state candidates, never a project- or parent-local crush.json.
+
+func TestMergeClaudeMCPs(t *testing.T) {
+	tempHome := t.TempDir()
+	tempWorking := t.TempDir()
+
+	home.SetDir(tempHome)
+	defer home.ResetDir()
+
+	claudeConfig := `{
+		"mcpServers": {
+			"claude-mcp": {
+				"command": "node",
+				"args": ["server.js"],
+				"env": {"FOO": "BAR"}
+			}
+		}
+	}`
+
+	claudeDir := filepath.Join(tempHome, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "config.json"), []byte(claudeConfig), 0o644))
+
+	projectClaudeConfig := `{
+		"mcpServers": {
+			"project-mcp": {
+				"command": "python",
+				"args": ["server.py"]
+			}
+		}
+	}`
+	projectClaudeDir := filepath.Join(tempWorking, ".claude")
+	require.NoError(t, os.MkdirAll(projectClaudeDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectClaudeDir, "config.json"), []byte(projectClaudeConfig), 0o644))
+
+	cfg := &Config{}
+	mergeClaudeMCPs(cfg, tempWorking)
+
+	require.NotNil(t, cfg.MCP)
+	require.Contains(t, cfg.MCP, "claude-mcp")
+	require.Contains(t, cfg.MCP, "project-mcp")
+	require.Equal(t, "node", cfg.MCP["claude-mcp"].Command)
+	require.Equal(t, "python", cfg.MCP["project-mcp"].Command)
+
+	t.Run("Crush config takes precedence", func(t *testing.T) {
+		cfg := &Config{
+			MCP: MCPs{
+				"claude-mcp": {
+					Command: "crush-node",
+				},
+			},
+		}
+		mergeClaudeMCPs(cfg, tempWorking)
+		require.Equal(t, "crush-node", cfg.MCP["claude-mcp"].Command)
+	})
+}
+
 func TestLookupConfigs_SingleLocation(t *testing.T) {
 	// Force GlobalConfig and GlobalConfigData to point at locations we
 	// control so they can be asserted without polluting the developer's
@@ -825,7 +882,7 @@ func TestConfig_setupAgentsOverlaysCustomAgents(t *testing.T) {
 				Name:         "Review",
 				Description:  "Custom review agent",
 				Model:        SelectedModelTypeExplore,
-				AllowedTools: []string{"fd", "rg"},
+				AllowedTools: []string{"rg"},
 				ContextPaths: []string{"docs"},
 			},
 		},
@@ -836,7 +893,7 @@ func TestConfig_setupAgentsOverlaysCustomAgents(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "Review", review.Name)
 	require.Equal(t, SelectedModelTypeExplore, review.Model)
-	require.Equal(t, []string{"fd", "rg"}, review.AllowedTools)
+	require.Equal(t, []string{"rg"}, review.AllowedTools)
 	require.Contains(t, review.ContextPaths, "docs")
 	require.Equal(t, AgentBrain, cfg.DefaultAgent)
 }
