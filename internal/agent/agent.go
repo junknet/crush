@@ -2455,17 +2455,23 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []a
 }
 
 var readOnlyBlockedTools = map[string]struct{}{
-	tools.BashToolName:           {},
-	tools.DownloadToolName:       {},
-	tools.EditToolName:           {},
-	tools.JobKillToolName:        {},
-	tools.MultiEditToolName:      {},
-	tools.NimRestartToolName:     {},
-	tools.NuToolName:             {},
-	tools.RunToolName:            {},
-	tools.ScheduleWakeupToolName: {},
-	tools.TodosToolName:          {},
-	tools.WriteToolName:          {},
+	tools.BashToolName:            {},
+	tools.DownloadToolName:        {},
+	tools.EditToolName:            {},
+	tools.JobKillToolName:         {},
+	tools.MultiEditToolName:       {},
+	tools.NimRestartToolName:      {},
+	tools.NuToolName:              {},
+	tools.RunToolName:             {},
+	tools.ScheduleWakeupToolName:  {},
+	tools.SSHExecToolName:         {},
+	tools.SSHMountToolName:        {},
+	tools.SSHSessionKillToolName:  {},
+	tools.SSHSessionSendToolName:  {},
+	tools.SSHSessionStartToolName: {},
+	tools.SSHUnmountToolName:      {},
+	tools.TodosToolName:           {},
+	tools.WriteToolName:           {},
 }
 
 type readOnlyToolWrapper struct {
