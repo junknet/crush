@@ -1103,6 +1103,8 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewSSHSessionKillTool(c.permissions),
 		tools.NewSSHMountTool(c.permissions, c.cfg.Config().Options.DataDirectory),
 		tools.NewSSHUnmountTool(c.permissions),
+		tools.NewEvidenceBatchTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
+		tools.NewEvidenceGraphTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
 		tools.NewDagRunTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),

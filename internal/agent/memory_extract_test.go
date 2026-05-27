@@ -160,7 +160,7 @@ func TestReadOnlyDagRunPolicy(t *testing.T) {
 		Input: `{"nodes":[{"id":"shell","tool":"shell","command":"date"}]}`,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, resp.Content, "only allow rg and view")
+	assert.Contains(t, resp.Content, "only allow evidence read nodes")
 	assert.True(t, resp.StopTurn)
 }
 

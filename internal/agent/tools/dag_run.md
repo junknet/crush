@@ -1,28 +1,23 @@
-Execute a small local DAG in one tool call.
+Deprecated compatibility alias for `evidence_graph`.
 
-Use this when several independent reads/searches/short scripts can run in one
-structured execution graph instead of many LLM turns.
+Use `evidence_batch` for independent parallel repository evidence. Use
+`evidence_graph` only when a later evidence node depends on output from an
+earlier node.
 
-Supported node tools:
-- `rg`: content and filename search (`pattern`, optional `path`, `include`, `literal_text`, `files_only`)
-- `view`: read a text file (`file_path`, optional `offset`, `limit`, `fold`)
-- `run`: short script (`language`: shell/python/node, `script`)
-- `shell`: short shell command (`command`)
+Nodes use semantic `kind` values, not primary tool names:
+- `search_text`: text search (`query`, optional `path`, `include`,
+  `literal_text`)
+- `search_files`: filename search (`query`, optional `path`, `include`)
+- `search_structure`: AST search (`query`, optional `path`, `language`)
+- `list_tree`: directory tree (`path`, optional `depth`, `ignore`)
+- `read_file`: text read (`path`, optional `offset`, `limit`, `fold`)
+- `check_file`: diagnostics (`path`)
+- `run_short_command`: bounded command (`script` or `command`, optional
+  `language`)
 
-Parameters:
-- `nodes`: DAG nodes, each with unique `id` (REQUIRED), `tool` (REQUIRED), optional `depends_on`
-- `max_parallel`: max concurrent ready nodes, default 4, max 16
-- `timeout_seconds`: whole-DAG timeout, default 120, max 600
+`run_short_command` has a 10 second deadline. It must not run servers,
+background commands, remote commands, polling, or foreground sleeps.
 
-IMPORTANT: Every node MUST have a non-empty `id` string (e.g., "list_files", "read_config"). The execution will FAIL if any node lacks an ID.
-
-Dependency output interpolation:
-- Use `${node_id.output}` inside string fields to insert a dependency output.
-- Keep inserted outputs small; each node output is capped in the final result.
-
-Rules:
-- Use this for short, bounded work that benefits from parallelism.
-- Do not use for long-running servers, cloud polling, deploy waits, or
-  foreground sleep. Use `bash` with `run_in_background=true` and `monitor`.
-- Do not use for mutations unless the user explicitly asked and the graph is
-  small enough to audit.
+Use `${node_id.output}` in a dependent node field only in `evidence_graph`.
+Each node requires an `id`. Outputs are returned as compact `[evidence]`
+sections followed by one `[summary]` section.

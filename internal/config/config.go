@@ -754,6 +754,8 @@ func allToolNames() []string {
 		"crush_info",
 		"crush_logs",
 		"dag_run",
+		"evidence_batch",
+		"evidence_graph",
 		"job_output",
 		"job_kill",
 		"download",

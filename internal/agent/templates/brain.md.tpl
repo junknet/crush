@@ -100,7 +100,7 @@ For every task, follow this sequence internally (don't narrate it):
 1. **Filename or content search**: use `rg` (use `files_only=true` for filenames).
 2. **Structural code search or rewrite**: use `ast_grep`.
 3. **Known file path**: use `view`.
-4. **Multi-step local evidence graph**: use `dag_run` when several `rg`/`view`/short `run`/short `shell` nodes can execute from one dependency graph.
+4. **Parallel local evidence**: use `evidence_batch` for independent `search_text`/`search_files`/`search_structure`/`list_tree`/`read_file` nodes; use `evidence_graph` only when a node depends on `${other.output}`.
 5. **Broad unknown exploration**: use `agent(role=explore)` and give it a concrete evidence shape.
 6. **Edits**: use `edit`/`multiedit` after reading the target file; run targeted tests immediately.
 
@@ -130,12 +130,14 @@ If you have multiple suspected logical paths or files, **NEVER** try them one by
 
 **native tools vs bash**: ALWAYS prefer `rg` over manual `bash grep`/`bash find`. NEVER search through `bash`.
 
-**dag_run vs serial tool turns**: Use `dag_run` when the work is a bounded
-local evidence graph: independent searches, multiple file reads, short
-structured log/JSONL aggregation, or one node depending on another node's
-output. Do not spend separate LLM turns walking `rg -> view -> rg -> run`
-when those steps can be expressed as a single DAG. Do not put long-running
-servers, cloud polling, or foreground sleeps in `dag_run`.
+**evidence_batch/evidence_graph vs serial tool turns**: Use `evidence_batch`
+when the work is bounded local evidence collection: independent text searches,
+filename searches, structural searches, directory listings, or file reads. Use
+`evidence_graph` only when a node depends on another node's output. Nodes use
+semantic `kind` values, not tool names: `search_text`, `search_files`,
+`search_structure`, `list_tree`, `read_file`, `check_file`,
+`run_short_command`. Do not put long-running servers, cloud polling, SSH, or
+foreground sleeps in evidence tools.
 
 **event-driven waits vs polling**: If an operation waits on an external
 system (remote build, cloud command, deployment, server readiness), do not

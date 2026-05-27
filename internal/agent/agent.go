@@ -2497,7 +2497,7 @@ func (r *readOnlyToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (f
 		}
 		return r.inner.Run(ctx, call)
 	}
-	if call.Name == tools.DagRunToolName {
+	if call.Name == tools.DagRunToolName || call.Name == tools.EvidenceBatchToolName || call.Name == tools.EvidenceGraphToolName {
 		if resp, blocked := readOnlyDagRunToolResponse(call); blocked {
 			return resp, nil
 		}
@@ -2542,11 +2542,27 @@ func readOnlyDagRunToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bo
 		return resp, true
 	}
 	for _, node := range params.Nodes {
-		switch strings.ToLower(strings.TrimSpace(node.Tool)) {
-		case "rg", "view":
+		kind := strings.ToLower(strings.TrimSpace(node.Kind))
+		if kind == "" {
+			kind = strings.ToLower(strings.TrimSpace(node.Tool))
+			switch kind {
+			case "rg":
+				if node.FilesOnly {
+					kind = "search_files"
+				} else {
+					kind = "search_text"
+				}
+			case "view":
+				kind = "read_file"
+			case "nim_check_file":
+				kind = "check_file"
+			}
+		}
+		switch kind {
+		case "search_text", "search_files", "search_structure", "list_tree", "read_file", "check_file":
 			continue
 		default:
-			resp := fantasy.NewTextErrorResponse(fmt.Sprintf("dag_run node %s uses %q, but read-only turns only allow rg and view nodes.", node.ID, node.Tool))
+			resp := fantasy.NewTextErrorResponse(fmt.Sprintf("%s node %s uses %q, but read-only turns only allow evidence read nodes.", call.Name, node.ID, kind))
 			resp.StopTurn = true
 			return resp, true
 		}
