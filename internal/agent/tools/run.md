@@ -1,18 +1,18 @@
-Run a short local script when structured code is denser than many shell calls.
+运行一次性本地脚本（Python / Node / shell inline 代码块）。**不是通用命令执行工具**——单行命令、管道、后台进程统一用 `bash`。
 
-Use this for one-shot analysis, JSONL aggregation, small transformations, and
-evidence extraction where loops, maps, sorting, or structured parsing would be
-awkward as many separate tool calls.
+**适合场景**：需要循环、map/filter、排序、结构化解析、JSONL 聚合等用多个 bash 调用会很繁琐的一次性分析。
 
-Parameters:
-- `language`: `shell` (default), `python`, or `node`
-- `script`: source code to execute
-- `timeout_seconds`: optional timeout, default 60, max 300
+参数：
+- `language`：`shell`（默认）、`python`、`node`
+- `script`：要执行的源代码字符串（inline，非文件路径）
+- `timeout_seconds`：可选超时，默认 60，最大 300
 
-Rules:
-- Prefer native tools (`rg`, `view`, `ast_grep`) for repository search.
-- Prefer `bash` with `run_in_background=true` plus `monitor` for long-running
-  or externally waiting processes.
-- Keep scripts small and deterministic. Print only the distilled result.
-- Do not use this for package installation, daemons, interactive prompts, or
-  foreground sleep polling.
+**选择规则**（bash vs run）：
+- 执行命令行 / 管道 / 调用系统工具 → 用 `bash`
+- 写一段 Python/Node 脚本做数据处理 → 用 `run`
+- 需要后台运行 / 长跑进程 → 用 `bash` + `run_in_background=true`
+
+约束：
+- 优先用原生工具（`rg`、`view`、`ast_grep`）做代码库搜索，不要在 run 里再调 shell 命令
+- 脚本保持小而确定性，只打印最终结论
+- 禁止：安装包、守护进程、交互式提示、foreground sleep 轮询

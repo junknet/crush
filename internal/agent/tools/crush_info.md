@@ -1,4 +1,4 @@
-Get Crush's current runtime state: active model, provider, LSP/MCP status, skills, hooks, permissions, and disabled tools. No parameters needed.
+获取 agent 自身运行时状态（模型、provider、LSP/MCP、技能、hooks、权限、禁用工具）。**仅在诊断 agent 自身配置或连接问题时调用**，不用于用户任务执行。无需参数。
 
 <usage>
 - Shows active model and provider, LSP/MCP server status, skills,

@@ -1,8 +1,7 @@
-Deprecated compatibility alias for `evidence_graph`.
+**[已废弃]** 这是 `evidence_graph` 的兼容别名，**禁止使用**，直接用 `evidence_graph` 或 `evidence_batch`。
 
-Use `evidence_batch` for independent parallel repository evidence. Use
-`evidence_graph` only when a later evidence node depends on output from an
-earlier node.
+- 独立并行子任务 → 用 `evidence_batch`
+- 后续节点依赖前序节点输出 → 用 `evidence_graph`
 
 Nodes use semantic `kind` values, not primary tool names:
 - `search_text`: text search (`query`, optional `path`, `include`,
