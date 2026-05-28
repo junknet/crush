@@ -323,7 +323,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		agentTools[len(agentTools)-1].SetProviderOptions(a.getCacheControlOptions())
 	}
 
-	if strings.HasSuffix(call.SessionID, "-mem-extract") {
+	if strings.Contains(call.SessionID, "-mem-extract-") {
 		memoryDir := filepath.Join(a.dataDir, "projects", memdir.WorkspaceSlug(a.workingDir), "memory")
 		wrapped := make([]fantasy.AgentTool, len(agentTools))
 		for i, tool := range agentTools {
@@ -1706,10 +1706,11 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		if !supportsImages && strings.HasPrefix(attachment.MimeType, "image/") {
 			continue
 		}
+		data, mediaType := compressImageForLLM(attachment.Content, attachment.MimeType)
 		files = append(files, fantasy.FilePart{
 			Filename:  attachment.FileName,
-			Data:      attachment.Content,
-			MediaType: attachment.MimeType,
+			Data:      data,
+			MediaType: mediaType,
 		})
 	}
 

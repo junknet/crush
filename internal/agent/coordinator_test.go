@@ -373,6 +373,15 @@ func TestEnsureRootTaskUsesPlanProfile(t *testing.T) {
 	assert.Equal(t, 4096, brainNode.Intent.BudgetTokens)
 }
 
+func TestBuildTodoContinuationPromptUsesNextAttemptNumber(t *testing.T) {
+	prompt := buildTodoContinuationPrompt(0, "- [pending] finish implementation\n")
+
+	require.Contains(t, prompt, "第 1/3 次")
+	require.Contains(t, prompt, "- [pending] finish implementation")
+	require.Contains(t, prompt, "必须调用 `todos` 工具更新状态")
+	require.Contains(t, prompt, "不要委托 worker/agent 更新子 session")
+}
+
 func TestUpdateParentSessionCost(t *testing.T) {
 	t.Run("accumulates cost correctly", func(t *testing.T) {
 		env := testEnv(t)

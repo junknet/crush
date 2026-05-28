@@ -7,7 +7,7 @@ WHERE id = ? LIMIT 1;
 SELECT *
 FROM messages
 WHERE session_id = ?
-ORDER BY created_at ASC;
+ORDER BY created_at ASC, rowid ASC;
 
 -- name: CreateMessage :one
 INSERT INTO messages (

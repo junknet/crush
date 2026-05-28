@@ -101,6 +101,30 @@ func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 	require.Equal(t, "image.png", file.Filename)
 }
 
+func TestPreparePrompt_CompressesCurrentTurnImageAttachment(t *testing.T) {
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test", session.ModeExecute)
+	require.NoError(t, err)
+
+	rawImage := syntheticPNG(t, 1200, 900)
+	_, files := agent.preparePrompt(sess, nil, true, catwalk.Type(""), message.Attachment{
+		FileName: "screen.png",
+		MimeType: "image/png",
+		Content:  rawImage,
+	})
+
+	require.Len(t, files, 1)
+	require.Equal(t, "screen.png", files[0].Filename)
+	require.Equal(t, "image/jpeg", files[0].MediaType)
+	require.True(t, len(files[0].Data) >= 3)
+	require.Equal(t, []byte{0xff, 0xd8, 0xff}, files[0].Data[:3])
+	require.NotEqual(t, rawImage, files[0].Data)
+}
+
 func TestPreparePrompt_DropsUserMessageAfterUnsupportedAttachmentFiltering(t *testing.T) {
 	env := testEnv(t)
 	sa := testSessionAgent(env, nil, nil, "test prompt")

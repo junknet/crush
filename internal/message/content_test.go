@@ -23,6 +23,24 @@ func makeTestAttachments(n int, contentSize int) []Attachment {
 	return attachments
 }
 
+func TestToAIMessage_SystemMessageBecomesUserContext(t *testing.T) {
+	t.Parallel()
+
+	msg := &Message{
+		Role: System,
+		Parts: []ContentPart{
+			TextContent{Text: "continue unfinished todos"},
+		},
+	}
+
+	messages := msg.ToAIMessage()
+	require.Len(t, messages, 1)
+	require.Equal(t, fantasy.MessageRoleUser, messages[0].Role)
+	require.Equal(t, []fantasy.MessagePart{
+		fantasy.TextPart{Text: "continue unfinished todos"},
+	}, messages[0].Content)
+}
+
 func TestToAIMessage_CorruptedMediaData(t *testing.T) {
 	t.Parallel()
 

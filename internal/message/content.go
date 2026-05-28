@@ -534,6 +534,16 @@ func (m *Message) ToAIMessage(opts ...ToAIMessageOptions) []fantasy.Message {
 
 	var messages []fantasy.Message
 	switch m.Role {
+	case System:
+		text := strings.TrimSpace(m.Content().Text)
+		if text != "" {
+			messages = append(messages, fantasy.Message{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: text},
+				},
+			})
+		}
 	case User:
 		var parts []fantasy.MessagePart
 		text := strings.TrimSpace(m.Content().Text)

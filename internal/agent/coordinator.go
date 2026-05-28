@@ -726,8 +726,8 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			// Only fire when the run produced a real result (queued/nil means the
 			// actual execution is still happening inside another turn's drain).
 			if result != nil {
-				nextDepth := todoContinuationDepthFromCtx(ctx) + 1
-				nextCtx := withTodoContinuationDepth(context.Background(), nextDepth)
+				currentDepth := todoContinuationDepthFromCtx(ctx)
+				nextCtx := withTodoContinuationDepth(context.Background(), currentDepth)
 				go c.triggerTodoContinuation(nextCtx, sid)
 			}
 		}
@@ -743,7 +743,7 @@ const maxTodoContinuationDepth = 3
 
 func (c *coordinator) triggerTodoContinuation(ctx context.Context, sessionID string) {
 	depth := todoContinuationDepthFromCtx(ctx)
-	if depth > maxTodoContinuationDepth {
+	if depth >= maxTodoContinuationDepth {
 		slog.Warn("待办事项自动续期已达最大深度，停止循环",
 			"session_id", sessionID, "max_depth", maxTodoContinuationDepth)
 		return
@@ -785,19 +785,7 @@ func (c *coordinator) triggerTodoContinuation(ctx context.Context, sessionID str
 		return
 	}
 
-	// Prompt explicitly requires todos tool invocation — plain text responses
-	// without tool calls are rejected by the next continuation check.
-	prompt := fmt.Sprintf(
-		"[系统自动续期 — 第 %d/%d 次，不是新用户请求]\n\n"+
-			"你的待办事项列表中还有未完成的任务：\n\n"+
-			"<current_todos>\n%s</current_todos>\n\n"+
-			"**必须操作**：\n"+
-			"1. 继续执行每项未完成的任务\n"+
-			"2. 每完成一项，立即调用 `todos` 工具将其状态改为 `completed`\n"+
-			"3. 无法完成的项改为 `failed` 并说明原因\n"+
-			"4. **不要只输出文字说明**，必须调用 `todos` 工具更新状态，否则系统会继续注入续期指令",
-		depth+1, maxTodoContinuationDepth,
-		incompleteList.String())
+	prompt := buildTodoContinuationPrompt(depth, incompleteList.String())
 
 	slog.Info("待办事项未完成，自动注入续期指令",
 		"session_id", sessionID, "depth", depth+1, "incomplete_count", strings.Count(incompleteList.String(), "\n"))
@@ -816,6 +804,23 @@ func (c *coordinator) triggerTodoContinuation(ctx context.Context, sessionID str
 	// The continuation run itself will fire another triggerTodoContinuation
 	// via the post-run hook at L720-728, with depth+1 threaded via context.
 	// We rely on that path; no explicit recursive call here.
+}
+
+func buildTodoContinuationPrompt(depth int, incompleteList string) string {
+	// Prompt explicitly requires todos tool invocation — plain text responses
+	// without tool calls are rejected by the next continuation check.
+	return fmt.Sprintf(
+		"[系统自动续期 — 第 %d/%d 次，不是新用户请求]\n\n"+
+			"你的待办事项列表中还有未完成的任务：\n\n"+
+			"<current_todos>\n%s</current_todos>\n\n"+
+			"**必须操作**：\n"+
+			"1. 继续执行每项未完成的任务\n"+
+			"2. 每完成一项，立即调用 `todos` 工具将其状态改为 `completed`\n"+
+			"3. 无法完成的项改为 `failed` 并说明原因\n"+
+			"4. 必须在当前 session 直接调用 `todos` 工具更新上方列表，不要委托 worker/agent 更新子 session\n"+
+			"5. **不要只输出文字说明**，必须调用 `todos` 工具更新状态，否则系统会继续注入续期指令",
+		depth+1, maxTodoContinuationDepth,
+		incompleteList)
 }
 
 // TraceEntries returns the trace entries recorded by the most recent run.
@@ -2134,6 +2139,10 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.ToolResponse{}, errors.New("sub-agent returned no result")
 	}
 
+	if profile == scheduler.ProfileWorkerAgent && taskNode.Mode != scheduler.TaskReadOnly {
+		c.triggerTodoContinuation(withTodoContinuationDepth(context.Background(), 0), session.ID)
+	}
+
 	// Update parent session cost
 	if err := c.updateParentSessionCost(ctx, session.ID, params.SessionID); err != nil {
 		c.publishSubAgentEvent(notify.TypeSubAgentFailed, params, session.ID, err.Error())
@@ -2845,6 +2854,9 @@ Tool policy:
 		Prompt:    extractionPrompt,
 	})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			slog.Warn("Background memory extraction timed out (2m)", "session", sessionID)
+		}
 		c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemorySaveFailed, memoryTraceOptions{
 			sessionID:  sessionID,
 			startedAt:  startedAt,

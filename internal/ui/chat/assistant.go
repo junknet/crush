@@ -27,6 +27,10 @@ const assistantMessageTruncateFormat = "… (%d lines hidden) [click or space to
 // does not add a new keybinding.
 const assistantMessageTailWindowFormat = "… %d earlier lines hidden [click or space for full view]"
 
+// assistantMessageStreamingTruncateFormat is shown above a truncated thinking
+// block while it is still streaming.
+const assistantMessageStreamingTruncateFormat = "… %d earlier thinking lines hidden [streaming; click to expand]"
+
 // maxCollapsedThinkingHeight defines the maximum height of the thinking
 const maxCollapsedThinkingHeight = 10
 
@@ -466,16 +470,15 @@ func (a *AssistantMessageItem) renderThinking(thinking string, width int) string
 
 	switch a.thinkingViewMode {
 	case thinkingCollapsed:
-		// Do not collapse the thinking process block while the assistant is
-		// actively in the reasoning phase (thinking is non-empty and FinishedAt
-		// is 0). This allows the user to view the full streaming output in
-		// real-time. Collapse to maxCollapsedThinkingHeight only once the
-		// reasoning phase is completed.
 		isThinkingActive := a.message.ReasoningContent().Thinking != "" && a.message.ReasoningContent().FinishedAt == 0
-		if !isThinkingActive && totalLines > maxCollapsedThinkingHeight {
+		if totalLines > maxCollapsedThinkingHeight {
 			lines = lines[totalLines-maxCollapsedThinkingHeight:]
+			format := assistantMessageTruncateFormat
+			if isThinkingActive {
+				format = assistantMessageStreamingTruncateFormat
+			}
 			hint := a.sty.Messages.ThinkingTruncationHint.Render(
-				fmt.Sprintf(assistantMessageTruncateFormat, totalLines-maxCollapsedThinkingHeight),
+				fmt.Sprintf(format, totalLines-maxCollapsedThinkingHeight),
 			)
 			lines = append([]string{hint, ""}, lines...)
 		}

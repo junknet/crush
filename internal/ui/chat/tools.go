@@ -595,6 +595,12 @@ func toolParamList(sty *styles.Styles, params []string, width int) string {
 
 	mainParam := params[0]
 
+	// If the string contains broken ANSI fragments (CSI '[' but no ESC),
+	// strip them before doing anything else (like link detection).
+	if !strings.Contains(mainParam, "\x1b") && (strings.Contains(mainParam, "[38;2;") || strings.Contains(mainParam, "[1m") || strings.Contains(mainParam, "[22m")) {
+		mainParam = stripBrokenAnsi(mainParam)
+	}
+
 	// Build key=value pairs from remaining params (consecutive key, value pairs).
 	var kvPairs []string
 	for i := 1; i+1 < len(params); i += 2 {
@@ -622,26 +628,38 @@ func toolParamList(sty *styles.Styles, params []string, width int) string {
 	// ratio with TodoRatio), do not re-render with ParamMain — lipgloss
 	// would wrap the styled string in another reset and the inner SGR
 	// leaks as visible text. Pass styled strings through untouched.
-	// We also detect "broken" sequences (missing ESC but having CSI '[')
-	// which commonly occur when ANSI-stripping tools are over-aggressive.
+	// We also check for broken ANSI fragments (missing ESC) even if some
+	// valid ESC characters are present, as truncation can break sequences.
+	if strings.Contains(output, "[38;2;") || strings.Contains(output, "[1m") || strings.Contains(output, "[22m") {
+		output = stripBrokenAnsi(output)
+	}
+
 	if strings.Contains(output, "\x1b") {
 		return output
-	}
-	if strings.Contains(output, "[38;2;") || strings.Contains(output, "[1m") || strings.Contains(output, "[22m") {
-		// Found broken ANSI fragments. Strip them entirely to avoid literal leakage.
-		return sty.Tool.ParamMain.Render(stripBrokenAnsi(output))
 	}
 	return sty.Tool.ParamMain.Render(output)
 }
 
 func stripBrokenAnsi(s string) string {
 	// Simple heuristic to strip fragments like [38;2;0;122;184m and [m
+	// We handle:
+	// 1. [ followed by digits, semicolons, or m
+	// 2. [ followed by ? (some private sequences)
+	// 3. Just [m (reset)
+	//
+	// We only strip if the '[' is NOT preceded by '\x1b'.
 	var sb strings.Builder
 	inSequence := false
 	for i := 0; i < len(s); i++ {
-		if s[i] == '[' && (i+1 < len(s)) && (s[i+1] >= '0' && s[i+1] <= '9' || s[i+1] == 'm' || s[i+1] == '?') {
-			inSequence = true
-			continue
+		if !inSequence && s[i] == '[' && (i+1 < len(s)) {
+			// Check if previous char was ESC
+			if i == 0 || s[i-1] != '\x1b' {
+				next := s[i+1]
+				if (next >= '0' && next <= '9') || next == 'm' || next == '?' || next == ';' {
+					inSequence = true
+					continue
+				}
+			}
 		}
 		if inSequence {
 			if s[i] == 'm' {

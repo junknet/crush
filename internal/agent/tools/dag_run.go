@@ -225,6 +225,13 @@ func validateDagRunNodes(nodes []DagRunNode) error {
 				return fmt.Errorf("node %s: path (url) is required for web_fetch", node.ID)
 			}
 		case "list_tree":
+		case "run_short_command":
+			if strings.TrimSpace(dagRunCommand(node)) == "" {
+				return fmt.Errorf("node %s: script or command is required for run_short_command", node.ID)
+			}
+			if message, blocked := blockForegroundSleep(dagRunCommand(node)); blocked {
+				return fmt.Errorf("%s", message)
+			}
 		default:
 			return fmt.Errorf("node %s: unsupported kind %q; use search_text, search_files, search_structure, list_tree, read_file, check_file, run_short_command, web_search, or web_fetch", node.ID, node.Kind)
 		}

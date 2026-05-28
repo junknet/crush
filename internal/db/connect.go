@@ -86,7 +86,10 @@ func Connect(ctx context.Context, dataDir string) (*sql.DB, error) {
 	// pool connections to interleave writes/checkpoints (especially
 	// under concurrent sub-agents) has caused WAL/header desync
 	// resulting in SQLITE_NOTADB (26) on the next open.
-	conn.SetMaxOpenConns(1)
+	// G5 memory-save-failure: increased to 4 to prevent background tasks
+	// (memory extraction, pruning) from starving the main agent or each
+	// other under connection pressure.
+	conn.SetMaxOpenConns(4)
 
 	if err = conn.PingContext(ctx); err != nil {
 		conn.Close()

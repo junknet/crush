@@ -254,7 +254,7 @@ func TestPillsAreaHeightAccountsForTodoActivityLines(t *testing.T) {
 	ui.pillsExpanded = true
 	ui.focusedPillSection = pillSectionTodos
 
-	require.Equal(t, pillHeightWithBorder+4, ui.pillsAreaHeight())
+	require.Equal(t, pillHeightWithBorder+3, ui.pillsAreaHeight())
 }
 
 func TestSupportedImageMimeOfRejectsEmptyData(t *testing.T) {

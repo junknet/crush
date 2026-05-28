@@ -233,6 +233,37 @@ func TestThinkingWindow_TailWindowed(t *testing.T) {
 		K, K)
 }
 
+// TestThinkingWindow_ActiveThinkingTruncated verifies that a thinking
+// block IS truncated even while actively thinking, using the new
+// assistantMessageStreamingTruncateFormat.
+func TestThinkingWindow_ActiveThinkingTruncated(t *testing.T) {
+	t.Parallel()
+
+	sty := styles.CharmtonePantera()
+	// Build a message with 50 lines but FinishedAt = 0 (still thinking).
+	msg := thinkingMessageWithLines("active", 50)
+	rc := msg.Parts[0].(message.ReasoningContent)
+	rc.FinishedAt = 0
+	msg.Parts[0] = rc
+	item := NewAssistantMessageItem(&sty, msg).(*AssistantMessageItem)
+
+	require.Equal(t, thinkingCollapsed, item.thinkingViewMode)
+
+	const width = 91
+	height := renderedThinkingHeight(t, item, width)
+
+	// It should be truncated now.
+	const upper = maxCollapsedThinkingHeight + 5
+	require.LessOrEqual(t, height, upper,
+		"active thinking must now be truncated; got %d lines", height)
+
+	plain := ansi.Strip(item.thinkingSec.out)
+	require.Contains(t, plain, "earlier thinking lines hidden",
+		"active thinking truncation must show the specific streaming hint")
+	require.Contains(t, plain, "[streaming; click to expand]",
+		"active thinking truncation hint must include the streaming tag")
+}
+
 // TestThinkingWindow_PromoteToFull verifies the cycle continues from
 // tail-window to full expansion: the second toggle drops the
 // affordance, removes the tail slice, and produces a render that

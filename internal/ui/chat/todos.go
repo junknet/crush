@@ -68,7 +68,7 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 		}
 
 		// Default display from params (used when pending or no metadata).
-		ratio := sty.Tool.TodoRatio.Render(fmt.Sprintf("%d/%d", completedCount, len(params.Todos)))
+		ratio := fmt.Sprintf("%d/%d", completedCount, len(params.Todos))
 		headerText = ratio
 		if opts.Compact && inProgressTask != "" {
 			headerText = fmt.Sprintf("%s · %s", ratio, inProgressTask)
@@ -90,18 +90,18 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 					hasStarted := meta.JustStarted != ""
 					allCompleted := meta.Completed == meta.Total
 
-					ratio := sty.Tool.TodoRatio.Render(fmt.Sprintf("%d/%d", meta.Completed, meta.Total))
+					ratio := fmt.Sprintf("%d/%d", meta.Completed, meta.Total)
 					if opts.Compact && hasCompleted && hasStarted {
-						text := sty.Tool.TodoStatusNote.Render(fmt.Sprintf(" · completed %d, starting next", len(meta.JustCompleted)))
+						text := fmt.Sprintf(" · completed %d, starting next", len(meta.JustCompleted))
 						headerText = fmt.Sprintf("%s%s", ratio, text)
 					} else if opts.Compact && hasCompleted {
-						text := sty.Tool.TodoStatusNote.Render(fmt.Sprintf(" · completed %d", len(meta.JustCompleted)))
+						text := fmt.Sprintf(" · completed %d", len(meta.JustCompleted))
 						if allCompleted {
-							text = sty.Tool.TodoStatusNote.Render(" · completed all")
+							text = " · completed all"
 						}
 						headerText = fmt.Sprintf("%s%s", ratio, text)
 					} else if opts.Compact && hasStarted {
-						headerText = fmt.Sprintf("%s%s", ratio, sty.Tool.TodoStatusNote.Render(" · starting task"))
+						headerText = fmt.Sprintf("%s%s", ratio, " · starting task")
 					} else {
 						headerText = ratio
 					}
@@ -132,9 +132,9 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	// Optimization: keep the chat stream clean by hiding the full list body
 	// for intermediate updates. The persistent bottom pill area is the primary
 	// surface for live task tracking. We only show the full list body in the
-	// chat stream when the list is brand new or when it's fully completed.
-	allCompleted := meta.Total > 0 && meta.Completed == meta.Total
-	if body != "" && !meta.IsNew && !allCompleted {
+	// chat stream when the list is brand new. The completion state is visible
+	// in the header ratio and the persistent bottom panel.
+	if body != "" && !meta.IsNew {
 		body = ""
 	}
 
