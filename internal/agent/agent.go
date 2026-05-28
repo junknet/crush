@@ -771,6 +771,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 							"Response truncated before any output",
 							"The model hit its output-token limit while reasoning and produced no text or tool call. The context window is likely full — run /compact or start a new session, and verify the provider's context_window matches the backend's real limit.",
 						)
+						// Treat stream-level output-token exhaustion as a context overflow
+						// so auto-summarize fires the same way the HTTP-level
+						// context_length_exceeded path does (agent.go:972-980).
+						shouldSummarize = true
 					} else {
 						currentAssistant.AddFinish(finishReason, "", "")
 					}
@@ -1596,6 +1600,17 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		}
 	}
 
+	// lastUserMsgIdx is the index of the most recent user message in msgs.
+	// Only that message's images are sent to the model (compressed); all
+	// earlier user messages have their images stripped to prevent base64
+	// blobs from accumulating in the context window across turns.
+	lastUserMsgIdx := -1
+	for i, m := range msgs {
+		if m.Role == message.User {
+			lastUserMsgIdx = i
+		}
+	}
+
 	for i, m := range msgs {
 		if len(m.Parts) == 0 {
 			continue
@@ -1639,8 +1654,30 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			continue
 		}
 		var aiMsgs []fantasy.Message
+		isLastUserMsg := m.Role == message.User && i == lastUserMsgIdx
 		if m.Role == message.User {
-			aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: !supportsImages})
+			if !isLastUserMsg || !supportsImages {
+				// Historical user messages: strip images entirely to avoid
+				// accumulating base64 blobs across turns in the context window.
+				aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: true})
+			} else {
+				// Current-turn user message with a supporting provider:
+				// compress images before sending so large screenshots
+				// (e.g. Android) don't exceed provider inline-data limits.
+				aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: false})
+				for mi := range aiMsgs {
+					for pi, part := range aiMsgs[mi].Content {
+						if fp, ok := part.(fantasy.FilePart); ok {
+							compressed, outMime := compressImageForLLM(fp.Data, fp.MediaType)
+							aiMsgs[mi].Content[pi] = fantasy.FilePart{
+								Filename:  fp.Filename,
+								Data:      compressed,
+								MediaType: outMime,
+							}
+						}
+					}
+				}
+			}
 		} else {
 			aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: true})
 		}
@@ -2358,8 +2395,18 @@ func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) mes
 //	BEFORE: [tool result: image data]
 //	AFTER:  [tool result: "Image loaded - see attached"], [user: image attachment]
 func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Message, providerType catwalk.Type) []fantasy.Message {
+	// Providers that natively accept media in tool result messages.
+	// Anthropic and Bedrock accept images inside functionResult blocks.
+	// Antigravity (Gemini via cloudcode) also accepts inline images in
+	// user messages (inlineData) — the workaround's injected user message
+	// path works for OpenAI-compat providers but Gemini does NOT need the
+	// translation because its functionResponse.response is a free-form
+	// object. We keep antigravity here so tool-result media stays in the
+	// functionResponse envelope rather than being hoisted to a user turn,
+	// which confuses Gemini's alternating-role requirement.
 	providerSupportsMedia := providerType == catwalk.Type(catwalk.InferenceProviderAnthropic) ||
-		providerType == catwalk.Type(catwalk.InferenceProviderBedrock)
+		providerType == catwalk.Type(catwalk.InferenceProviderBedrock) ||
+		providerType == catwalk.Type(antigravity.Name)
 
 	if providerSupportsMedia {
 		return messages
