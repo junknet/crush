@@ -129,9 +129,12 @@ func (t *TodosToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 		return joinToolParts(header, earlyState)
 	}
 
-	if body != "" && !meta.IsNew && opts.IsSpinning {
-		// Updates to existing todo lists are shown in the bottom panel;
-		// keep the chat stream clean by only showing the summary header.
+	// Optimization: keep the chat stream clean by hiding the full list body
+	// for intermediate updates. The persistent bottom pill area is the primary
+	// surface for live task tracking. We only show the full list body in the
+	// chat stream when the list is brand new or when it's fully completed.
+	allCompleted := meta.Total > 0 && meta.Completed == meta.Total
+	if body != "" && !meta.IsNew && !allCompleted {
 		body = ""
 	}
 

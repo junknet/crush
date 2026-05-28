@@ -622,10 +622,36 @@ func toolParamList(sty *styles.Styles, params []string, width int) string {
 	// ratio with TodoRatio), do not re-render with ParamMain — lipgloss
 	// would wrap the styled string in another reset and the inner SGR
 	// leaks as visible text. Pass styled strings through untouched.
-	if strings.Contains(output, "\x1b") || strings.Contains(output, "[38;2;") {
+	// We also detect "broken" sequences (missing ESC but having CSI '[')
+	// which commonly occur when ANSI-stripping tools are over-aggressive.
+	if strings.Contains(output, "\x1b") {
 		return output
 	}
+	if strings.Contains(output, "[38;2;") || strings.Contains(output, "[1m") || strings.Contains(output, "[22m") {
+		// Found broken ANSI fragments. Strip them entirely to avoid literal leakage.
+		return sty.Tool.ParamMain.Render(stripBrokenAnsi(output))
+	}
 	return sty.Tool.ParamMain.Render(output)
+}
+
+func stripBrokenAnsi(s string) string {
+	// Simple heuristic to strip fragments like [38;2;0;122;184m and [m
+	var sb strings.Builder
+	inSequence := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '[' && (i+1 < len(s)) && (s[i+1] >= '0' && s[i+1] <= '9' || s[i+1] == 'm' || s[i+1] == '?') {
+			inSequence = true
+			continue
+		}
+		if inSequence {
+			if s[i] == 'm' {
+				inSequence = false
+			}
+			continue
+		}
+		sb.WriteByte(s[i])
+	}
+	return sb.String()
 }
 
 // toolHeader builds the tool header line: "● ToolName params..."
