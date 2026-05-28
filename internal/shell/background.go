@@ -134,6 +134,20 @@ type BackgroundShellStats struct {
 // job ID is unambiguous in logs and cross-workspace events.
 var idCounter atomic.Uint64
 
+// NextJobID returns a globally unique background job ID, shared with the
+// BackgroundShellManager so agent background jobs and shell background jobs
+// never collide in IDs.
+func NextJobID() uint64 {
+	return idCounter.Add(1)
+}
+
+// PublishBackgroundDone publishes a BackgroundKindDone event on the shared
+// broker so any subscriber (coordinator event loop, UI) is notified that an
+// agent background job has finished.
+func PublishBackgroundDone(ev BackgroundJobEvent) {
+	backgroundBroker.Publish(pubsub.CreatedEvent, ev)
+}
+
 // NewBackgroundShellManager creates a BackgroundShellManager. Each App (one
 // per workspace/cwd) owns exactly one, so List/KillAll/KillBySession are
 // naturally scoped to that workspace's jobs and never reach across workspaces.

@@ -89,10 +89,12 @@ var (
 	orphanThinkTagRegex = regexp.MustCompile(`</?think>`)
 )
 
+// agentCtxKey is an unexported key type for values stored in agent contexts.
 type agentCtxKey string
 
 const (
-	systemPromptCtxKey agentCtxKey = "agent:system"
+	systemPromptCtxKey       agentCtxKey = "agent:system"
+	todoContinuationDepthKey agentCtxKey = "agent:todo_continuation_depth"
 )
 
 // WithSystemPrompt marks the context as a system-initiated agent run.
@@ -102,6 +104,17 @@ func WithSystemPrompt(ctx context.Context) context.Context {
 
 func isSystemPrompt(ctx context.Context) bool {
 	v, _ := ctx.Value(systemPromptCtxKey).(bool)
+	return v
+}
+
+// withTodoContinuationDepth stores the current todo-continuation depth in ctx.
+func withTodoContinuationDepth(ctx context.Context, depth int) context.Context {
+	return context.WithValue(ctx, todoContinuationDepthKey, depth)
+}
+
+// todoContinuationDepthFromCtx returns the current todo-continuation depth (0 if unset).
+func todoContinuationDepthFromCtx(ctx context.Context) int {
+	v, _ := ctx.Value(todoContinuationDepthKey).(int)
 	return v
 }
 

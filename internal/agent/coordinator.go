@@ -723,20 +723,47 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			go c.triggerMemoryExtraction(context.Background(), sid)
 
 			// Auto-continuation if todos are unfinished.
-			// Handled in a separate goroutine so we don't block the current Run return.
-			go c.triggerTodoContinuation(context.Background(), sid)
+			// Only fire when the run produced a real result (queued/nil means the
+			// actual execution is still happening inside another turn's drain).
+			if result != nil {
+				nextDepth := todoContinuationDepthFromCtx(ctx) + 1
+				nextCtx := withTodoContinuationDepth(context.Background(), nextDepth)
+				go c.triggerTodoContinuation(nextCtx, sid)
+			}
 		}
 	}
 
 	return result, originalErr
 }
 
+// maxTodoContinuationDepth caps recursive todo-continuation runs. Each
+// continuation is system-initiated; without this cap a brain that never
+// calls the todos tool would loop forever.
+const maxTodoContinuationDepth = 3
+
 func (c *coordinator) triggerTodoContinuation(ctx context.Context, sessionID string) {
-	// Give the system a moment to settle (DB writes, etc.)
-	time.Sleep(100 * time.Millisecond)
+	depth := todoContinuationDepthFromCtx(ctx)
+	if depth > maxTodoContinuationDepth {
+		slog.Warn("待办事项自动续期已达最大深度，停止循环",
+			"session_id", sessionID, "max_depth", maxTodoContinuationDepth)
+		return
+	}
+
+	// Wait until the session is no longer busy so the continuation Run goes
+	// straight to execution instead of being queued and silently dropped when
+	// result==nil blocks the next depth trigger.
+	for i := 0; i < 50; i++ { // up to 5 seconds (50 × 100 ms)
+		time.Sleep(100 * time.Millisecond)
+		if agent := c.agentForProfile(scheduler.ProfileBrainAgent); agent != nil {
+			if !agent.IsSessionBusy(sessionID) {
+				break
+			}
+		}
+	}
 
 	sess, err := c.sessions.Get(ctx, sessionID)
 	if err != nil {
+		slog.Error("待办事项续期：获取 session 失败", "session_id", sessionID, "error", err)
 		return
 	}
 
@@ -750,11 +777,7 @@ func (c *coordinator) triggerTodoContinuation(ctx context.Context, sessionID str
 		if t.Status == session.TodoStatusPending || t.Status == session.TodoStatusInProgress {
 			hasIncomplete = true
 			status := string(t.Status)
-			if t.Status == session.TodoStatusInProgress && t.ActiveForm != "" {
-				fmt.Fprintf(&incompleteList, "- [%s] %s (活动中: %s)\n", status, t.Content, t.ActiveForm)
-			} else {
-				fmt.Fprintf(&incompleteList, "- [%s] %s\n", status, t.Content)
-			}
+			fmt.Fprintf(&incompleteList, "- [%s] %s\n", status, t.Content)
 		}
 	}
 
@@ -762,18 +785,37 @@ func (c *coordinator) triggerTodoContinuation(ctx context.Context, sessionID str
 		return
 	}
 
+	// Prompt explicitly requires todos tool invocation — plain text responses
+	// without tool calls are rejected by the next continuation check.
 	prompt := fmt.Sprintf(
-		"你的待办事项列表中还有未完成的任务。请继续工作直到所有项都被标记为已完成或失败。\n\n"+
+		"[系统自动续期 — 第 %d/%d 次，不是新用户请求]\n\n"+
+			"你的待办事项列表中还有未完成的任务：\n\n"+
 			"<current_todos>\n%s</current_todos>\n\n"+
-			"这是系统自动发起的继续指令，不是新的用户请求。请专注于完成上述任务。",
+			"**必须操作**：\n"+
+			"1. 继续执行每项未完成的任务\n"+
+			"2. 每完成一项，立即调用 `todos` 工具将其状态改为 `completed`\n"+
+			"3. 无法完成的项改为 `failed` 并说明原因\n"+
+			"4. **不要只输出文字说明**，必须调用 `todos` 工具更新状态，否则系统会继续注入续期指令",
+		depth+1, maxTodoContinuationDepth,
 		incompleteList.String())
 
-	slog.Debug("待办事项未完成，自动发起继续指令", "session_id", sessionID)
+	slog.Info("待办事项未完成，自动注入续期指令",
+		"session_id", sessionID, "depth", depth+1, "incomplete_count", strings.Count(incompleteList.String(), "\n"))
 
-	// Use WithSystemPrompt to mark this as a system-initiated run.
-	if _, err := c.Run(WithSystemPrompt(ctx), sessionID, prompt, false); err != nil {
-		slog.Error("待办事项自动继续运行失败", "session_id", sessionID, "error", err)
+	result, err := c.Run(WithSystemPrompt(withTodoContinuationDepth(ctx, depth+1)), sessionID, prompt, false)
+	if err != nil {
+		slog.Error("待办事项续期运行失败", "session_id", sessionID, "depth", depth+1, "error", err)
+		return
 	}
+	if result == nil {
+		// result==nil means the call was queued into another in-flight turn;
+		// that turn's own post-run hook will re-evaluate todos, so stop here.
+		slog.Debug("待办事项续期被队列吸收，由当前 turn 处理", "session_id", sessionID)
+		return
+	}
+	// The continuation run itself will fire another triggerTodoContinuation
+	// via the post-run hook at L720-728, with depth+1 threaded via context.
+	// We rely on that path; no explicit recursive call here.
 }
 
 // TraceEntries returns the trace entries recorded by the most recent run.
