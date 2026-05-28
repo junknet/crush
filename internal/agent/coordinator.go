@@ -2772,6 +2772,20 @@ func (c *coordinator) triggerMemoryExtraction(ctx context.Context, sessionID str
 	// the full token-heavy history.
 	ephemeralID := sessionID + "-mem-extract-" + startedAt.Format("20060102T150405")
 
+	// Create the ephemeral session row so that sessionAgent.Run can call
+	// sessions.Get(ephemeralID) without hitting "sql: no rows in result set".
+	// The row is deleted at the end of extraction regardless of success/failure.
+	if _, err := c.sessions.CreateTaskSession(ctx, ephemeralID, sessionID, "memory-extraction"); err != nil {
+		slog.Error("Failed to create ephemeral memory session", "session", sessionID, "ephemeral_id", ephemeralID, "error", err)
+		c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemorySaveFailed, memoryTraceOptions{
+			sessionID:  sessionID,
+			startedAt:  startedAt,
+			finishedAt: time.Now(),
+			err:        fmt.Errorf("create ephemeral session: %w", err),
+		})
+		return
+	}
+
 	// Embed a plain-text summary of the recent conversation (capped at 30 KB)
 	// so the extract agent knows what happened without seeing tool-result blobs.
 	recentCtx := buildRecentSessionMemoryContext(msgs, state.LastMessageID)

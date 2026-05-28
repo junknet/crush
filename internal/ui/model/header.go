@@ -18,6 +18,7 @@ import (
 const (
 	headerDiag           = "╱"
 	minHeaderDiags       = 3
+	maxHeaderDiags       = 60 // cap slashes on ultrawide terminals
 	leftPadding          = 1
 	rightPadding         = 1
 	diagToDetailsSpacing = 1 // space between diagonal pattern and details section
@@ -140,7 +141,8 @@ func (h *header) drawHeader(
 		diagToDetailsSpacing
 
 	if remainingWidth > 0 {
-		diagsText := strings.Repeat(headerDiag, max(minHeaderDiags, remainingWidth))
+		diagCount := max(minHeaderDiags, min(remainingWidth, maxHeaderDiags))
+		diagsText := strings.Repeat(headerDiag, diagCount)
 		if isBusy {
 			b.WriteString(styles.ApplyScrollingForegroundGrad(
 				t.Header.Diagonals,
