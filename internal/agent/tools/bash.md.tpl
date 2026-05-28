@@ -16,9 +16,9 @@ Common shell builtins and core utils available on Windows.
 </execution_steps>
 
 <usage_notes>
-- Command required, working_dir optional (defaults to current directory)
-- IMPORTANT: Use `rg`/`agent` tools instead of `grep`/`find` commands. Use `view`/`ls` tools instead of `cat`/`head`/`tail`/`ls`.
-- **NEVER use `grep`, `rg`, or `find` under `bash` for repository search**. Use the `rg` tool for content and filenames/paths, and `ast_grep` for structural code search.
+- 命令必填，working_dir 可选（默认当前目录）
+- 重要：用 `rg`/`agent` 工具代替 `grep`/`find` 命令。在**项目目录内**查看文件结构用 `view`/`ls` 工具代替 `cat`/`head`/`tail`/`ls`；对项目目录**外部**（如 `~/Desktop`、`/home`、系统路径）或需要 `-la` 等选项时，直接在 bash 里用 `ls`。
+- **禁止在 bash 里用 `grep`、`rg` 或 `find` 搜索代码库**。代码内容和文件名搜索用 `rg` 工具，结构化代码搜索用 `ast_grep`。
 - **NEVER use foreground sleep polling**: commands like `sleep 10 && status-check`, `sleep 20; job-output`, or long standalone `sleep` are blocked. Use `run_in_background=true` and `monitor`, or `schedule_wakeup` for a pure time delay.
 - Chain with ';' or '&&', avoid newlines except in quoted strings
 - Each command runs in independent shell (no state persistence between calls)

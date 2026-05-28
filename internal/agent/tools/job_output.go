@@ -70,7 +70,12 @@ func NewJobOutputTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool
 			}
 
 			output := strings.Join(outputParts, "\n")
-			output = TruncateOutput(output)
+			// Use head-only preview (BashPreviewBytes = 8 KB) rather than the
+			// full 30 KB TruncateOutput cap. Background job logs are typically
+			// repetitive INFO/HTTP lines; the head captures startup state and
+			// the first error; the tail is usually noise. Keeps each job_output
+			// call lean in the LLM context window.
+			output = headPreview(output)
 
 			metadata := JobOutputResponseMetadata{
 				ShellID:          params.ShellID,

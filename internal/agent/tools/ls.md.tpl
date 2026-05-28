@@ -1,1 +1,1 @@
-List files and directories as a tree; skips hidden files and common system dirs; max {{ .MaxFiles }} files. Use `rg` with `files_only=true` to find files by pattern and `rg` to search contents.
+以树形结构列出项目目录内的文件和子目录；自动跳过隐藏文件和常见系统目录；最多 {{ .MaxFiles }} 个文件。仅用于当前**项目仓库目录**内的结构浏览——对 `~/Desktop`、`/home`、系统路径等项目外部目录，直接用 bash `ls`。按文件名搜索用 `rg`（`files_only=true`），按内容搜索用 `rg`。
