@@ -79,6 +79,88 @@ func escapeRegexPattern(pattern string) string {
 	return escaped
 }
 
+// isGlobPattern reports whether s looks like a shell glob rather than a regex.
+// Heuristic: contains bare * or ? (glob wildcards) but not regex-only sequences
+// like .* (dot-star), \., \*, or metacharacters +(){}|^$ that indicate a
+// hand-crafted regex.
+func isGlobPattern(s string) bool {
+	if !strings.ContainsAny(s, "*?") {
+		return false
+	}
+	// If it contains .* it's almost certainly a regex, not a glob.
+	if strings.Contains(s, ".*") {
+		return false
+	}
+	// If it contains backslash-escapes or regex-only metacharacters, treat as regex.
+	if strings.ContainsAny(s, "+(){}|^$") {
+		return false
+	}
+	if strings.Contains(s, `\`) {
+		return false
+	}
+	return true
+}
+
+// globToRegex converts a shell glob pattern to an anchored Go regex so LLMs
+// can pass natural patterns like *.go, **/*.ts, src/*.nim without knowing rg
+// internals. The output is always anchored with ^ and $ to prevent substring
+// matches (e.g. *.go must not match src/main.go.bak). Rules:
+//   - ** matches any path segment (including /)
+//   - * matches any non-separator sequence
+//   - ? matches a single non-separator character
+//   - . and other regex metacharacters are escaped
+func globToRegex(glob string) string {
+	var b strings.Builder
+	b.WriteByte('^')
+	i := 0
+	for i < len(glob) {
+		switch {
+		case glob[i] == '*' && i+1 < len(glob) && glob[i+1] == '*':
+			b.WriteString(".*") // ** → match anything including /
+			i += 2
+			if i < len(glob) && glob[i] == '/' {
+				i++ // skip the / after **
+			}
+		case glob[i] == '*':
+			b.WriteString("[^/]*") // * → match non-separator sequence
+			i++
+		case glob[i] == '?':
+			b.WriteString("[^/]") // ? → single non-separator char
+			i++
+		default:
+			// Escape regex metacharacters in the literal part.
+			b.WriteString(regexp.QuoteMeta(string(glob[i])))
+			i++
+		}
+	}
+	b.WriteByte('$')
+	return b.String()
+}
+
+// resolveFilePattern converts whatever the LLM passes as a filename search
+// pattern into a valid Go regex:
+//   - If it looks like a glob (contains * or ?), convert via globToRegex.
+//   - Otherwise treat as a raw regex and validate it compiles.
+func resolveFilePattern(pattern string) (string, error) {
+	if isGlobPattern(pattern) {
+		return globToRegex(pattern), nil
+	}
+	// Validate as regex.
+	if _, err := regexp.Compile(pattern); err != nil {
+		return "", fmt.Errorf("invalid file search pattern %q (not a valid glob or regex): %w", pattern, err)
+	}
+	return pattern, nil
+}
+
+// sanitizeGlobInclude strips leading path separators and ./ prefixes from a
+// glob passed to rg --glob. rg --glob only accepts bare patterns like *.go;
+// patterns like ./src/*.go or /src/*.go cause rg to silently match nothing.
+func sanitizeGlobInclude(include string) string {
+	include = strings.TrimPrefix(include, "./")
+	include = strings.TrimPrefix(include, "/")
+	return include
+}
+
 func NewRgTool(permissions permission.Service, workingDir string, config config.ToolRg) fantasy.AgentTool {
 	return fantasy.NewParallelAgentTool(
 		RgToolName,
@@ -184,7 +266,7 @@ func RgSearch(ctx context.Context, pattern, path, include string, limit int) ([]
 
 	args := []string{"--json", "-H", "-n", "-0", pattern}
 	if include != "" {
-		args = append(args, "--glob", include)
+		args = append(args, "--glob", sanitizeGlobInclude(include))
 	}
 	args = append(args, path)
 
@@ -253,24 +335,39 @@ func RgSearchFiles(ctx context.Context, pattern, path, include string, limit int
 	if rgPath == "" {
 		return nil, false, fmt.Errorf("ripgrep (rg) not found in $PATH. Filename search is unavailable")
 	}
-	matcher, err := regexp.Compile(pattern)
+	// Auto-convert glob patterns (*.go, **/*.ts) to regex; validate raw regex.
+	resolvedPattern, err := resolveFilePattern(pattern)
+	if err != nil {
+		return nil, false, err
+	}
+	matcher, err := regexp.Compile(resolvedPattern)
 	if err != nil {
 		return nil, false, fmt.Errorf("invalid filename search pattern %q: %w", pattern, err)
 	}
 
 	args := []string{"--files", "--null"}
 	if include != "" {
-		args = append(args, "--glob", include)
+		args = append(args, "--glob", sanitizeGlobInclude(include))
 	}
 	args = append(args, path)
 
 	cmd := exec.CommandContext(ctx, rgPath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			return []RgMatch{}, false, nil
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			ec := exitErr.ExitCode()
+			if ec == 1 {
+				return []RgMatch{}, false, nil // no files found
+			}
+			if ec == 2 {
+				// Some paths unreadable (permission denied, broken symlinks);
+				// stdout still contains valid results for accessible paths.
+				err = nil
+			}
 		}
-		return nil, false, err
+		if err != nil {
+			return nil, false, err
+		}
 	}
 
 	var matches []RgMatch
@@ -279,7 +376,25 @@ func RgSearchFiles(ctx context.Context, pattern, path, include string, limit int
 			continue
 		}
 		filePath := string(p)
-		if !matcher.MatchString(filepath.ToSlash(filePath)) {
+		slashPath := filepath.ToSlash(filePath)
+
+		// Choose the right string to match against:
+		// - Bare patterns (*.go, impl_*) have no / so match against basename.
+		// - Path patterns (src/*.go, **/*.ts) match against the relative path
+		//   from the search root so anchors line up correctly.
+		var matchTarget string
+		if strings.Contains(resolvedPattern, "/") {
+			// Strip the absolute search-root prefix to get a relative path.
+			rel, err := filepath.Rel(path, filePath)
+			if err != nil {
+				rel = slashPath
+			}
+			matchTarget = filepath.ToSlash(rel)
+		} else {
+			matchTarget = filepath.Base(slashPath)
+		}
+
+		if !matcher.MatchString(matchTarget) {
 			continue
 		}
 		matches = append(matches, RgMatch{
