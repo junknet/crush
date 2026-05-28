@@ -2720,17 +2720,19 @@ func (c *coordinator) triggerMemoryExtraction(ctx context.Context, sessionID str
 		startedAt: startedAt,
 	})
 
-	derivedID := sessionID + "-mem-extract"
-	if err := c.sessions.PrepareDerivedSession(ctx, sessionID, derivedID); err != nil {
-		c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemorySaveFailed, memoryTraceOptions{
-			sessionID:  sessionID,
-			startedAt:  startedAt,
-			finishedAt: time.Now(),
-			err:        err,
-		})
-		slog.Debug("Failed to prepare memory extraction session", "session", sessionID, "error", err)
-		return
-	}
+	// Build a fresh ephemeral session ID — no history copy at all.
+	// The original free-code implementation (runForkedAgent) sent only the
+	// extraction prompt; the agent used its tools (rg, view, write) to read
+	// memory files. Copying the full parent session history caused 400 errors
+	// when the parent exceeded Gemini's input token limit (~233K tokens seen
+	// in production). We embed a plain-text tail of the recent conversation
+	// directly in the prompt so the agent has enough context without inheriting
+	// the full token-heavy history.
+	ephemeralID := sessionID + "-mem-extract-" + startedAt.Format("20060102T150405")
+
+	// Embed a plain-text summary of the recent conversation (capped at 30 KB)
+	// so the extract agent knows what happened without seeing tool-result blobs.
+	recentCtx := buildRecentSessionMemoryContext(msgs, state.LastMessageID)
 
 	headers, scanErr := memdir.ScanMemoryFiles(ctx, c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir())
 	if scanErr != nil {
@@ -2739,8 +2741,13 @@ func (c *coordinator) triggerMemoryExtraction(ctx context.Context, sessionID str
 	manifest := memdir.FormatMemoryManifest(headers)
 	extractionPrompt := `You are the background memory extraction agent for this Crush workspace.
 
-Analyze only the recent conversation since the last user request. Persist durable, future-useful information into the workspace memory directory:
+Analyze the recent conversation excerpt below and persist durable, future-useful information into the workspace memory directory:
 ` + memoryDir + `
+
+Recent conversation:
+<recent_conversation>
+` + recentCtx + `
+</recent_conversation>
 
 Existing memory files:
 ` + manifest + `
@@ -2762,7 +2769,7 @@ Memory categories:
 - reference: external facts or tool usage notes that are not obvious from code.
 
 Efficiency rules:
-- Do not investigate source code to verify the conversation. Use only the conversation and existing memory manifest.
+- Use only the conversation excerpt above and the existing memory manifest. Do not investigate source code.
 - If updating existing files, issue all needed view calls in one turn, then all write/edit calls in one turn.
 - Do not create duplicate memories; update the existing topic when possible.
 - Keep MEMORY.md an index, not a dump. Each index line stays under ~150 characters.
@@ -2772,13 +2779,13 @@ Tool policy:
 - Allowed: rg, view, write, edit inside the memory directory.
 - Forbidden: writes outside the memory directory, mutating shell, agent spawning, unrelated tools.`
 
-	slog.Debug("Starting background memory extraction", "session", sessionID)
+	slog.Debug("Starting background memory extraction", "session", sessionID, "ephemeral_id", ephemeralID)
 
 	runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
 	_, err = exploreAgent.Run(runCtx, SessionAgentCall{
-		SessionID: derivedID,
+		SessionID: ephemeralID,
 		Prompt:    extractionPrompt,
 	})
 	if err != nil {
@@ -2807,7 +2814,7 @@ Tool policy:
 		slog.Debug("Background memory extraction finished successfully", "session", sessionID)
 	}
 
-	_ = c.sessions.Delete(runCtx, derivedID)
+	_ = c.sessions.Delete(runCtx, ephemeralID)
 }
 
 func hasMemoryWrites(msgs []message.Message, memoryDir string) bool {
