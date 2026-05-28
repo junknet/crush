@@ -168,9 +168,12 @@ func ListDirectoryTree(ctx context.Context, searchPath string, params LSParams, 
 	cmd.Stdout = &stdout
 	err := cmd.Run()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+		if exitErr, ok := err.(*exec.ExitError); !ok || (exitErr.ExitCode() != 1 && exitErr.ExitCode() != 2) {
 			return "", LSResponseMetadata{}, fmt.Errorf("ripgrep error: %w", err)
 		}
+		// exit 1 = no matches (normal); exit 2 = some paths were unreadable
+		// (permission denied, broken symlinks, etc.) but stdout still contains
+		// valid results for the paths that were accessible.
 	}
 
 	outputBytes := stdout.Bytes()

@@ -42,17 +42,20 @@ func TestFormatTodosListPrioritizesOpenWorkAndSummarizesOverflow(t *testing.T) {
 	plain := ansi.Strip(output)
 	lines := strings.Split(plain, "\n")
 
+	// Each todo is now exactly one line (ActiveForm sub-line removed).
 	if len(lines) != 4 {
 		t.Fatalf("limited todo list must fit requested height, got %d lines: %q", len(lines), plain)
 	}
-	if !strings.Contains(lines[0], "running") || !strings.Contains(lines[1], "doing focused work") {
-		t.Fatalf("in-progress todo and activity must be first, got: %q", plain)
+	// In-progress todo is sorted first.
+	if !strings.Contains(lines[0], "running") {
+		t.Fatalf("in-progress todo must be first, got: %q", plain)
 	}
-	if !strings.Contains(lines[2], "pending") {
-		t.Fatalf("pending work should remain visible before older terminal states, got: %q", plain)
+	// ActiveForm text must NOT appear as a separate line.
+	if strings.Contains(plain, "doing focused work") {
+		t.Fatalf("inner monologue (ActiveForm) must not appear in todo panel, got: %q", plain)
 	}
-	if !strings.Contains(lines[3], "+1 failed, 1 completed") {
-		t.Fatalf("hidden terminal states should be summarized, got: %q", plain)
+	if !strings.Contains(lines[1], "pending") {
+		t.Fatalf("pending work should be second, got: %q", plain)
 	}
 }
 

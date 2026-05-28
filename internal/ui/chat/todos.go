@@ -224,13 +224,7 @@ func formatTodosList(sty *styles.Styles, todos []session.Todo, width int, maxLin
 }
 
 func todosRenderedLineCount(todos []session.Todo) int {
-	count := len(todos)
-	for _, todo := range todos {
-		if todo.Status == session.TodoStatusInProgress && todo.ActiveForm != "" {
-			count++
-		}
-	}
-	return count
+	return len(todos)
 }
 
 func formatTodoItemLines(sty *styles.Styles, todo session.Todo, width int, agentActive bool) []string {
@@ -253,21 +247,7 @@ func formatTodoItemLines(sty *styles.Styles, todo session.Todo, width int, agent
 
 	subjectLine := prefix + textStyle.Render(todo.Content)
 	subjectLine = ansi.Truncate(subjectLine, width, "…")
-	lines := []string{subjectLine}
-
-	// Only render the activity sub-line when the agent is still running;
-	// once idle the activeForm detail is stale and should not be shown.
-	if agentActive && todo.Status == session.TodoStatusInProgress && todo.ActiveForm != "" {
-		activity := todo.ActiveForm
-		if !strings.HasSuffix(activity, "…") && !strings.HasSuffix(activity, "...") {
-			activity += "…"
-		}
-		activityLine := "    " + sty.Tool.TodoItem.Faint(true).Render(activity)
-		activityLine = ansi.Truncate(activityLine, width, "…")
-		lines = append(lines, activityLine)
-	}
-
-	return lines
+	return []string{subjectLine}
 }
 
 func formatHiddenTodosSummary(sty *styles.Styles, todos []session.Todo) string {
