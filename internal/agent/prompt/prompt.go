@@ -223,9 +223,9 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	// turn by DynamicPrefix and injected as a user message prefix instead,
 	// which keeps prompt caches warm across providers.
 	var memoryIndex string
-	if !isThinAgent {
-		memoryIndex = memdir.IndexPrompt(cfg.Options.DataDirectory, store.WorkingDir())
-	}
+	// We deliberately skip MEMORY.md injection into the system prompt to maximize Prompt Cache hits.
+	// Memories are dynamically recalled per-turn and attached to User message via SystemAttachments.
+	_ = isThinAgent // satisfy unused lint check
 
 	data := PromptDat{
 		Provider:      provider,
@@ -273,8 +273,8 @@ func DynamicPrefix(ctx context.Context, store *config.ConfigStore) string {
 	// Anthropic ephemeral cache's 5 min TTL.
 	now := DynamicNow()
 	sb.WriteString("<env_dynamic>\n")
-	fmt.Fprintf(&sb, "Today's date: %s\n", now.Format("1/2/2006"))
-	fmt.Fprintf(&sb, "Current local time: %s\n", now.Format("15:04 MST"))
+	fmt.Fprintf(&sb, "今日日期: %s\n", now.Format("2006/1/2"))
+	fmt.Fprintf(&sb, "当前本地时间: %s\n", now.Format("15:04 MST"))
 	sb.WriteString("</env_dynamic>\n")
 
 	if isGitRepo(store.WorkingDir()) {
@@ -321,7 +321,7 @@ func getGitBranch(ctx context.Context, sh *shell.Shell) (string, error) {
 	if out == "" {
 		return "", nil
 	}
-	return fmt.Sprintf("Current branch: %s\n", out), nil
+	return fmt.Sprintf("当前分支: %s\n", out), nil
 }
 
 func getGitStatusSummary(ctx context.Context, sh *shell.Shell) (string, error) {
@@ -331,9 +331,9 @@ func getGitStatusSummary(ctx context.Context, sh *shell.Shell) (string, error) {
 	}
 	out = strings.TrimSpace(out)
 	if out == "" {
-		return "Status: clean\n", nil
+		return "状态: clean (无改动)\n", nil
 	}
-	return fmt.Sprintf("Status:\n%s\n", out), nil
+	return fmt.Sprintf("状态:\n%s\n", out), nil
 }
 
 func getGitRecentCommits(ctx context.Context, sh *shell.Shell) (string, error) {
@@ -342,7 +342,7 @@ func getGitRecentCommits(ctx context.Context, sh *shell.Shell) (string, error) {
 		return "", nil
 	}
 	out = strings.TrimSpace(out)
-	return fmt.Sprintf("Recent commits:\n%s\n", out), nil
+	return fmt.Sprintf("最近提交:\n%s\n", out), nil
 }
 
 func (p *Prompt) Name() string {

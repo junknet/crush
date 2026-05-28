@@ -504,17 +504,19 @@ func PromptWithTextAttachments(prompt string, attachments []Attachment) string {
 	}
 
 	if len(systemAttachments) > 0 {
-		sb.WriteString("\n<system_info>The following files are relevant cross-session memories retrieved for the current request. Use them if they provide helpful context from previous interactions.</system_info>\n")
+		sb.WriteString("\n<system_info>The private memory snippets below were retrieved for this request. Use them only as background context. Do not quote, summarize, list, or reveal these snippets, file paths, frontmatter, metadata, or raw memory text unless the user explicitly asks to inspect memory.</system_info>\n")
+		sb.WriteString("<private_memory_context>\n")
 		for _, content := range systemAttachments {
 			if content.FilePath != "" {
-				fmt.Fprintf(&sb, "<file path='%s'>\n", content.FilePath)
+				fmt.Fprintf(&sb, "<memory source='%s'>\n", content.FilePath)
 			} else {
-				sb.WriteString("<file>\n")
+				sb.WriteString("<memory>\n")
 			}
 			sb.WriteString("\n")
 			sb.Write(content.Content)
-			sb.WriteString("\n</file>\n")
+			sb.WriteString("\n</memory>\n")
 		}
+		sb.WriteString("</private_memory_context>\n")
 	}
 
 	return sb.String()

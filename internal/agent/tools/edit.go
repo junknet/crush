@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/diff"
@@ -207,21 +206,6 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for deleting content")
 	}
 
-	lastRead := edit.filetracker.LastReadTime(edit.ctx, sessionID, filePath)
-	if lastRead.IsZero() {
-		return fantasy.NewTextErrorResponse("you must read the file before editing it. Use the View tool first"), nil
-	}
-
-	modTime := fileInfo.ModTime().Truncate(time.Second)
-	if modTime.After(lastRead) {
-		return fantasy.NewTextErrorResponse(
-			fmt.Sprintf(
-				"file %s has been modified since it was last read (mod time: %s, last read: %s)",
-				filePath, modTime.Format(time.RFC3339), lastRead.Format(time.RFC3339),
-			),
-		), nil
-	}
-
 	content, err := CtxReadFile(edit.ctx, filePath)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to read file: %w", err)
@@ -348,21 +332,6 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 	sessionID := GetSessionFromContext(edit.ctx)
 	if sessionID == "" {
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for edit a file")
-	}
-
-	lastRead := edit.filetracker.LastReadTime(edit.ctx, sessionID, filePath)
-	if lastRead.IsZero() {
-		return fantasy.NewTextErrorResponse("you must read the file before editing it. Use the View tool first"), nil
-	}
-
-	modTime := fileInfo.ModTime().Truncate(time.Second)
-	if modTime.After(lastRead) {
-		return fantasy.NewTextErrorResponse(
-			fmt.Sprintf(
-				"file %s has been modified since it was last read (mod time: %s, last read: %s)",
-				filePath, modTime.Format(time.RFC3339), lastRead.Format(time.RFC3339),
-			),
-		), nil
 	}
 
 	content, err := CtxReadFile(edit.ctx, filePath)

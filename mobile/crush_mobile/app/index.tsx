@@ -8,6 +8,7 @@ import {
     Clipboard,
     Dimensions,
     FlatList,
+    Keyboard,
     KeyboardAvoidingView,
     LayoutAnimation,
     Linking,
@@ -35,6 +36,11 @@ import {
     PermissionRequest,
     Session,
 } from '@lib/crush/api'
+import {
+    deleteSessionMessageCache,
+    readSessionMessageCache,
+    writeSessionMessageCache,
+} from '@lib/crush/session_message_cache'
 import {
     checkForMobileUpdate,
     downloadAndOpenAndroidUpdate,
@@ -381,7 +387,10 @@ const HighlightedCode = React.memo(
                 if (state.type === 'comment_block') {
                     const endIdx = remaining.indexOf(state.endDelimiter)
                     if (endIdx !== -1) {
-                        const commentText = remaining.substring(0, endIdx + state.endDelimiter.length)
+                        const commentText = remaining.substring(
+                            0,
+                            endIdx + state.endDelimiter.length
+                        )
                         const tok: Token = { text: commentText, type: 'comment' }
                         lineTokens.push(tok)
                         index += endIdx + state.endDelimiter.length
@@ -399,7 +408,10 @@ const HighlightedCode = React.memo(
                 if (state.type === 'string_block') {
                     const endIdx = remaining.indexOf(state.endDelimiter)
                     if (endIdx !== -1) {
-                        const stringText = remaining.substring(0, endIdx + state.endDelimiter.length)
+                        const stringText = remaining.substring(
+                            0,
+                            endIdx + state.endDelimiter.length
+                        )
                         const tok: Token = { text: stringText, type: 'string' }
                         lineTokens.push(tok)
                         index += endIdx + state.endDelimiter.length
@@ -709,7 +721,18 @@ const HighlightedCode = React.memo(
                 }
             }
 
-            tokenizedLines.push(lineTokens)
+            const compressedTokens: Token[] = []
+            for (const tok of lineTokens) {
+                if (
+                    compressedTokens.length > 0 &&
+                    compressedTokens[compressedTokens.length - 1].type === tok.type
+                ) {
+                    compressedTokens[compressedTokens.length - 1].text += tok.text
+                } else {
+                    compressedTokens.push(tok)
+                }
+            }
+            tokenizedLines.push(compressedTokens)
         }
 
         const getTokenStyle = (type: Token['type']) => {
@@ -751,26 +774,34 @@ const HighlightedCode = React.memo(
             <>
                 {tokenizedLines.map((lineTokens, lineIdx) => {
                     if (lineTokens.length === 0) {
-                        return <Text key={lineIdx} selectable={true}>{'\n'}</Text>
-                    }
-                    return (
-                        <Text key={lineIdx} style={styles.markdownCodeBlockText} numberOfLines={0} selectable={true}>
-                            {lineTokens.map((token, tokenIdx) => (
-                                <Text key={tokenIdx} style={getTokenStyle(token.type)} selectable={true}>
-                                    {token.text}
-                                </Text>
-                            ))}
-                            {lineIdx < tokenizedLines.length - 1 ? '\n' : ''}
+                        return (
+                        <Text key={lineIdx}>
+                            {'\n'}
                         </Text>
                     )
-                })}
-            </>
-        )
-    },
-    (prev, next) => prev.code === next.code && prev.lang === next.lang
+                }
+                return (
+                    <Text
+                        key={lineIdx}
+                        style={styles.markdownCodeBlockText}
+                        numberOfLines={0}>
+                        {lineTokens.map((token, tokenIdx) => (
+                            <Text
+                                key={tokenIdx}
+                                style={getTokenStyle(token.type)}>
+                                {token.text}
+                            </Text>
+                        ))}
+                        {lineIdx < tokenizedLines.length - 1 ? '\n' : ''}
+                    </Text>
+                )
+            })}
+        </>
+    )
+},
+(prev, next) => prev.code === next.code && prev.lang === next.lang
 )
 HighlightedCode.displayName = 'HighlightedCode'
-
 
 // Sub-component for Markdown code blocks with copy & collapse
 const MarkdownCodeBlock = React.memo(
@@ -837,7 +868,10 @@ const MarkdownCodeBlock = React.memo(
                 {needsFolding && (
                     <Pressable
                         onPress={toggle}
-                        style={({ pressed }) => [styles.expandCodeButton, pressed && styles.pressed]}>
+                        style={({ pressed }) => [
+                            styles.expandCodeButton,
+                            pressed && styles.pressed,
+                        ]}>
                         <Text style={styles.expandCodeText}>
                             {expanded ? '收起代码' : `展开代码 (余下 ${lines.length - 12} 行)`}
                         </Text>
@@ -849,7 +883,6 @@ const MarkdownCodeBlock = React.memo(
     (prev, next) => prev.code === next.code && prev.lang === next.lang && prev.flat === next.flat
 )
 MarkdownCodeBlock.displayName = 'MarkdownCodeBlock'
-
 
 // Sub-component for Markdown tables
 const MarkdownTable = React.memo(
@@ -878,9 +911,7 @@ const MarkdownTable = React.memo(
                                     styles.markdownTableHeaderCell,
                                     idx === 0 && { borderLeftWidth: 0 },
                                 ]}>
-                                <Text
-                                    style={[styles.markdownTableHeaderText]}
-                                    selectable={true}>
+                                <Text style={[styles.markdownTableHeaderText]}>
                                     {renderMarkdownInline(cell.trim(), flat)}
                                 </Text>
                             </View>
@@ -902,7 +933,7 @@ const MarkdownTable = React.memo(
                                         styles.markdownTableCell,
                                         cellIdx === 0 && { borderLeftWidth: 0 },
                                     ]}>
-                                    <Text style={styles.markdownTableCellText} selectable={true}>
+                                    <Text style={styles.markdownTableCellText}>
                                         {renderMarkdownInline(cell.trim(), flat)}
                                     </Text>
                                 </View>
@@ -926,7 +957,6 @@ const MarkdownTable = React.memo(
     }
 )
 MarkdownTable.displayName = 'MarkdownTable'
-
 
 // Sub-component for lightweight Markdown rendering
 const preprocessCache = new Map<string, string>()
@@ -956,17 +986,17 @@ const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
     if (cached) return cached
 
     const tokens = inlineText.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`|\[[^\]]+\]\([^)]+\))/g)
-    const result = tokens.map((token, idx) => {
+        const result = tokens.map((token, idx) => {
         if (token.startsWith('**') && token.endsWith('**')) {
             return (
-                <Text key={idx} style={{ fontWeight: 'bold', color: '#f8fafc' }} selectable={true}>
+                <Text key={idx} style={{ fontWeight: 'bold', color: '#f8fafc' }}>
                     {token.slice(2, -2)}
                 </Text>
             )
         }
         if (token.startsWith('*') && token.endsWith('*')) {
             return (
-                <Text key={idx} style={{ fontStyle: 'italic', color: '#cbd5e1' }} selectable={true}>
+                <Text key={idx} style={{ fontStyle: 'italic', color: '#cbd5e1' }}>
                     {token.slice(1, -1)}
                 </Text>
             )
@@ -975,7 +1005,6 @@ const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
             return (
                 <Text
                     key={idx}
-                    selectable={true}
                     style={[
                         styles.markdownInlineCode,
                         flat && {
@@ -996,7 +1025,6 @@ const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
                 return (
                     <Text
                         key={idx}
-                        selectable={true}
                         style={{ color: '#38bdf8', textDecorationLine: 'underline' }}
                         onPress={() => {
                             Linking.openURL(url).catch((err) =>
@@ -1009,7 +1037,7 @@ const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
             }
         }
         return (
-            <Text key={idx} selectable={true}>
+            <Text key={idx}>
                 {token}
             </Text>
         )
@@ -1066,7 +1094,6 @@ const MarkdownDetails = React.memo(
     (prev, next) => prev.block === next.block && prev.flat === next.flat
 )
 MarkdownDetails.displayName = 'MarkdownDetails'
-
 
 // Sub-component for lightweight Markdown rendering
 const MarkdownText = React.memo(
@@ -1174,7 +1201,7 @@ const MarkdownText = React.memo(
                                         ? styles.markdownH3
                                         : styles.markdownH4
                             renderedLines.push(
-                                <Text key={lineIdx} style={[headingStyle, style]} selectable={true}>
+                                <Text key={lineIdx} style={[headingStyle, style]}>
                                     {renderInline(content)}
                                 </Text>
                             )
@@ -1197,7 +1224,7 @@ const MarkdownText = React.memo(
                                             marginVertical: 2,
                                         },
                                     ]}>
-                                    <Text style={styles.markdownBlockquoteText} selectable={true}>
+                                    <Text style={styles.markdownBlockquoteText}>
                                         {renderInline(content)}
                                     </Text>
                                 </View>
@@ -1233,12 +1260,11 @@ const MarkdownText = React.memo(
                                         styles.markdownListItemRow,
                                         { paddingLeft: Math.max(8, indent) },
                                     ]}>
-                                    <Text style={styles.markdownListBullet} selectable={true}>
+                                    <Text style={styles.markdownListBullet}>
                                         •
                                     </Text>
                                     <Text
-                                        style={[styles.markdownListItemText, style]}
-                                        selectable={true}>
+                                        style={[styles.markdownListItemText, style]}>
                                         {renderInline(content)}
                                     </Text>
                                 </View>
@@ -1258,12 +1284,11 @@ const MarkdownText = React.memo(
                                         styles.markdownListItemRow,
                                         { paddingLeft: Math.max(8, indent) },
                                     ]}>
-                                    <Text style={styles.markdownListNum} selectable={true}>
+                                    <Text style={styles.markdownListNum}>
                                         {num}.
                                     </Text>
                                     <Text
-                                        style={[styles.markdownListItemText, style]}
-                                        selectable={true}>
+                                        style={[styles.markdownListItemText, style]}>
                                         {renderInline(content)}
                                     </Text>
                                 </View>
@@ -1274,8 +1299,7 @@ const MarkdownText = React.memo(
                         renderedLines.push(
                             <Text
                                 key={lineIdx}
-                                style={[styles.markdownParagraph, style]}
-                                selectable={true}>
+                                style={[styles.markdownParagraph, style]}>
                                 {renderInline(line)}
                             </Text>
                         )
@@ -1294,7 +1318,6 @@ const MarkdownText = React.memo(
     (prev, next) => prev.text === next.text && prev.flat === next.flat
 )
 MarkdownText.displayName = 'MarkdownText'
-
 
 // Sub-component for Collapsible Thinking Process
 const ThinkingPart = React.memo(
@@ -1354,7 +1377,6 @@ const ThinkingPart = React.memo(
 )
 ThinkingPart.displayName = 'ThinkingPart'
 
-
 interface AnsiState {
     bold: boolean
     underline: boolean
@@ -1386,61 +1408,91 @@ const ANSI_COLORS: Record<string, string> = {
     '97': '#ffffff',
 }
 
-const AnsiText = ({ text, style }: { text: string; style?: any }) => {
-    const tokens = text.split(/(\u001b\[[0-9;]*m|\x1b\[[0-9;]*m)/g)
-    const elements: React.ReactNode[] = []
-    let currentState = defaultAnsiState()
+const AnsiText = React.memo(
+    ({ text, style }: { text: string; style?: any }) => {
+        const tokens = text.split(/(\u001b\[[0-9;]*m|\x1b\[[0-9;]*m)/g)
+        const elements: React.ReactNode[] = []
+        let currentState = defaultAnsiState()
 
-    tokens.forEach((token, index) => {
-        if (token.startsWith('\u001b[') || token.startsWith('\x1b[')) {
-            const code = token.slice(2, -1)
-            if (code === '0' || code === '') {
-                currentState = defaultAnsiState()
-            } else {
-                const parts = code.split(';')
-                parts.forEach((p) => {
-                    if (p === '1') {
-                        currentState.bold = true
-                    } else if (p === '4') {
-                        currentState.underline = true
-                    } else if (p === '22') {
-                        currentState.bold = false
-                    } else if (p === '24') {
-                        currentState.underline = false
-                    } else if (p === '39') {
-                        currentState.color = undefined
-                    } else if (ANSI_COLORS[p]) {
-                        currentState.color = ANSI_COLORS[p]
-                    }
-                })
-            }
-        } else {
-            if (token === '') return
-            const textStyle: any = {
-                fontFamily: 'FiraCode-Regular',
-            }
-            if (currentState.bold) {
-                textStyle.fontWeight = 'bold'
-            }
-            if (currentState.underline) {
-                textStyle.textDecorationLine = 'underline'
-            }
-            if (currentState.color) {
-                textStyle.color = currentState.color
-            } else {
-                textStyle.color = style?.color || '#cbd5e1'
-            }
+        let currentText = ''
+        let currentStyle: any = null
 
-            elements.push(
-                <Text key={index} style={textStyle}>
-                    {token}
-                </Text>
-            )
+        const flush = (key: string | number) => {
+            if (currentText) {
+                elements.push(
+                    <Text key={key} style={currentStyle}>
+                        {currentText}
+                    </Text>
+                )
+                currentText = ''
+            }
         }
-    })
 
-    return <Text style={style} selectable={true}>{elements}</Text>
-}
+        tokens.forEach((token, index) => {
+            if (token.startsWith('\u001b[') || token.startsWith('\x1b[')) {
+                const code = token.slice(2, -1)
+                flush(`f-${index}`)
+                if (code === '0' || code === '') {
+                    currentState = defaultAnsiState()
+                } else {
+                    const parts = code.split(';')
+                    parts.forEach((p) => {
+                        if (p === '1') {
+                            currentState.bold = true
+                        } else if (p === '4') {
+                            currentState.underline = true
+                        } else if (p === '22') {
+                            currentState.bold = false
+                        } else if (p === '24') {
+                            currentState.underline = false
+                        } else if (p === '39') {
+                            currentState.color = undefined
+                        } else if (ANSI_COLORS[p]) {
+                            currentState.color = ANSI_COLORS[p]
+                        }
+                    })
+                }
+            } else {
+                if (token === '') return
+                const textStyle: any = {
+                    fontFamily: 'FiraCode-Regular',
+                }
+                if (currentState.bold) {
+                    textStyle.fontWeight = 'bold'
+                }
+                if (currentState.underline) {
+                    textStyle.textDecorationLine = 'underline'
+                }
+                if (currentState.color) {
+                    textStyle.color = currentState.color
+                } else {
+                    textStyle.color = style?.color || '#cbd5e1'
+                }
+
+                // Check if style changed
+                const styleChanged =
+                    !currentStyle ||
+                    currentStyle.fontWeight !== textStyle.fontWeight ||
+                    currentStyle.textDecorationLine !== textStyle.textDecorationLine ||
+                    currentStyle.color !== textStyle.color
+
+                if (styleChanged) {
+                    flush(`s-${index}`)
+                    currentStyle = textStyle
+                }
+                currentText += token
+            }
+        })
+        flush('final')
+
+        return (
+            <Text style={style} selectable={true}>
+                {elements}
+            </Text>
+        )
+    },
+    (prev, next) => prev.text === next.text && prev.style === next.style
+)
 
 function cleanTerminalOutput(content?: string): string {
     if (!content) return ''
@@ -1948,228 +2000,229 @@ const TerminalSessionCard = React.memo(
         result?: { content?: string; is_error?: boolean }
         onMaximize?: (name: string, input: string, content: string, isError?: boolean) => void
     }) => {
-    const [expanded, setExpanded] = useState(false)
-    const [activeTab, setActiveTab] = useState<'formatted' | 'raw'>('formatted')
+        const [expanded, setExpanded] = useState(false)
+        const [activeTab, setActiveTab] = useState<'formatted' | 'raw'>('formatted')
 
-    const summary = useMemo(() => getToolCallSummary(name, input), [name, input])
+        const summary = useMemo(() => getToolCallSummary(name, input), [name, input])
 
-    const displayableContent = useMemo(() => {
-        return cleanTerminalOutput(result?.content)
-    }, [result?.content])
+        const displayableContent = useMemo(() => {
+            return cleanTerminalOutput(result?.content)
+        }, [result?.content])
 
-    const hasOutput = !!displayableContent
-    const lines = displayableContent ? displayableContent.split('\n') : []
-    const needsTruncation = lines.length > 12 || displayableContent.length > 800
-    const displayContent = expanded ? displayableContent : lines.slice(0, 12).join('\n')
+        const hasOutput = !!displayableContent
+        const lines = displayableContent ? displayableContent.split('\n') : []
+        const needsTruncation = lines.length > 12 || displayableContent.length > 800
+        const displayContent = expanded ? displayableContent : lines.slice(0, 12).join('\n')
 
-    const fileLanguage = useMemo(() => {
-        const parsed = parseJson(input)
-        const filePath = parsed?.AbsolutePath || parsed?.TargetFile || parsed?.path || ''
-        if (filePath) {
-            const ext = filePath.split('.').pop()?.toLowerCase()
-            return ext || 'text'
+        const fileLanguage = useMemo(() => {
+            const parsed = parseJson(input)
+            const filePath = parsed?.AbsolutePath || parsed?.TargetFile || parsed?.path || ''
+            if (filePath) {
+                const ext = filePath.split('.').pop()?.toLowerCase()
+                return ext || 'text'
+            }
+            return 'text'
+        }, [input])
+
+        const isError = result?.is_error || (result as any)?.isError
+
+        const viewType = useMemo(() => {
+            if (!hasOutput) return 'none'
+            if (isError) return 'raw'
+
+            if (name === 'grep_search' || name === 'grep') {
+                const parsed = parseSearchMatches(displayableContent)
+                if (parsed.length > 0) return 'grep'
+            }
+
+            if (name === 'list_dir' || name === 'ls') {
+                const parsed = parseDirectoryTree(displayableContent)
+                if (parsed.length > 0) return 'ls'
+            }
+
+            if (name === 'view_file' || name === 'read_file') {
+                return 'file_view'
+            }
+
+            if (parseTextDiff(displayableContent)) {
+                return 'diff'
+            }
+
+            return 'raw'
+        }, [name, displayableContent, hasOutput, isError])
+
+        const toggleExpand = () => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
+            setExpanded(!expanded)
         }
-        return 'text'
-    }, [input])
 
-    const isError = result?.is_error || (result as any)?.isError
-
-    const viewType = useMemo(() => {
-        if (!hasOutput) return 'none'
-        if (isError) return 'raw'
-
-        if (name === 'grep_search' || name === 'grep') {
-            const parsed = parseSearchMatches(displayableContent)
-            if (parsed.length > 0) return 'grep'
-        }
-
-        if (name === 'list_dir' || name === 'ls') {
-            const parsed = parseDirectoryTree(displayableContent)
-            if (parsed.length > 0) return 'ls'
-        }
-
-        if (name === 'view_file' || name === 'read_file') {
-            return 'file_view'
-        }
-
-        if (parseTextDiff(displayableContent)) {
-            return 'diff'
-        }
-
-        return 'raw'
-    }, [name, displayableContent, hasOutput, isError])
-
-    const toggleExpand = () => {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut)
-        setExpanded(!expanded)
-    }
-
-    return (
-        <View style={[styles.terminalCardContainer, isError && styles.terminalCardError]}>
-            <View style={styles.terminalHeader}>
-                <View style={styles.terminalHeaderLeft}>
-                    <View style={[styles.macDot, { backgroundColor: '#ef4444' }]} />
-                    <View style={[styles.macDot, { backgroundColor: '#f59e0b' }]} />
-                    <View style={[styles.macDot, { backgroundColor: '#10b981' }]} />
+        return (
+            <View style={[styles.terminalCardContainer, isError && styles.terminalCardError]}>
+                <View style={styles.terminalHeader}>
+                    <View style={styles.terminalHeaderLeft}>
+                        <View style={[styles.macDot, { backgroundColor: '#ef4444' }]} />
+                        <View style={[styles.macDot, { backgroundColor: '#f59e0b' }]} />
+                        <View style={[styles.macDot, { backgroundColor: '#10b981' }]} />
+                    </View>
+                    <Text style={styles.terminalHeaderTitle}>{name || 'terminal'}</Text>
+                    <View style={styles.terminalHeaderRight}>
+                        {!finished ? (
+                            <ActivityIndicator size="small" color="#38bdf8" />
+                        ) : isError ? (
+                            <Feather name="alert-triangle" size={12} color="#f87171" />
+                        ) : (
+                            <Feather name="check" size={12} color="#34d399" />
+                        )}
+                        {hasOutput && onMaximize && (
+                            <Pressable
+                                onPress={() =>
+                                    onMaximize(
+                                        name || 'terminal',
+                                        input || '',
+                                        displayableContent,
+                                        isError
+                                    )
+                                }
+                                style={styles.terminalHeaderButton}>
+                                <Feather name="maximize-2" size={11} color="#94a3b8" />
+                            </Pressable>
+                        )}
+                    </View>
                 </View>
-                <Text style={styles.terminalHeaderTitle}>{name || 'terminal'}</Text>
-                <View style={styles.terminalHeaderRight}>
-                    {!finished ? (
-                        <ActivityIndicator size="small" color="#38bdf8" />
-                    ) : isError ? (
-                        <Feather name="alert-triangle" size={12} color="#f87171" />
+
+                <View style={styles.terminalCommandRow}>
+                    <Text style={styles.terminalPrompt}>crush ❯</Text>
+                    {(name === 'bash' || name === 'run_command') && summary.details ? (
+                        <Text style={styles.terminalCommandText} selectable numberOfLines={0}>
+                            <HighlightedCode code={summary.details} lang="bash" />
+                        </Text>
                     ) : (
-                        <Feather name="check" size={12} color="#34d399" />
-                    )}
-                    {hasOutput && onMaximize && (
-                        <Pressable
-                            onPress={() =>
-                                onMaximize(
-                                    name || 'terminal',
-                                    input || '',
-                                    displayableContent,
-                                    isError
-                                )
-                            }
-                            style={styles.terminalHeaderButton}>
-                            <Feather name="maximize-2" size={11} color="#94a3b8" />
-                        </Pressable>
+                        <Text style={styles.terminalCommandText} selectable>
+                            {summary.details || name}
+                        </Text>
                     )}
                 </View>
-            </View>
 
-            <View style={styles.terminalCommandRow}>
-                <Text style={styles.terminalPrompt}>crush ❯</Text>
-                {(name === 'bash' || name === 'run_command') && summary.details ? (
-                    <Text style={styles.terminalCommandText} selectable numberOfLines={0}>
-                        <HighlightedCode code={summary.details} lang="bash" />
-                    </Text>
-                ) : (
-                    <Text style={styles.terminalCommandText} selectable>
-                        {summary.details || name}
-                    </Text>
+                {viewType !== 'raw' && viewType !== 'none' && (
+                    <View style={styles.terminalTabsRow}>
+                        <Pressable
+                            onPress={() => setActiveTab('formatted')}
+                            style={[
+                                styles.terminalTabButton,
+                                activeTab === 'formatted' && styles.terminalTabButtonActive,
+                            ]}>
+                            <Feather
+                                name="eye"
+                                size={11}
+                                color={activeTab === 'formatted' ? '#38bdf8' : '#64748b'}
+                            />
+                            <Text
+                                style={[
+                                    styles.terminalTabText,
+                                    activeTab === 'formatted' && styles.terminalTabTextActive,
+                                ]}>
+                                可视化
+                            </Text>
+                        </Pressable>
+                        <Pressable
+                            onPress={() => setActiveTab('raw')}
+                            style={[
+                                styles.terminalTabButton,
+                                activeTab === 'raw' && styles.terminalTabButtonActive,
+                            ]}>
+                            <Feather
+                                name="terminal"
+                                size={11}
+                                color={activeTab === 'raw' ? '#38bdf8' : '#64748b'}
+                            />
+                            <Text
+                                style={[
+                                    styles.terminalTabText,
+                                    activeTab === 'raw' && styles.terminalTabTextActive,
+                                ]}>
+                                终端日志
+                            </Text>
+                        </Pressable>
+                    </View>
+                )}
+
+                {hasOutput && (
+                    <View style={styles.terminalOutputContainer}>
+                        {activeTab === 'formatted' && viewType !== 'raw' ? (
+                            <View
+                                style={[
+                                    { paddingVertical: 4 },
+                                    needsTruncation &&
+                                        !expanded && { maxHeight: 220, overflow: 'hidden' },
+                                ]}>
+                                {viewType === 'ls' && (
+                                    <DirectoryTreeViewer
+                                        nodes={parseDirectoryTree(displayableContent)}
+                                    />
+                                )}
+                                {viewType === 'grep' && (
+                                    <SearchMatchesViewer
+                                        files={parseSearchMatches(displayableContent)}
+                                    />
+                                )}
+                                {viewType === 'file_view' && (
+                                    <FileContentViewer
+                                        content={displayableContent}
+                                        lang={fileLanguage}
+                                    />
+                                )}
+                                {viewType === 'diff' && (
+                                    <DiffViewer diffLines={parseDiffLines(displayableContent)} />
+                                )}
+                            </View>
+                        ) : (
+                            <ScrollView
+                                horizontal
+                                style={styles.terminalOutputScroll}
+                                contentContainerStyle={{ minWidth: '100%' }}>
+                                <View style={{ flexDirection: 'column' }}>
+                                    <AnsiText
+                                        text={displayContent}
+                                        style={[
+                                            styles.terminalOutputText,
+                                            isError && { color: '#f87171' },
+                                        ]}
+                                    />
+                                </View>
+                            </ScrollView>
+                        )}
+
+                        {needsTruncation && (
+                            <View style={styles.terminalFoldOverlay}>
+                                <Pressable
+                                    onPress={toggleExpand}
+                                    style={styles.terminalExpandButton}>
+                                    <Text style={styles.terminalExpandText}>
+                                        {expanded
+                                            ? '收起输出'
+                                            : activeTab === 'formatted' && viewType !== 'raw'
+                                              ? '展开全部输出...'
+                                              : `展开余下 ${lines.length - 12} 行...`}
+                                    </Text>
+                                </Pressable>
+                            </View>
+                        )}
+                    </View>
                 )}
             </View>
-
-            {viewType !== 'raw' && viewType !== 'none' && (
-                <View style={styles.terminalTabsRow}>
-                    <Pressable
-                        onPress={() => setActiveTab('formatted')}
-                        style={[
-                            styles.terminalTabButton,
-                            activeTab === 'formatted' && styles.terminalTabButtonActive,
-                        ]}>
-                        <Feather
-                            name="eye"
-                            size={11}
-                            color={activeTab === 'formatted' ? '#38bdf8' : '#64748b'}
-                        />
-                        <Text
-                            style={[
-                                styles.terminalTabText,
-                                activeTab === 'formatted' && styles.terminalTabTextActive,
-                            ]}>
-                            可视化
-                        </Text>
-                    </Pressable>
-                    <Pressable
-                        onPress={() => setActiveTab('raw')}
-                        style={[
-                            styles.terminalTabButton,
-                            activeTab === 'raw' && styles.terminalTabButtonActive,
-                        ]}>
-                        <Feather
-                            name="terminal"
-                            size={11}
-                            color={activeTab === 'raw' ? '#38bdf8' : '#64748b'}
-                        />
-                        <Text
-                            style={[
-                                styles.terminalTabText,
-                                activeTab === 'raw' && styles.terminalTabTextActive,
-                            ]}>
-                            终端日志
-                        </Text>
-                    </Pressable>
-                </View>
-            )}
-
-            {hasOutput && (
-                <View style={styles.terminalOutputContainer}>
-                    {activeTab === 'formatted' && viewType !== 'raw' ? (
-                        <View
-                            style={[
-                                { paddingVertical: 4 },
-                                needsTruncation &&
-                                    !expanded && { maxHeight: 220, overflow: 'hidden' },
-                            ]}>
-                            {viewType === 'ls' && (
-                                <DirectoryTreeViewer
-                                    nodes={parseDirectoryTree(displayableContent)}
-                                />
-                            )}
-                            {viewType === 'grep' && (
-                                <SearchMatchesViewer
-                                    files={parseSearchMatches(displayableContent)}
-                                />
-                            )}
-                            {viewType === 'file_view' && (
-                                <FileContentViewer
-                                    content={displayableContent}
-                                    lang={fileLanguage}
-                                />
-                            )}
-                            {viewType === 'diff' && (
-                                <DiffViewer diffLines={parseDiffLines(displayableContent)} />
-                            )}
-                        </View>
-                    ) : (
-                        <ScrollView
-                            horizontal
-                            style={styles.terminalOutputScroll}
-                            contentContainerStyle={{ minWidth: '100%' }}>
-                            <View style={{ flexDirection: 'column' }}>
-                                <AnsiText
-                                    text={displayContent}
-                                    style={[
-                                        styles.terminalOutputText,
-                                        isError && { color: '#f87171' },
-                                    ]}
-                                />
-                            </View>
-                        </ScrollView>
-                    )}
-
-                    {needsTruncation && (
-                        <View style={styles.terminalFoldOverlay}>
-                            <Pressable onPress={toggleExpand} style={styles.terminalExpandButton}>
-                                <Text style={styles.terminalExpandText}>
-                                    {expanded
-                                        ? '收起输出'
-                                        : activeTab === 'formatted' && viewType !== 'raw'
-                                          ? '展开全部输出...'
-                                          : `展开余下 ${lines.length - 12} 行...`}
-                                </Text>
-                            </Pressable>
-                        </View>
-                    )}
-                </View>
-            )}
-        </View>
-    )
-},
-(prev, next) => {
-    if (prev.name !== next.name) return false
-    if (prev.input !== next.input) return false
-    if (prev.finished !== next.finished) return false
-    if (prev.onMaximize !== next.onMaximize) return false
-    if (prev.result?.content !== next.result?.content) return false
-    if (prev.result?.is_error !== next.result?.is_error) return false
-    return true
-}
+        )
+    },
+    (prev, next) => {
+        if (prev.name !== next.name) return false
+        if (prev.input !== next.input) return false
+        if (prev.finished !== next.finished) return false
+        if (prev.onMaximize !== next.onMaximize) return false
+        if (prev.result?.content !== next.result?.content) return false
+        if (prev.result?.is_error !== next.result?.is_error) return false
+        return true
+    }
 )
 TerminalSessionCard.displayName = 'TerminalSessionCard'
-
 
 const FullTerminalModal = ({
     visible,
@@ -2700,6 +2753,7 @@ const MessageItem = React.memo(
 MessageItem.displayName = 'MessageItem'
 
 const CrushMobile = () => {
+    const { height: windowHeight } = useWindowDimensions()
     const insets = useSafeAreaInsets()
     const sendingRef = useRef(false)
     const searchParams = useLocalSearchParams<{ serverUrl?: string | string[] }>()
@@ -2745,6 +2799,7 @@ const CrushMobile = () => {
     const [messages, setMessages] = useState<Message[]>([])
     const [isSyncing, setIsSyncing] = useState(false)
     const syncingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const cacheWriteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const [agentInfo, setAgentInfo] = useState<AgentInfo>({ is_busy: false, is_ready: true })
     // is_busy is the single source of truth from server (turn_started /
     // turn_finished / message-with-finish). Don't gate on last-message-role:
@@ -2762,6 +2817,8 @@ const CrushMobile = () => {
     const [pendingPermissions, setPendingPermissions] = useState<PermissionRequest[]>([])
     const [activities, setActivities] = useState<ActivityEntry[]>([])
     const [input, setInput] = useState('')
+    const [keyboardVisible, setKeyboardVisible] = useState(false)
+    const [keyboardHeight, setKeyboardHeight] = useState(0)
     // zsh-style input history: every successfully-sent prompt is pushed onto
     // inputHistory; ↑/↓ on a hardware/Bluetooth keyboard (and scrcpy-mirrored
     // physical keys) walks the stack into the TextInput. -1 means "below the
@@ -2798,16 +2855,8 @@ const CrushMobile = () => {
 
     const groupedSessions = useMemo(() => {
         const sortedSessions = [...sessions].sort((a, b) => {
-            const timeA =
-                sessionAccessTimes[a.id] ||
-                a.created_at ||
-                a.updated_at ||
-                0
-            const timeB =
-                sessionAccessTimes[b.id] ||
-                b.created_at ||
-                b.updated_at ||
-                0
+            const timeA = sessionAccessTimes[a.id] || a.created_at || a.updated_at || 0
+            const timeB = sessionAccessTimes[b.id] || b.created_at || b.updated_at || 0
             if (timeB !== timeA) return timeB - timeA
             return (a.id || '').localeCompare(b.id || '')
         })
@@ -2949,6 +2998,33 @@ const CrushMobile = () => {
     ).current
 
     const api = useMemo(() => new CrushApi(connectedUrl), [connectedUrl])
+
+    useEffect(() => {
+        return () => {
+            if (cacheWriteTimeoutRef.current) {
+                clearTimeout(cacheWriteTimeoutRef.current)
+                cacheWriteTimeoutRef.current = null
+            }
+        }
+    }, [])
+
+    useEffect(() => {
+        const shown = Keyboard.addListener('keyboardDidShow', (event) => {
+            const h = event.endCoordinates?.height || 0
+            console.log('[KEYBOARD] shown height:', h)
+            setKeyboardVisible(true)
+            setKeyboardHeight(h)
+        })
+        const hidden = Keyboard.addListener('keyboardDidHide', () => {
+            setKeyboardVisible(false)
+            setKeyboardHeight(0)
+        })
+        return () => {
+            shown.remove()
+            hidden.remove()
+        }
+    }, [])
+
     const handleDeleteSession = useCallback(
         async (id: string) => {
             try {
@@ -2957,6 +3033,7 @@ const CrushMobile = () => {
                 setDeletingSessionId(null)
 
                 await api.deleteSession(id)
+                await deleteSessionMessageCache(id)
 
                 if (sessionIDRef.current === id) {
                     setSessions((currentSessions) => {
@@ -3042,9 +3119,11 @@ const CrushMobile = () => {
     const unsubscribeRef = useRef<null | (() => void)>(null)
     const sessionsUnsubRef = useRef<null | (() => void)>(null)
     const cancelRequestedRef = useRef(false)
+    const syncScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
     const flatListRef = useRef<FlatList>(null)
     const isCloseToBottom = useRef(true)
+    const bottomFollowLockedRef = useRef(true)
     const [loadingOlder, setLoadingOlder] = useState(false)
     const [exhaustedHistory, setExhaustedHistory] = useState(false)
     const oldestLoadedTsRef = useRef<number>(0)
@@ -3054,12 +3133,32 @@ const CrushMobile = () => {
     // scrollToEnd animations (which pass through y=0 briefly) cannot
     // trick us into pulling history.
     const userScrollRef = useRef(false)
+    // Tracks the last known FlatList content height so handleContentSizeChange
+    // can ignore spurious callbacks caused by keyboard show/hide (which changes
+    // the FlatList layout size but NOT its content height).
+    const lastContentHeightRef = useRef(0)
+
+    const scrollToBottom = useCallback((animated: boolean) => {
+        if (!flatListRef.current) return
+        flatListRef.current.scrollToEnd({
+            animated: animated && Platform.OS !== 'android',
+        })
+        // Android layout is often async/lazy; a second non-animated pass
+        // ensures we land at the real bottom after the new items render.
+        if (Platform.OS === 'android') {
+            flatListRef.current?.scrollToEnd({ animated: false })
+        }
+    }, [])
 
     const handleScroll = useCallback((event: any) => {
         const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent
         const paddingToBottom = 80
-        isCloseToBottom.current =
+        const closeToBottom =
             layoutMeasurement.height + contentOffset.y >= contentSize.height - paddingToBottom
+        isCloseToBottom.current = closeToBottom
+        if (userScrollRef.current) {
+            bottomFollowLockedRef.current = closeToBottom
+        }
         // Lazy-load only when the user is actively dragging upward and we
         // are near the top. Auto scroll-to-end animations from SSE bursts
         // briefly cross y<200 too, which used to spam loadOlderHistory and
@@ -3072,6 +3171,15 @@ const CrushMobile = () => {
     const handleScrollBeginDrag = useCallback(() => {
         userScrollRef.current = true
     }, [])
+    const handleScrollEndDrag = useCallback((event: any) => {
+        const velocityY = Math.abs(event.nativeEvent?.velocity?.y ?? 0)
+        if (velocityY === 0) {
+            userScrollRef.current = false
+        }
+    }, [])
+    const handleMomentumScrollBegin = useCallback(() => {
+        userScrollRef.current = true
+    }, [])
     const handleMomentumScrollEnd = useCallback(() => {
         userScrollRef.current = false
     }, [])
@@ -3080,6 +3188,28 @@ const CrushMobile = () => {
     // handleEvent (declared later) without TDZ. Set on every render.
     const handleEventRef = useRef<((env: CrushEnvelope) => void) | null>(null)
     const loadOlderHistoryRef = useRef<(() => Promise<void>) | null>(null)
+
+    const projectMessages = useCallback(() => {
+        const out = Array.from(messagesMapRef.current.values())
+        out.sort((left, right) => (left.created_at || 0) - (right.created_at || 0))
+        return out
+    }, [])
+
+    const scheduleMessageCacheWrite = useCallback(
+        (targetSessionID: string, nextMessages: Message[]) => {
+            if (cacheWriteTimeoutRef.current) {
+                clearTimeout(cacheWriteTimeoutRef.current)
+            }
+            cacheWriteTimeoutRef.current = setTimeout(() => {
+                cacheWriteTimeoutRef.current = null
+                const persistentMessages = nextMessages.filter(
+                    (message) => !message.id.startsWith('local-cancel-')
+                )
+                void writeSessionMessageCache(targetSessionID, persistentMessages)
+            }, 250)
+        },
+        []
+    )
 
     // Infinite-scroll-up: pull another 30 min of older history into the
     // existing message Map when the user reaches the top of the list. The
@@ -3095,29 +3225,31 @@ const CrushMobile = () => {
             if (t > 0 && t < oldestTs) oldestTs = t
         }
         if (!isFinite(oldestTs)) return
+        const oldestMessage = Array.from(messagesMapRef.current.values()).find(
+            (message) => message.created_at === oldestTs
+        )
+        if (!oldestMessage) return
         const oldestTsMs = oldestTs * 1000
         if (oldestLoadedTsRef.current && oldestTsMs >= oldestLoadedTsRef.current) {
             return
         }
+        bottomFollowLockedRef.current = false
         oldestLoadedTsRef.current = oldestTsMs
         loadingOlderRef.current = true
         setLoadingOlder(true)
         try {
             const sizeBefore = messagesMapRef.current.size
-            // Use a large window (24h) to avoid sparse-history gaps.
-            // Breaking on pending===0 ensures we don't over-pull.
-            await api.loadOlderHistory(sessionID, oldestTsMs, 24 * 60 * 60 * 1000, (env) => {
-                try {
-                    handleEventRef.current?.(env)
-                } catch (err) {
-                    console.log('loadOlderHistory event handler error:', err)
-                }
-            })
-            const out = Array.from(messagesMapRef.current.values())
-            out.sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
+            const page = await api.loadHistoryBefore(sessionID, oldestMessage.id, oldestTs, 50)
+            for (const message of page.messages) {
+                messagesMapRef.current.set(message.id, message)
+            }
+            console.log(
+                `[HISTORY] loaded_before session=${sessionID} count=${page.messages.length} exhausted=${page.exhausted}`
+            )
+            const out = projectMessages()
             setMessages(out)
-            if (messagesMapRef.current.size === sizeBefore) {
-                // If we found nothing in a 24h window, history is truly exhausted.
+            scheduleMessageCacheWrite(sessionID, out)
+            if (page.exhausted || messagesMapRef.current.size === sizeBefore) {
                 setExhaustedHistory(true)
             }
         } catch (err) {
@@ -3126,14 +3258,35 @@ const CrushMobile = () => {
             loadingOlderRef.current = false
             setLoadingOlder(false)
         }
-    }, [api, sessionID, exhaustedHistory])
+    }, [api, sessionID, exhaustedHistory, projectMessages, scheduleMessageCacheWrite])
     loadOlderHistoryRef.current = loadOlderHistory
 
-    const handleContentSizeChange = useCallback(() => {
-        if (isCloseToBottom.current && !isSyncing) {
-            flatListRef.current?.scrollToEnd({ animated: true })
-        }
-    }, [isSyncing])
+    const handleContentSizeChange = useCallback(
+        (_w: number, h: number) => {
+            // Only scroll when content height actually grew (new message content).
+            // Keyboard show/hide changes FlatList layout but NOT contentSize, so
+            // this guard prevents the spurious scroll-to-top flash on Android that
+            // occurred when the keyboard appeared and triggered onContentSizeChange
+            // with an identical h value.
+            if (h <= lastContentHeightRef.current) return
+            lastContentHeightRef.current = h
+            if (loadingOlderRef.current) return
+            if (bottomFollowLockedRef.current || isCloseToBottom.current) {
+                // During initial sync (isSyncing), use a small delay to
+                // batch multiple content size changes into one scroll.
+                if (isSyncing) {
+                    if (syncScrollTimeoutRef.current) clearTimeout(syncScrollTimeoutRef.current)
+                    syncScrollTimeoutRef.current = setTimeout(() => {
+                        syncScrollTimeoutRef.current = null
+                        scrollToBottom(false)
+                    }, 100)
+                } else {
+                    scrollToBottom(true)
+                }
+            }
+        },
+        [isSyncing, scrollToBottom]
+    )
 
     // Cheap scroll trigger: last message id + part count. JSON.stringify on
     // the whole parts array would re-serialize every streaming token
@@ -3145,13 +3298,12 @@ const CrushMobile = () => {
     }, [messages])
 
     useEffect(() => {
-        if (isCloseToBottom.current && !isSyncing) {
-            const timer = setTimeout(() => {
-                flatListRef.current?.scrollToEnd({ animated: true })
-            }, 50)
-            return () => clearTimeout(timer)
+        if (bottomFollowLockedRef.current || isCloseToBottom.current) {
+            // Use non-animated scroll during active streaming/syncing to
+            // ensure the view stays pinned to the bottom without lagging.
+            scrollToBottom(false)
         }
-    }, [lastMessageSig, isSyncing])
+    }, [lastMessageSig, isSyncing, scrollToBottom])
 
     const activeSession = useMemo(() => {
         return sessions.find((s) => s.id === sessionID)
@@ -3333,8 +3485,7 @@ const CrushMobile = () => {
                         clearTimeout(messagesFlushScheduledRef.current)
                         messagesFlushScheduledRef.current = null
                     }
-                    const out = Array.from(messagesMapRef.current.values())
-                    out.sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
+                    const out = projectMessages()
                     const g = globalThis as any
                     const isFirstFlush = !g.__perfFirstFlush && g.__perfTap
                     if (isFirstFlush) {
@@ -3344,6 +3495,7 @@ const CrushMobile = () => {
                         )
                     }
                     setMessages(out)
+                    scheduleMessageCacheWrite(sessionIDRef.current, out)
 
                     if (isSyncing) {
                         if (syncingTimeoutRef.current) clearTimeout(syncingTimeoutRef.current)
@@ -3357,9 +3509,10 @@ const CrushMobile = () => {
                     // user sees the newest content, not the oldest.
                     if (isFirstFlush) {
                         isCloseToBottom.current = true
+                        bottomFollowLockedRef.current = true
                         requestAnimationFrame(() => {
                             requestAnimationFrame(() => {
-                                flatListRef.current?.scrollToEnd({ animated: false })
+                                scrollToBottom(false)
                             })
                         })
                     }
@@ -3431,10 +3584,17 @@ const CrushMobile = () => {
                     clearTimeout(syncingTimeoutRef.current)
                     syncingTimeoutRef.current = null
                 }
+                if (bottomFollowLockedRef.current || isCloseToBottom.current) {
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            scrollToBottom(false)
+                        })
+                    })
+                }
                 return
             }
         },
-        [recordActivity, isSyncing]
+        [recordActivity, isSyncing, projectMessages, scheduleMessageCacheWrite, scrollToBottom]
     )
     handleEventRef.current = handleEvent
 
@@ -3570,7 +3730,8 @@ const CrushMobile = () => {
         g.__perfRendered = 0
         console.log(`[PERF] T0 session_change session=${sessionID}`)
 
-        // Events replay full history via deliverPolicy: 'all'; start fresh.
+        // Replace the previous session projection before restoring this
+        // session's local cache and pulling its incremental relay tail.
         messagesMapRef.current.clear()
         localCancelMessageIdsRef.current.clear()
         setMessages([])
@@ -3586,11 +3747,29 @@ const CrushMobile = () => {
         // filtered out by handleEvent's sessionIDRef.current check.
         sessionIDRef.current = sessionID
         oldestLoadedTsRef.current = 0
+        lastContentHeightRef.current = 0
+        isCloseToBottom.current = true
+        bottomFollowLockedRef.current = true
         setExhaustedHistory(false)
         userScrollRef.current = false
         loadingOlderRef.current = false
         ;(async () => {
             try {
+                const cachedMessages = await readSessionMessageCache(sessionID)
+                if (!active) return
+                let cachedTailTs = 0
+                if (cachedMessages.length > 0) {
+                    for (const message of cachedMessages) {
+                        messagesMapRef.current.set(message.id, message)
+                        cachedTailTs = Math.max(cachedTailTs, (message.created_at || 0) * 1000)
+                    }
+                    setMessages(cachedMessages)
+                    isCloseToBottom.current = true
+                    bottomFollowLockedRef.current = true
+                    requestAnimationFrame(() => {
+                        scrollToBottom(false)
+                    })
+                }
                 console.log(`[PERF] T1 subscribe_begin +${Date.now() - g.__perfTap}ms`)
                 const unsub = await api.subscribeSessionEvents(
                     sessionID,
@@ -3612,7 +3791,8 @@ const CrushMobile = () => {
                             setStatus('连接失败')
                             setIsSyncing(false)
                         }
-                    }
+                    },
+                    cachedTailTs > 0 ? { sinceTs: cachedTailTs } : undefined
                 )
                 if (!active) {
                     try {
@@ -3642,7 +3822,7 @@ const CrushMobile = () => {
             }
             unsubscribeRef.current = null
         }
-    }, [api, sessionID])
+    }, [api, sessionID, scrollToBottom])
 
     const sendMessage = async () => {
         const prompt = input.trim()
@@ -3660,8 +3840,9 @@ const CrushMobile = () => {
             setErrorText('')
 
             isCloseToBottom.current = true
+            bottomFollowLockedRef.current = true
             setTimeout(() => {
-                flatListRef.current?.scrollToEnd({ animated: true })
+                scrollToBottom(true)
             }, 50)
 
             // Flip is_busy=true synchronously on tap so the typing spinner
@@ -3711,12 +3892,12 @@ const CrushMobile = () => {
             }
             localCancelMessageIdsRef.current.add(localCancelID)
             messagesMapRef.current.set(localCancelID, localCancelMessage)
-            const out = Array.from(messagesMapRef.current.values())
-            out.sort((a, b) => (a.created_at || 0) - (b.created_at || 0))
+            const out = projectMessages()
             setMessages(out)
             isCloseToBottom.current = true
+            bottomFollowLockedRef.current = true
             requestAnimationFrame(() => {
-                flatListRef.current?.scrollToEnd({ animated: true })
+                scrollToBottom(true)
             })
             setAgentInfo((prev) => ({ ...prev, is_busy: false }))
         } catch (error) {
@@ -3744,10 +3925,6 @@ const CrushMobile = () => {
 
     const displayMessages = useMemo(() => {
         if (messages.length === 0) {
-            // Brand-new session OR pre-flush window after the user just
-            // tapped send: nothing in `messages` yet but agent is already
-            // busy (is_busy was set synchronously on send). Surface a typing
-            // bubble so the screen never looks frozen.
             if (activeRunVisible) {
                 return [
                     {
@@ -3772,8 +3949,6 @@ const CrushMobile = () => {
             return 5
         }
 
-        // messages is already sorted by created_at in handleEvent.
-        // We just need a stable rank-based sort for same-timestamp events.
         const baseMessages = [...messages].sort((a, b) => {
             const ta = a.created_at || 0
             const tb = b.created_at || 0
@@ -3783,16 +3958,7 @@ const CrushMobile = () => {
 
         if (activeRunVisible && baseMessages.length > 0) {
             const last = baseMessages[baseMessages.length - 1]
-            // Insert a typing bubble whenever the agent is busy and the
-            // visible tail is NOT a still-streaming assistant. That covers:
-            //   1. tail = user message (classic case)
-            //   2. tail = finished assistant from a previous turn but the
-            //      new turn's user echo hasn't been flushed yet
-            // An in-flight assistant (no finish part) already renders its
-            // own spinner via the isBusy prop, so we skip the placeholder
-            // there to avoid double spinners.
-            const tailIsStreamingAssistant =
-                last.role === 'assistant' && !isMessageFinished(last)
+            const tailIsStreamingAssistant = last.role === 'assistant' && !isMessageFinished(last)
             if (!tailIsStreamingAssistant) {
                 baseMessages.push({
                     id: 'typing-indicator',
@@ -3813,23 +3979,31 @@ const CrushMobile = () => {
                 msg.role === 'tool' ||
                 (msg.role === 'assistant' && msg.id !== 'typing-indicator')
             ) {
-                if (lastAssistant) {
-                    // Merge into existing assistant bubble. Reference stability:
-                    // only clone if we are actually mutating/merging.
-                    lastAssistant = {
-                        ...lastAssistant,
-                        parts: [...(lastAssistant.parts || []), ...(msg.parts || [])],
+                if (lastAssistant && lastAssistant.role === 'assistant') {
+                    const assistantMessage: Message = lastAssistant
+                    const aggregatedId = `agg-${assistantMessage.id}`
+                    const nextParts = [...(assistantMessage.parts || []), ...(msg.parts || [])]
+
+                    if (
+                        assistantMessage.id === aggregatedId &&
+                        assistantMessage.parts.length === nextParts.length
+                    ) {
+                        // Already aggregated, keep ref
+                    } else {
+                        lastAssistant = {
+                            ...assistantMessage,
+                            id: aggregatedId,
+                            parts: nextParts,
+                        }
                     }
                     aggregated[aggregated.length - 1] = lastAssistant
                 } else if (msg.role === 'assistant') {
                     lastAssistant = msg
                     aggregated.push(msg)
                 } else {
-                    // Tool message without prior assistant message (rare/impossible)
                     aggregated.push(msg)
                 }
             } else {
-                // Typing indicator or other roles reset the merge chain
                 lastAssistant = null
                 aggregated.push(msg)
             }
@@ -3866,6 +4040,8 @@ const CrushMobile = () => {
                   : mobileUpdateStatus === 'opening'
                     ? '已打开安装器'
                     : '等待检查'
+    const inputBarBottomPadding = keyboardVisible ? 8 : Math.max(insets.bottom, 10)
+    const inputBarBottomMargin = 0
 
     return (
         <View
@@ -3878,9 +4054,16 @@ const CrushMobile = () => {
             ]}
             {...panResponder.panHandlers}>
             <KeyboardAvoidingView
-                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-                keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : insets.top}
-                style={styles.root}>
+                enabled={true}
+                behavior={Platform.OS === 'ios' ? 'padding' : 'padding'}
+                style={[
+                    styles.root,
+                    {
+                        height: keyboardVisible && keyboardHeight > 0
+                            ? windowHeight - keyboardHeight - insets.top
+                            : undefined,
+                    },
+                ]}>
                 <View style={styles.header}>
                     <View style={styles.headerTop}>
                         <Pressable
@@ -4153,6 +4336,8 @@ const CrushMobile = () => {
                         keyExtractor={(item) => item.id}
                         onScroll={handleScroll}
                         onScrollBeginDrag={handleScrollBeginDrag}
+                        onScrollEndDrag={handleScrollEndDrag}
+                        onMomentumScrollBegin={handleMomentumScrollBegin}
                         onMomentumScrollEnd={handleMomentumScrollEnd}
                         scrollEventThrottle={16}
                         onContentSizeChange={handleContentSizeChange}
@@ -4161,16 +4346,9 @@ const CrushMobile = () => {
                         windowSize={11}
                         removeClippedSubviews={true}
                         updateCellsBatchingPeriod={50}
-                        getItemLayout={(data, index) => ({
-                            length: 150,
-                            offset: 150 * index,
-                            index,
-                        })}
                         contentContainerStyle={[
                             styles.messagesContent,
-                            displayMessages.length === 0
-                                ? { flexGrow: 1, justifyContent: 'center' }
-                                : { flexGrow: 1, justifyContent: 'flex-end' },
+                            { flexGrow: 1 },
                         ]}
                         ListHeaderComponent={
                             displayMessages.length === 0 ? null : exhaustedHistory ? (
@@ -4250,26 +4428,32 @@ const CrushMobile = () => {
                     </View>
                 )}
 
-                <View style={[styles.inputBar, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+                {/* 底部输入框 */}
+                <View
+                    style={[
+                        styles.inputBar,
+                        {
+                            marginBottom: inputBarBottomMargin,
+                            paddingBottom: inputBarBottomPadding,
+                        },
+                    ]}>
                     <TextInput
                         value={input}
                         onChangeText={setInput}
                         multiline
                         returnKeyType="send"
-                        blurOnSubmit={true}
+                        blurOnSubmit={false}
                         onSubmitEditing={() => {
                             if (input.trim()) {
                                 sendMessage()
                             }
                         }}
-                        autoCapitalize="none"
-                        autoCorrect={false}
+                        autoCapitalize="sentences"
+                        autoCorrect={true}
                         autoComplete="off"
                         keyboardType="default"
-                        spellCheck={false}
-                        disableFullscreenUI
+                        spellCheck={true}
                         importantForAutofill="no"
-                        textContentType="none"
                         style={styles.promptInput}
                         placeholder={sessionID ? '输入任务或指令...' : '请先连接 Crush'}
                         placeholderTextColor="#4b5563"
@@ -4328,6 +4512,8 @@ const CrushMobile = () => {
                         </Pressable>
                     )}
                 </View>
+            </KeyboardAvoidingView>
+            </View>
 
                 {/* Drawer 阴影遮罩层 */}
                 {drawerOpen && (
@@ -4388,353 +4574,333 @@ const CrushMobile = () => {
                             groupedSessions.map(([cwd, groupSessions]) => {
                                 if (groupSessions.length === 1) {
                                     const session = groupSessions[0]
-                                        const isActiveSession = session.id === sessionID
-                                        const isSessionBusy = isActiveSession
-                                            ? activeRunVisible
-                                            : !!session.is_busy
-                                        const isSessionOnline =
-                                            isConnected && session.alive !== false
-                                        const display = describeSession(session)
-                                        return (
-                                            <Pressable
-                                                key={session.id}
-                                                style={({ pressed }) => [
-                                                    styles.sessionNode,
-                                                    isActiveSession && styles.sessionNodeActive,
-                                                    pressed && styles.sessionNodePressed,
-                                                ]}
-                                                onPress={() => {
-                                                    if (deletingSessionId) {
-                                                        setDeletingSessionId(null)
-                                                    } else {
-                                                        setSessionID(session.id)
-                                                        setSessionAccessTimes((prev) => ({
-                                                            ...prev,
-                                                            [session.id]: Date.now(),
-                                                        }))
-                                                        closeDrawer()
-                                                    }
-                                                }}
-                                                onLongPress={() => {
-                                                    setDeletingSessionId(session.id)
-                                                }}>
-                                                <View style={styles.sessionNodeBody}>
+                                    const isActiveSession = session.id === sessionID
+                                    const isSessionBusy = isActiveSession
+                                        ? activeRunVisible
+                                        : !!session.is_busy
+                                    const isSessionOnline = isConnected && session.alive !== false
+                                    const display = describeSession(session)
+                                    return (
+                                        <Pressable
+                                            key={session.id}
+                                            style={({ pressed }) => [
+                                                styles.sessionNode,
+                                                isActiveSession && styles.sessionNodeActive,
+                                                pressed && styles.sessionNodePressed,
+                                            ]}
+                                            onPress={() => {
+                                                if (deletingSessionId) {
+                                                    setDeletingSessionId(null)
+                                                } else {
+                                                    setSessionID(session.id)
+                                                    setSessionAccessTimes((prev) => ({
+                                                        ...prev,
+                                                        [session.id]: Date.now(),
+                                                    }))
+                                                    closeDrawer()
+                                                }
+                                            }}
+                                            onLongPress={() => {
+                                                setDeletingSessionId(session.id)
+                                            }}>
+                                            <View style={styles.sessionNodeBody}>
+                                                <View
+                                                    style={{
+                                                        flexDirection: 'row',
+                                                        alignItems: 'center',
+                                                        columnGap: 8,
+                                                    }}>
+                                                    <Animated.View
+                                                        style={[
+                                                            styles.statusDot,
+                                                            isSessionOnline
+                                                                ? styles.statusDotOnline
+                                                                : styles.statusDotOffline,
+                                                            {
+                                                                opacity: isSessionOnline
+                                                                    ? isSessionBusy
+                                                                        ? blinkAnim
+                                                                        : 1.0
+                                                                    : 1.0,
+                                                            },
+                                                        ]}
+                                                    />
+                                                    <Feather
+                                                        name="message-square"
+                                                        size={11}
+                                                        color={
+                                                            isActiveSession ? '#38bdf8' : '#4b5563'
+                                                        }
+                                                    />
                                                     <View
                                                         style={{
-                                                            flexDirection: 'row',
-                                                            alignItems: 'center',
-                                                            columnGap: 8,
+                                                            flexDirection: 'column',
+                                                            flex: 1,
                                                         }}>
-                                                        <Animated.View
+                                                        <Text
                                                             style={[
-                                                                styles.statusDot,
-                                                                isSessionOnline
-                                                                    ? styles.statusDotOnline
-                                                                    : styles.statusDotOffline,
-                                                                {
-                                                                    opacity: isSessionOnline
-                                                                        ? isSessionBusy
-                                                                            ? blinkAnim
-                                                                            : 1.0
-                                                                        : 1.0,
-                                                                },
+                                                                styles.sessionNodeText,
+                                                                isActiveSession &&
+                                                                    styles.sessionNodeTextActive,
                                                             ]}
-                                                        />
-                                                        <Feather
-                                                            name="message-square"
-                                                            size={11}
-                                                            color={
-                                                                isActiveSession
-                                                                    ? '#38bdf8'
-                                                                    : '#4b5563'
-                                                            }
-                                                        />
-                                                        <View
-                                                            style={{
-                                                                flexDirection: 'column',
-                                                                flex: 1,
-                                                            }}>
+                                                            numberOfLines={1}>
+                                                            {display.primary}
+                                                        </Text>
+                                                        {display.secondary ? (
                                                             <Text
-                                                                style={[
-                                                                    styles.sessionNodeText,
-                                                                    isActiveSession &&
-                                                                        styles.sessionNodeTextActive,
-                                                                ]}
+                                                                style={styles.sessionNodeSubtext}
                                                                 numberOfLines={1}>
-                                                                {display.primary}
+                                                                {display.secondary}
                                                             </Text>
-                                                            {display.secondary ? (
-                                                                <Text
-                                                                    style={
-                                                                        styles.sessionNodeSubtext
-                                                                    }
-                                                                    numberOfLines={1}>
-                                                                    {display.secondary}
-                                                                </Text>
-                                                            ) : null}
-                                                        </View>
+                                                        ) : null}
                                                     </View>
                                                 </View>
-                                                {deletingSessionId === session.id ? (
-                                                    <View
-                                                        style={{
-                                                            flexDirection: 'row',
-                                                            alignItems: 'center',
-                                                            columnGap: 6,
+                                            </View>
+                                            {deletingSessionId === session.id ? (
+                                                <View
+                                                    style={{
+                                                        flexDirection: 'row',
+                                                        alignItems: 'center',
+                                                        columnGap: 6,
+                                                    }}>
+                                                    <Pressable
+                                                        style={({ pressed }) => [
+                                                            styles.deleteConfirmBtn,
+                                                            pressed && { opacity: 0.7 },
+                                                        ]}
+                                                        onPress={async (e) => {
+                                                            e.stopPropagation()
+                                                            await handleDeleteSession(session.id)
                                                         }}>
-                                                        <Pressable
-                                                            style={({ pressed }) => [
-                                                                styles.deleteConfirmBtn,
-                                                                pressed && { opacity: 0.7 },
-                                                            ]}
-                                                            onPress={async (e) => {
-                                                                e.stopPropagation()
-                                                                await handleDeleteSession(
-                                                                    session.id
-                                                                )
-                                                            }}>
-                                                            <Text style={styles.deleteConfirmText}>
-                                                                移除
-                                                            </Text>
-                                                        </Pressable>
-                                                        <Pressable
-                                                            style={({ pressed }) => [
-                                                                styles.deleteCancelBtn,
-                                                                pressed && { opacity: 0.7 },
-                                                            ]}
-                                                            onPress={(e) => {
-                                                                e.stopPropagation()
-                                                                setDeletingSessionId(null)
-                                                            }}>
-                                                            <Feather
-                                                                name="x"
-                                                                size={14}
-                                                                color="#94a3b8"
-                                                            />
-                                                        </Pressable>
-                                                    </View>
-                                                ) : (
-                                                    isActiveSession && (
+                                                        <Text style={styles.deleteConfirmText}>
+                                                            移除
+                                                        </Text>
+                                                    </Pressable>
+                                                    <Pressable
+                                                        style={({ pressed }) => [
+                                                            styles.deleteCancelBtn,
+                                                            pressed && { opacity: 0.7 },
+                                                        ]}
+                                                        onPress={(e) => {
+                                                            e.stopPropagation()
+                                                            setDeletingSessionId(null)
+                                                        }}>
                                                         <Feather
-                                                            name="check"
-                                                            size={12}
-                                                            color="#38bdf8"
+                                                            name="x"
+                                                            size={14}
+                                                            color="#94a3b8"
                                                         />
-                                                    )
-                                                )}
-                                            </Pressable>
-                                        )
-                                    }
-
-                                    const isCollapsed = collapsedCwdGroups.has(cwd)
-                                    const containsActive = groupSessions.some(
-                                        (s) => s.id === sessionID
+                                                    </Pressable>
+                                                </View>
+                                            ) : (
+                                                isActiveSession && (
+                                                    <Feather
+                                                        name="check"
+                                                        size={12}
+                                                        color="#38bdf8"
+                                                    />
+                                                )
+                                            )}
+                                        </Pressable>
                                     )
-                                    const aliveCount = groupSessions.filter(
-                                        (s) => s.alive !== false
-                                    ).length
-                                    return (
-                                        <View key={cwd} style={styles.cwdGroup}>
-                                            <Pressable
-                                                style={({ pressed }) => [
-                                                    styles.cwdGroupHeader,
-                                                    containsActive && styles.cwdGroupHeaderActive,
-                                                    pressed && styles.sessionNodePressed,
+                                }
+
+                                const isCollapsed = collapsedCwdGroups.has(cwd)
+                                const containsActive = groupSessions.some((s) => s.id === sessionID)
+                                const aliveCount = groupSessions.filter(
+                                    (s) => s.alive !== false
+                                ).length
+                                return (
+                                    <View key={cwd} style={styles.cwdGroup}>
+                                        <Pressable
+                                            style={({ pressed }) => [
+                                                styles.cwdGroupHeader,
+                                                containsActive && styles.cwdGroupHeaderActive,
+                                                pressed && styles.sessionNodePressed,
+                                            ]}
+                                            onPress={() => {
+                                                setCollapsedCwdGroups((prev) => {
+                                                    const next = new Set(prev)
+                                                    if (next.has(cwd)) next.delete(cwd)
+                                                    else next.add(cwd)
+                                                    return next
+                                                })
+                                            }}>
+                                            <Feather
+                                                name={
+                                                    isCollapsed ? 'chevron-right' : 'chevron-down'
+                                                }
+                                                size={12}
+                                                color="#94a3b8"
+                                            />
+                                            <Feather
+                                                name="folder"
+                                                size={11}
+                                                color={containsActive ? '#38bdf8' : '#94a3b8'}
+                                            />
+                                            <Text
+                                                style={[
+                                                    styles.cwdGroupTitle,
+                                                    containsActive && styles.cwdGroupTitleActive,
                                                 ]}
-                                                onPress={() => {
-                                                    setCollapsedCwdGroups((prev) => {
-                                                        const next = new Set(prev)
-                                                        if (next.has(cwd)) next.delete(cwd)
-                                                        else next.add(cwd)
-                                                        return next
-                                                    })
-                                                }}>
-                                                <Feather
-                                                    name={
-                                                        isCollapsed
-                                                            ? 'chevron-right'
-                                                            : 'chevron-down'
-                                                    }
-                                                    size={12}
-                                                    color="#94a3b8"
-                                                />
-                                                <Feather
-                                                    name="folder"
-                                                    size={11}
-                                                    color={containsActive ? '#38bdf8' : '#94a3b8'}
-                                                />
-                                                <Text
-                                                    style={[
-                                                        styles.cwdGroupTitle,
-                                                        containsActive &&
-                                                            styles.cwdGroupTitleActive,
-                                                    ]}
-                                                    numberOfLines={1}>
-                                                    {shortPath(cwd)}
-                                                </Text>
-                                                <Text style={styles.cwdGroupCount}>
-                                                    {aliveCount}/{groupSessions.length}
-                                                </Text>
-                                            </Pressable>
-                                            {!isCollapsed &&
-                                                groupSessions.map((session) => {
-                                                    const isActiveSession = session.id === sessionID
-                                                    const isSessionBusy = isActiveSession
-                                                        ? activeRunVisible
-                                                        : !!session.is_busy
-                                                    const isSessionOnline =
-                                                        isConnected && session.alive !== false
-                                                    const display = describeSession(session)
-                                                    return (
-                                                        <Pressable
-                                                            key={session.id}
-                                                            style={({ pressed }) => [
-                                                                styles.sessionNode,
-                                                                styles.sessionNodeIndented,
-                                                                isActiveSession &&
-                                                                    styles.sessionNodeActive,
-                                                                pressed &&
-                                                                    styles.sessionNodePressed,
-                                                            ]}
-                                                            onPress={() => {
-                                                                if (deletingSessionId) {
-                                                                    setDeletingSessionId(null)
-                                                                } else {
-                                                                    setSessionID(session.id)
-                                                                    setSessionAccessTimes(
-                                                                        (prev) => ({
-                                                                            ...prev,
-                                                                            [session.id]:
-                                                                                Date.now(),
-                                                                        })
-                                                                    )
-                                                                    closeDrawer()
-                                                                }
-                                                            }}
-                                                            onLongPress={() => {
-                                                                setDeletingSessionId(session.id)
-                                                            }}>
-                                                            <View style={styles.sessionNodeBody}>
+                                                numberOfLines={1}>
+                                                {shortPath(cwd)}
+                                            </Text>
+                                            <Text style={styles.cwdGroupCount}>
+                                                {aliveCount}/{groupSessions.length}
+                                            </Text>
+                                        </Pressable>
+                                        {!isCollapsed &&
+                                            groupSessions.map((session) => {
+                                                const isActiveSession = session.id === sessionID
+                                                const isSessionBusy = isActiveSession
+                                                    ? activeRunVisible
+                                                    : !!session.is_busy
+                                                const isSessionOnline =
+                                                    isConnected && session.alive !== false
+                                                const display = describeSession(session)
+                                                return (
+                                                    <Pressable
+                                                        key={session.id}
+                                                        style={({ pressed }) => [
+                                                            styles.sessionNode,
+                                                            styles.sessionNodeIndented,
+                                                            isActiveSession &&
+                                                                styles.sessionNodeActive,
+                                                            pressed && styles.sessionNodePressed,
+                                                        ]}
+                                                        onPress={() => {
+                                                            if (deletingSessionId) {
+                                                                setDeletingSessionId(null)
+                                                            } else {
+                                                                setSessionID(session.id)
+                                                                setSessionAccessTimes((prev) => ({
+                                                                    ...prev,
+                                                                    [session.id]: Date.now(),
+                                                                }))
+                                                                closeDrawer()
+                                                            }
+                                                        }}
+                                                        onLongPress={() => {
+                                                            setDeletingSessionId(session.id)
+                                                        }}>
+                                                        <View style={styles.sessionNodeBody}>
+                                                            <View
+                                                                style={{
+                                                                    flexDirection: 'row',
+                                                                    alignItems: 'center',
+                                                                    columnGap: 8,
+                                                                }}>
+                                                                <Animated.View
+                                                                    style={[
+                                                                        styles.statusDot,
+                                                                        isSessionOnline
+                                                                            ? styles.statusDotOnline
+                                                                            : styles.statusDotOffline,
+                                                                        {
+                                                                            opacity: isSessionOnline
+                                                                                ? isSessionBusy
+                                                                                    ? blinkAnim
+                                                                                    : 1.0
+                                                                                : 1.0,
+                                                                        },
+                                                                    ]}
+                                                                />
+                                                                <Feather
+                                                                    name="message-square"
+                                                                    size={11}
+                                                                    color={
+                                                                        isActiveSession
+                                                                            ? '#38bdf8'
+                                                                            : '#4b5563'
+                                                                    }
+                                                                />
                                                                 <View
                                                                     style={{
-                                                                        flexDirection: 'row',
-                                                                        alignItems: 'center',
-                                                                        columnGap: 8,
+                                                                        flexDirection: 'column',
+                                                                        flex: 1,
                                                                     }}>
-                                                                    <Animated.View
+                                                                    <Text
                                                                         style={[
-                                                                            styles.statusDot,
-                                                                            isSessionOnline
-                                                                                ? styles.statusDotOnline
-                                                                                : styles.statusDotOffline,
-                                                                            {
-                                                                                opacity:
-                                                                                    isSessionOnline
-                                                                                        ? isSessionBusy
-                                                                                            ? blinkAnim
-                                                                                            : 1.0
-                                                                                        : 1.0,
-                                                                            },
+                                                                            styles.sessionNodeText,
+                                                                            isActiveSession &&
+                                                                                styles.sessionNodeTextActive,
                                                                         ]}
-                                                                    />
-                                                                    <Feather
-                                                                        name="message-square"
-                                                                        size={11}
-                                                                        color={
-                                                                            isActiveSession
-                                                                                ? '#38bdf8'
-                                                                                : '#4b5563'
-                                                                        }
-                                                                    />
-                                                                    <View
-                                                                        style={{
-                                                                            flexDirection: 'column',
-                                                                            flex: 1,
-                                                                        }}>
-                                                                        <Text
-                                                                            style={[
-                                                                                styles.sessionNodeText,
-                                                                                isActiveSession &&
-                                                                                    styles.sessionNodeTextActive,
-                                                                            ]}
-                                                                            numberOfLines={1}>
-                                                                            {display.primary}
-                                                                        </Text>
-                                                                        {display.secondary ? (
-                                                                            <Text
-                                                                                style={
-                                                                                    styles.sessionNodeSubtext
-                                                                                }
-                                                                                numberOfLines={1}>
-                                                                                {display.secondary}
-                                                                            </Text>
-                                                                        ) : null}
-                                                                    </View>
-                                                                </View>
-                                                            </View>
-                                                            {deletingSessionId === session.id ? (
-                                                                <View
-                                                                    style={{
-                                                                        flexDirection: 'row',
-                                                                        alignItems: 'center',
-                                                                        columnGap: 6,
-                                                                    }}>
-                                                                    <Pressable
-                                                                        style={({ pressed }) => [
-                                                                            styles.deleteConfirmBtn,
-                                                                            pressed && {
-                                                                                opacity: 0.7,
-                                                                            },
-                                                                        ]}
-                                                                        onPress={async (e) => {
-                                                                            e.stopPropagation()
-                                                                            await handleDeleteSession(
-                                                                                session.id
-                                                                            )
-                                                                        }}>
+                                                                        numberOfLines={1}>
+                                                                        {display.primary}
+                                                                    </Text>
+                                                                    {display.secondary ? (
                                                                         <Text
                                                                             style={
-                                                                                styles.deleteConfirmText
-                                                                            }>
-                                                                            移除
+                                                                                styles.sessionNodeSubtext
+                                                                            }
+                                                                            numberOfLines={1}>
+                                                                            {display.secondary}
                                                                         </Text>
-                                                                    </Pressable>
-                                                                    <Pressable
-                                                                        style={({ pressed }) => [
-                                                                            styles.deleteCancelBtn,
-                                                                            pressed && {
-                                                                                opacity: 0.7,
-                                                                            },
-                                                                        ]}
-                                                                        onPress={(e) => {
-                                                                            e.stopPropagation()
-                                                                            setDeletingSessionId(
-                                                                                null
-                                                                            )
-                                                                        }}>
-                                                                        <Feather
-                                                                            name="x"
-                                                                            size={14}
-                                                                            color="#94a3b8"
-                                                                        />
-                                                                    </Pressable>
+                                                                    ) : null}
                                                                 </View>
-                                                            ) : (
-                                                                isActiveSession && (
+                                                            </View>
+                                                        </View>
+                                                        {deletingSessionId === session.id ? (
+                                                            <View
+                                                                style={{
+                                                                    flexDirection: 'row',
+                                                                    alignItems: 'center',
+                                                                    columnGap: 6,
+                                                                }}>
+                                                                <Pressable
+                                                                    style={({ pressed }) => [
+                                                                        styles.deleteConfirmBtn,
+                                                                        pressed && {
+                                                                            opacity: 0.7,
+                                                                        },
+                                                                    ]}
+                                                                    onPress={async (e) => {
+                                                                        e.stopPropagation()
+                                                                        await handleDeleteSession(
+                                                                            session.id
+                                                                        )
+                                                                    }}>
+                                                                    <Text
+                                                                        style={
+                                                                            styles.deleteConfirmText
+                                                                        }>
+                                                                        移除
+                                                                    </Text>
+                                                                </Pressable>
+                                                                <Pressable
+                                                                    style={({ pressed }) => [
+                                                                        styles.deleteCancelBtn,
+                                                                        pressed && {
+                                                                            opacity: 0.7,
+                                                                        },
+                                                                    ]}
+                                                                    onPress={(e) => {
+                                                                        e.stopPropagation()
+                                                                        setDeletingSessionId(null)
+                                                                    }}>
                                                                     <Feather
-                                                                        name="check"
-                                                                        size={12}
-                                                                        color="#38bdf8"
+                                                                        name="x"
+                                                                        size={14}
+                                                                        color="#94a3b8"
                                                                     />
-                                                                )
-                                                            )}
-                                                        </Pressable>
-                                                    )
-                                                })}
-                                        </View>
-                                    )
-                                })
-
+                                                                </Pressable>
+                                                            </View>
+                                                        ) : (
+                                                            isActiveSession && (
+                                                                <Feather
+                                                                    name="check"
+                                                                    size={12}
+                                                                    color="#38bdf8"
+                                                                />
+                                                            )
+                                                        )}
+                                                    </Pressable>
+                                                )
+                                            })}
+                                    </View>
+                                )
+                            })
                         )}
                     </ScrollView>
 

@@ -945,6 +945,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle delayed single-click action (e.g., expansion).
 		m.chat.HandleDelayedClick(msg)
 	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseMiddle {
+			return m, m.pasteImageFromClipboard
+		}
 		// Pass mouse events to dialogs first if any are open.
 		if m.dialog.HasDialogs() {
 			m.dialog.Update(msg)
@@ -2158,6 +2161,8 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		switch m.focus {
 		case uiFocusEditor:
+			prevHeight := m.textarea.Height()
+
 			// Handle completions if open.
 			if m.completionsOpen {
 				if msg, ok := m.completions.Update(msg); ok {
@@ -2323,7 +2328,6 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 				cmds = append(cmds, m.openEditor(m.textarea.Value()))
 			case key.Matches(msg, m.keyMap.Editor.Newline):
-				prevHeight := m.textarea.Height()
 				m.textarea.InsertRune('\n')
 				m.closeCompletions()
 				cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, prevHeight))
@@ -2337,6 +2341,14 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if cmd != nil {
 					cmds = append(cmds, cmd)
 				}
+			case key.Matches(msg, m.keyMap.Editor.WordLeft):
+				// Translate ctrl+left to alt+b for word backward
+				msg = tea.KeyPressMsg(tea.Key{Code: 'b', Text: "b", Mod: tea.ModAlt})
+				cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, m.textarea.Height()))
+			case key.Matches(msg, m.keyMap.Editor.WordRight):
+				// Translate ctrl+right to alt+f for word forward
+				msg = tea.KeyPressMsg(tea.Key{Code: 'f', Text: "f", Mod: tea.ModAlt})
+				cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, m.textarea.Height()))
 			case key.Matches(msg, m.keyMap.Editor.Escape):
 				cmd := m.handleHistoryEscape(msg)
 				if cmd != nil {
@@ -2382,7 +2394,6 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					m.updateLayoutAndSize()
 				}
 
-				prevHeight := m.textarea.Height()
 				cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, prevHeight))
 
 				// Any text modification becomes the current draft.
@@ -3542,8 +3553,8 @@ func (m *UI) runtimeStatusLine() string {
 	}
 	stats := m.com.Workspace.BackgroundShellStats()
 	parts := make([]string, 0, 6)
-	if compactStatus := m.compactionRuntimeStatusPart(); compactStatus != "" {
-		parts = append(parts, compactStatus)
+	if activityStatus := m.activeRuntimeActivityStatusPart(); activityStatus != "" {
+		parts = append(parts, activityStatus)
 	} else if busyStatus := m.activeRunStatusText(); busyStatus != "" {
 		parts = append(parts, busyStatus)
 	} else if m.isAgentBusy() {
@@ -3561,6 +3572,16 @@ func (m *UI) runtimeStatusLine() string {
 		parts = append(parts, contextStatus)
 	}
 	return strings.Join(parts, "  ·  ")
+}
+
+func (m *UI) activeRuntimeActivityStatusPart() string {
+	if status := m.compactionRuntimeStatusPart(); status != "" {
+		return status
+	}
+	if status := m.memoryRuntimeStatusPart(chat.RuntimeActivityMemoryRecall, "memory recall"); status != "" {
+		return status
+	}
+	return m.memoryRuntimeStatusPart(chat.RuntimeActivityMemorySave, "memory save")
 }
 
 func (m *UI) compactionRuntimeStatusPart() string {
@@ -3586,6 +3607,25 @@ func (m *UI) compactionRuntimeStatusPart() string {
 			tokens = "~" + tokens
 		}
 		parts = append(parts, tokens)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (m *UI) memoryRuntimeStatusPart(kind chat.RuntimeActivityKind, label string) string {
+	if m == nil || m.session == nil {
+		return ""
+	}
+	item := m.runtimeActivities[memoryActivityID(m.session.ID, kind)]
+	if item == nil {
+		return ""
+	}
+	snapshot := item.Snapshot()
+	if snapshot.Kind != kind || snapshot.Status != chat.RuntimeActivityRunning {
+		return ""
+	}
+	parts := []string{label}
+	if !snapshot.StartedAt.IsZero() {
+		parts = append(parts, formatRuntimeStatusDuration(time.Since(snapshot.StartedAt)))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -3648,9 +3688,6 @@ func (m *UI) shouldHandleBackgroundJobEvent(ev shell.BackgroundJobEvent) bool {
 }
 
 func (m *UI) handleRuntimeActivityTrace(trace agentruntime.TaskTrace) tea.Cmd {
-	if !isConversationCompactionTrace(trace.Kind) {
-		return nil
-	}
 	sessionID := trace.ConversationSessionID
 	if sessionID == "" {
 		sessionID = trace.SessionID
@@ -3661,7 +3698,14 @@ func (m *UI) handleRuntimeActivityTrace(trace agentruntime.TaskTrace) tea.Cmd {
 	if sessionID == "" {
 		return nil
 	}
-	return m.upsertRuntimeActivity(compactionActivitySnapshot(sessionID, trace))
+	switch {
+	case isConversationCompactionTrace(trace.Kind):
+		return m.upsertRuntimeActivity(compactionActivitySnapshot(sessionID, trace))
+	case isMemoryRuntimeTrace(trace.Kind):
+		return m.upsertRuntimeActivity(memoryActivitySnapshot(sessionID, trace))
+	default:
+		return nil
+	}
 }
 
 func isConversationCompactionTrace(kind agentruntime.TraceKind) bool {
@@ -3669,6 +3713,15 @@ func isConversationCompactionTrace(kind agentruntime.TraceKind) bool {
 		kind == agentruntime.TraceKindConversationCompactionProgress ||
 		kind == agentruntime.TraceKindConversationCompactionFinished ||
 		kind == agentruntime.TraceKindConversationCompactionFailed
+}
+
+func isMemoryRuntimeTrace(kind agentruntime.TraceKind) bool {
+	return kind == agentruntime.TraceKindMemoryRecallStarted ||
+		kind == agentruntime.TraceKindMemoryRecallFinished ||
+		kind == agentruntime.TraceKindMemoryRecallFailed ||
+		kind == agentruntime.TraceKindMemorySaveStarted ||
+		kind == agentruntime.TraceKindMemorySaveFinished ||
+		kind == agentruntime.TraceKindMemorySaveFailed
 }
 
 func compactionActivitySnapshot(sessionID string, trace agentruntime.TaskTrace) chat.RuntimeActivitySnapshot {
@@ -3698,6 +3751,51 @@ func compactionActivitySnapshot(sessionID string, trace agentruntime.TaskTrace) 
 		FinishedAt:      finishedAt,
 		Tokens:          tokens,
 		TokensAreExact:  exact,
+		ProgressPercent: -1,
+	}
+}
+
+func memoryActivitySnapshot(sessionID string, trace agentruntime.TaskTrace) chat.RuntimeActivitySnapshot {
+	status := chat.RuntimeActivityRunning
+	title := "Memory"
+	kind := chat.RuntimeActivityMemoryRecall
+	finishedAt := trace.FinishedAt
+	switch trace.Kind {
+	case agentruntime.TraceKindMemoryRecallStarted:
+		title = "Recalling memory"
+	case agentruntime.TraceKindMemoryRecallFinished:
+		status = chat.RuntimeActivityDone
+		title = "Memory recalled"
+	case agentruntime.TraceKindMemoryRecallFailed:
+		status = chat.RuntimeActivityFailed
+		title = "Memory recall failed"
+	case agentruntime.TraceKindMemorySaveStarted:
+		kind = chat.RuntimeActivityMemorySave
+		title = "Saving memory"
+	case agentruntime.TraceKindMemorySaveFinished:
+		kind = chat.RuntimeActivityMemorySave
+		status = chat.RuntimeActivityDone
+		title = "Memory saved"
+	case agentruntime.TraceKindMemorySaveFailed:
+		kind = chat.RuntimeActivityMemorySave
+		status = chat.RuntimeActivityFailed
+		title = "Memory save failed"
+	}
+	detail := ""
+	if trace.FileCount > 0 {
+		detail = fmt.Sprintf("%d memories", trace.FileCount)
+	}
+	if trace.Error != "" {
+		detail = trace.Error
+	}
+	return chat.RuntimeActivitySnapshot{
+		ID:              memoryActivityID(sessionID, kind),
+		Kind:            kind,
+		Status:          status,
+		Title:           title,
+		Detail:          detail,
+		StartedAt:       trace.StartedAt,
+		FinishedAt:      finishedAt,
 		ProgressPercent: -1,
 	}
 }
@@ -3750,6 +3848,10 @@ func (m *UI) upsertRuntimeActivity(snapshot chat.RuntimeActivitySnapshot) tea.Cm
 
 func compactionActivityID(sessionID string) string {
 	return "runtime:compaction:" + sessionID
+}
+
+func memoryActivityID(sessionID string, kind chat.RuntimeActivityKind) string {
+	return "runtime:" + string(kind) + ":" + sessionID
 }
 
 func (m *UI) recordToolRuntimeTrace(trace agentruntime.TaskTrace) {
@@ -4682,6 +4784,12 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		if m.com.IsHyper() {
 			cmds = append(cmds, m.fetchHyperCredits())
 		}
+		// Drain any sub-agent entries that are still marked running; they
+		// will never receive a normal Finished/Failed event at this point.
+		m.subAgents = drainRunningSubAgents(m.subAgents)
+		// Cancel any agent tool calls in the chat view that never received
+		// a result, so their spinners don't persist after the brain stops.
+		m.chat.CancelDanglingAgentTools()
 		return tea.Batch(cmds...)
 	case notify.TypeReAuthenticate:
 		return m.handleReAuthenticate(n.ProviderID)

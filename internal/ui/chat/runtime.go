@@ -17,6 +17,8 @@ type RuntimeActivityKind string
 
 const (
 	RuntimeActivityConversationCompaction RuntimeActivityKind = "conversation_compaction"
+	RuntimeActivityMemoryRecall           RuntimeActivityKind = "memory_recall"
+	RuntimeActivityMemorySave             RuntimeActivityKind = "memory_save"
 )
 
 // RuntimeActivityStatus records whether a runtime activity is still active.
@@ -55,8 +57,10 @@ type RuntimeActivityItem struct {
 	snapshot RuntimeActivitySnapshot
 }
 
-var _ MessageItem = (*RuntimeActivityItem)(nil)
-var _ Animatable = (*RuntimeActivityItem)(nil)
+var (
+	_ MessageItem = (*RuntimeActivityItem)(nil)
+	_ Animatable  = (*RuntimeActivityItem)(nil)
+)
 
 // NewRuntimeActivityItem creates a live runtime activity chat item.
 func NewRuntimeActivityItem(sty *styles.Styles, snapshot RuntimeActivitySnapshot) *RuntimeActivityItem {

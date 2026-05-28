@@ -26,118 +26,46 @@ Common shell builtins and core utils available on Windows.
 </usage_notes>
 
 <background_execution>
-- Set run_in_background=true to run commands in a separate background shell
-- Returns a shell ID for managing the background process
-- Use job_output tool to view current output from background shell
-- Use job_kill tool to terminate a background shell
-- IMPORTANT: NEVER use `&` at the end of commands to run in background - use run_in_background parameter instead
-- Commands that should run in background:
-  * Long-running servers (e.g., `npm start`, `python -m http.server`, `node server.js`)
-  * Watch/monitoring tasks (e.g., `npm run watch`, `tail -f logfile`)
-  * External/cloud polling loops that wait for remote completion (e.g., `aliyun ecs DescribeInvocationResults` after `RunCommand`)
-  * Continuous processes that don't exit on their own
-  * Any command expected to run indefinitely
-- For external/cloud jobs, start one background shell that loops until a terminal state and prints a final line such as `DONE`, `FAILED`, `ERROR`, or `Finished`; then call `monitor` on that shell ID with a matching regex. Do not repeatedly call `job_output`.
-- Commands that should NOT run in background:
-  * Build commands (e.g., `npm run build`, `go build`)
-  * Test suites (e.g., `npm test`, `pytest`)
-  * Git operations
-  * File operations
-  * Short-lived scripts
+- Set run_in_background=true for long-running processes (servers, watchers, polling).
+- Returns a shell ID. Use job_output (with wait=true to block) or monitor (regex).
+- NEVER use `&` in command; use the tool parameter.
+- Use monitor for terminal markers (DONE|FAILED|ERROR). Do not poll job_output.
 </background_execution>
 
 <git_commits>
-When user asks to create git commit:
-
-1. Single message with three tool_use blocks (IMPORTANT for speed):
-   - git status (untracked files)
-   - git diff (staged/unstaged changes)
-   - git log (recent commit message style)
-
-2. Add relevant untracked files to staging. Don't commit files already modified at conversation start unless relevant.
-
-3. Analyze staged changes in <commit_analysis> tags:
-   - List changed/added files, summarize nature (feature/enhancement/bug fix/refactoring/test/docs)
-   - Brainstorm purpose/motivation, assess project impact, check for sensitive info
-   - Don't use tools beyond git context
-   - Draft concise (1-2 sentences) message focusing on "why" not "what"
-   - Use clear language, accurate reflection ("add"=new feature, "update"=enhancement, "fix"=bug fix)
-   - Avoid generic messages, review draft
-
-4. Create commit{{ if or (eq .Attribution.TrailerStyle "assisted-by") (eq .Attribution.TrailerStyle "co-authored-by")}} with attribution{{ end }} using HEREDOC:
+1. Multi-block turn: git status, git diff, git log.
+2. Analyze in <commit_analysis>: summarize nature, assess impact, draft "why" message.
+3. Commit via HEREDOC:
    git commit -m "$(cat <<'EOF'
-   Commit message here.
-
-{{ if .Attribution.GeneratedWith }}
+   Message...
+   {{ if .Attribution.GeneratedWith }}
    💘 Generated with Crush
-{{ end}}
-{{if eq .Attribution.TrailerStyle "assisted-by" }}
-
+   {{ end}}
+   {{if eq .Attribution.TrailerStyle "assisted-by" }}
    Assisted-by: Crush:{{ .ModelID }}
-{{ else if eq .Attribution.TrailerStyle "co-authored-by" }}
-
+   {{ else if eq .Attribution.TrailerStyle "co-authored-by" }}
    Co-Authored-By: Crush <crush@charm.land>
-{{ end }}
-
+   {{ end }}
    EOF
    )"
-
-5. If pre-commit hook fails, retry ONCE. If fails again, hook preventing commit. If succeeds but files modified, MUST amend.
-
-6. Run git status to verify.
-
-Notes: Use "git commit -am" when possible, don't stage unrelated files, NEVER update config, don't push, no -i flags, no empty commits, return empty response, when rebasing always use -m or GIT_EDITOR=true.
+4. Verify via git status. No -i, no empty commits.
 </git_commits>
 
 <pull_requests>
-Use gh command for ALL GitHub tasks. When user asks to create PR:
-
-1. Single message with multiple tool_use blocks (VERY IMPORTANT for speed):
-   - git status (untracked files)
-   - git diff (staged/unstaged changes)
-   - Check if branch tracks remote and is up to date
-   - git log and 'git diff main...HEAD' (full commit history from main divergence)
-
-2. Create new branch if needed
-3. Commit changes if needed
-4. Push to remote with -u flag if needed
-
-5. Analyze changes in <pr_analysis> tags:
-   - List commits since diverging from main
-   - Summarize nature of changes
-   - Brainstorm purpose/motivation
-   - Assess project impact
-   - Don't use tools beyond git context
-   - Check for sensitive information
-   - Draft concise (1-2 bullet points) PR summary focusing on "why"
-   - Ensure summary reflects ALL changes since main divergence
-   - Clear, concise language
-   - Accurate reflection of changes and purpose
-   - Avoid generic summaries
-   - Review draft
-
-6. Create PR with gh pr create using HEREDOC:
-   gh pr create --title "title" --body "$(cat <<'EOF'
-
+Use gh command.
+1. Multi-block: git status, git diff, check tracking, git log/diff main...HEAD.
+2. Analyze in <pr_analysis>: summarize changes, draft "why" summary.
+3. Create via HEREDOC:
+   gh pr create --title "..." --body "$(cat <<'EOF'
    ## Summary
-
-   <1-3 bullet points>
-
+   ...
    ## Test plan
-
-   [Checklist of TODOs...]
-
-{{ if .Attribution.GeneratedWith}}
+   ...
+   {{ if .Attribution.GeneratedWith}}
    💘 Generated with Crush
-{{ end }}
-
+   {{ end }}
    EOF
    )"
-
-Important:
-
-- Return empty response - user sees gh output
-- Never update git config
 </pull_requests>
 
 <examples>

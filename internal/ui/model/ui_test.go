@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -9,9 +10,13 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
+	"github.com/charmbracelet/crush/internal/agent"
+	"github.com/charmbracelet/crush/internal/agent/notify"
+	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/history"
+	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
@@ -233,6 +238,9 @@ func TestPillsAreaHeightAccountsForTodoActivityLines(t *testing.T) {
 	t.Parallel()
 
 	ui := newTestUIWithConfig(t, nil)
+	ws := ui.com.Workspace.(*testWorkspace)
+	ws.agentReady = true
+	ws.agentBusy = true
 	ui.width = 100
 	ui.height = 40
 	ui.session = &session.Session{
@@ -341,6 +349,55 @@ func TestRuntimeStatusLineShowsUnknownContextWindow(t *testing.T) {
 	}
 
 	require.Equal(t, "ctx -- 18K/unknown auto@70%", ui.runtimeStatusLine())
+}
+
+func TestAgentFinishedDrainsRunningSubAgents(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.subAgents = []subAgentEntry{
+		{
+			SessionID:  "child-running",
+			ToolCallID: "tool-running",
+			LastStatus: "running",
+			Status:     subAgentRunning,
+		},
+		{
+			SessionID:  "child-done",
+			ToolCallID: "tool-done",
+			LastStatus: "done",
+			Status:     subAgentDone,
+		},
+	}
+
+	_ = ui.handleAgentNotification(notify.Notification{
+		Type: notify.TypeAgentFinished,
+	})
+
+	require.Equal(t, subAgentFailed, ui.subAgents[0].Status)
+	require.Equal(t, "failed", ui.subAgents[0].LastStatus)
+	require.Equal(t, subAgentDone, ui.subAgents[1].Status)
+	require.Equal(t, "done", ui.subAgents[1].LastStatus)
+}
+
+func TestAgentFinishedCancelsDanglingAgentTools(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	danglingItem := newTestAgentToolItem(t, ui, "tool-dangling", nil)
+	completedItem := newTestAgentToolItem(t, ui, "tool-completed", &message.ToolResult{
+		ToolCallID: "tool-completed",
+		Content:    "done",
+	})
+	ui.chat.SetMessages(danglingItem, completedItem)
+
+	_ = ui.handleAgentNotification(notify.Notification{
+		Type: notify.TypeAgentFinished,
+	})
+
+	require.Equal(t, uichat.ToolStatusCanceled, danglingItem.Status())
+	require.Equal(t, uichat.ToolStatusRunning, completedItem.Status())
+	require.True(t, completedItem.HasResult())
 }
 
 func TestRuntimeStatusLineUsesGeminiFamilyContextWindowFallback(t *testing.T) {
@@ -462,6 +519,44 @@ func TestRuntimeTraceAddsCompactionActivity(t *testing.T) {
 	require.Equal(t, uichat.RuntimeActivityDone, item.Snapshot().Status)
 	require.Equal(t, int64(61_500), item.Snapshot().Tokens)
 	require.True(t, item.Snapshot().TokensAreExact)
+}
+
+func TestRuntimeTraceAddsMemoryActivity(t *testing.T) {
+	t.Parallel()
+
+	ui := newTestUIWithConfig(t, nil)
+	ui.session = &session.Session{ID: "session-1"}
+	startedAt := time.Now().Add(-2 * time.Second)
+
+	_, _ = ui.Update(pubsub.Event[agentruntime.TaskTrace]{
+		Type: pubsub.CreatedEvent,
+		Payload: agentruntime.TaskTrace{
+			Kind:                  agentruntime.TraceKindMemoryRecallStarted,
+			ConversationSessionID: "session-1",
+			StartedAt:             startedAt,
+		},
+	})
+
+	item, ok := ui.chat.MessageItem(memoryActivityID("session-1", uichat.RuntimeActivityMemoryRecall)).(*uichat.RuntimeActivityItem)
+	require.True(t, ok)
+	require.Equal(t, uichat.RuntimeActivityRunning, item.Snapshot().Status)
+	require.Contains(t, ui.runtimeStatusLine(), "memory recall")
+
+	_, _ = ui.Update(pubsub.Event[agentruntime.TaskTrace]{
+		Type: pubsub.UpdatedEvent,
+		Payload: agentruntime.TaskTrace{
+			Kind:                  agentruntime.TraceKindMemoryRecallFinished,
+			ConversationSessionID: "session-1",
+			StartedAt:             startedAt,
+			FinishedAt:            time.Now(),
+			FileCount:             2,
+		},
+	})
+
+	require.Equal(t, uichat.RuntimeActivityDone, item.Snapshot().Status)
+	require.Equal(t, "Memory recalled", item.Snapshot().Title)
+	require.Equal(t, "2 memories", item.Snapshot().Detail)
+	require.NotContains(t, ui.runtimeStatusLine(), "memory recall")
 }
 
 func TestBackgroundMonitorEventStaysOutOfChat(t *testing.T) {
@@ -981,6 +1076,27 @@ func TestLoadPromptHistorySkipsInternalSummaryPrompt(t *testing.T) {
 	require.Equal(t, []string{"real user prompt"}, loaded.messages)
 }
 
+func newTestAgentToolItem(
+	t *testing.T,
+	ui *UI,
+	toolCallID string,
+	result *message.ToolResult,
+) *uichat.AgentToolMessageItem {
+	t.Helper()
+
+	input, err := json.Marshal(agent.AgentParams{
+		Prompt: "inspect state",
+		Role:   config.AgentExplore,
+	})
+	require.NoError(t, err)
+
+	return uichat.NewAgentToolMessageItem(ui.com.Styles, message.ToolCall{
+		ID:    toolCallID,
+		Name:  agent.AgentToolName,
+		Input: string(input),
+	}, result, false)
+}
+
 // testWorkspace is a minimal [workspace.Workspace] stub for unit tests.
 type testWorkspace struct {
 	workspace.Workspace
@@ -1006,6 +1122,14 @@ type testWorkspace struct {
 
 func (w *testWorkspace) Config() *config.Config {
 	return w.cfg
+}
+
+func (w *testWorkspace) WorkingDir() string {
+	return "/tmp/crush-ui-test"
+}
+
+func (w *testWorkspace) ProjectNeedsInitialization() (bool, error) {
+	return false, nil
 }
 
 func (w *testWorkspace) CreateSession(_ context.Context, title string, mode session.Mode) (session.Session, error) {
@@ -1048,6 +1172,18 @@ func (w *testWorkspace) ListSessionHistory(context.Context, string) ([]history.F
 
 func (w *testWorkspace) FileTrackerListReadFiles(context.Context, string) ([]string, error) {
 	return nil, nil
+}
+
+func (w *testWorkspace) LSPGetStates() map[string]workspace.LSPClientInfo {
+	return nil
+}
+
+func (w *testWorkspace) LSPGetDiagnosticCounts(string) lsp.DiagnosticCounts {
+	return lsp.DiagnosticCounts{}
+}
+
+func (w *testWorkspace) MCPGetStates() map[string]mcptools.ClientInfo {
+	return nil
 }
 
 func (w *testWorkspace) AgentIsReady() bool {

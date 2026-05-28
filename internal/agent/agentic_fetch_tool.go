@@ -169,6 +169,8 @@ func (c *coordinator) agenticFetchTool(_ context.Context, client *http.Client) (
 			fetchTools := []fantasy.AgentTool{
 				webFetchTool,
 				webSearchTool,
+				tools.NewEvidenceBatchTool(c.lspManager, c.permissions, tmpDir, client),
+				tools.NewEvidenceGraphTool(c.lspManager, c.permissions, tmpDir, client),
 				tools.NewRgTool(c.permissions, tmpDir, c.cfg.Config().Tools.Rg),
 				tools.NewSourcegraphTool(client),
 				tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, nil, tmpDir),

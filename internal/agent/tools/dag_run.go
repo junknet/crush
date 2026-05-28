@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -27,7 +28,7 @@ type DagRunParams struct {
 
 type DagRunNode struct {
 	ID          string   `json:"id" description:"Unique node ID used by dependencies and output interpolation"`
-	Kind        string   `json:"kind,omitempty" jsonschema:"description=Evidence node kind,enum=search_text,enum=search_files,enum=search_structure,enum=list_tree,enum=read_file,enum=check_file,enum=run_short_command"`
+	Kind        string   `json:"kind,omitempty" jsonschema:"description=Evidence node kind,enum=search_text,enum=search_files,enum=search_structure,enum=list_tree,enum=read_file,enum=check_file,enum=run_short_command,enum=web_search,enum=web_fetch"`
 	Tool        string   `json:"tool,omitempty" description:"Deprecated compatibility field. Use kind instead."`
 	DependsOn   []string `json:"depends_on,omitempty" description:"Node IDs that must complete before this node runs"`
 	Query       string   `json:"query,omitempty" description:"Text, filename, or AST query depending on kind"`
@@ -89,15 +90,15 @@ var dagRunDescription string
 
 var dagRunInterpolationPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_.-]+)\.output\}`)
 
-func NewDagRunTool(lspManager *lsp.Manager, permissions permission.Service, workingDir string) fantasy.AgentTool {
-	return newEvidenceGraphTool(DagRunToolName, dagRunDescription, lspManager, permissions, workingDir, true)
+func NewDagRunTool(lspManager *lsp.Manager, permissions permission.Service, workingDir string, httpClient *http.Client) fantasy.AgentTool {
+	return newEvidenceGraphTool(DagRunToolName, dagRunDescription, lspManager, permissions, workingDir, httpClient, true)
 }
 
-func NewEvidenceGraphTool(lspManager *lsp.Manager, permissions permission.Service, workingDir string) fantasy.AgentTool {
-	return newEvidenceGraphTool(EvidenceGraphToolName, evidenceGraphDescription(), lspManager, permissions, workingDir, true)
+func NewEvidenceGraphTool(lspManager *lsp.Manager, permissions permission.Service, workingDir string, httpClient *http.Client) fantasy.AgentTool {
+	return newEvidenceGraphTool(EvidenceGraphToolName, evidenceGraphDescription(), lspManager, permissions, workingDir, httpClient, true)
 }
 
-func NewEvidenceBatchTool(lspManager *lsp.Manager, permissions permission.Service, workingDir string) fantasy.AgentTool {
+func NewEvidenceBatchTool(lspManager *lsp.Manager, permissions permission.Service, workingDir string, httpClient *http.Client) fantasy.AgentTool {
 	return fantasy.NewParallelAgentTool(
 		EvidenceBatchToolName,
 		evidenceBatchDescription(),
@@ -105,7 +106,7 @@ func NewEvidenceBatchTool(lspManager *lsp.Manager, permissions permission.Servic
 			for i := range params.Nodes {
 				params.Nodes[i].DependsOn = nil
 			}
-			return runEvidenceNodes(ctx, lspManager, permissions, workingDir, params, call, EvidenceBatchToolName)
+			return runEvidenceNodes(ctx, lspManager, permissions, workingDir, httpClient, params, call, EvidenceBatchToolName)
 		},
 	)
 }
@@ -138,7 +139,7 @@ Dependency output interpolation:
 - Dependents run only after dependencies complete.`
 }
 
-func newEvidenceGraphTool(toolName, description string, lspManager *lsp.Manager, permissions permission.Service, workingDir string, allowDependencies bool) fantasy.AgentTool {
+func newEvidenceGraphTool(toolName, description string, lspManager *lsp.Manager, permissions permission.Service, workingDir string, httpClient *http.Client, allowDependencies bool) fantasy.AgentTool {
 	return fantasy.NewParallelAgentTool(
 		toolName,
 		description,
@@ -148,12 +149,12 @@ func newEvidenceGraphTool(toolName, description string, lspManager *lsp.Manager,
 					params.Nodes[i].DependsOn = nil
 				}
 			}
-			return runEvidenceNodes(ctx, lspManager, permissions, workingDir, params, call, toolName)
+			return runEvidenceNodes(ctx, lspManager, permissions, workingDir, httpClient, params, call, toolName)
 		},
 	)
 }
 
-func runEvidenceNodes(ctx context.Context, lspManager *lsp.Manager, permissions permission.Service, workingDir string, params DagRunParams, call fantasy.ToolCall, toolName string) (fantasy.ToolResponse, error) {
+func runEvidenceNodes(ctx context.Context, lspManager *lsp.Manager, permissions permission.Service, workingDir string, httpClient *http.Client, params DagRunParams, call fantasy.ToolCall, toolName string) (fantasy.ToolResponse, error) {
 	if len(params.Nodes) == 0 {
 		return fantasy.NewTextErrorResponse("nodes is required"), nil
 	}
@@ -187,7 +188,7 @@ func runEvidenceNodes(ctx context.Context, lspManager *lsp.Manager, permissions 
 	defer cancel()
 
 	startedAt := time.Now()
-	results := executeDagRun(runCtx, lspManager, workingDir, normalized, dagRunMaxParallelValue(params.MaxParallel))
+	results := executeDagRun(runCtx, lspManager, workingDir, httpClient, normalized, dagRunMaxParallelValue(params.MaxParallel))
 	response := buildDagRunResponse(startedAt, dagRunMaxParallelValue(params.MaxParallel), results)
 	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(formatEvidenceResponse(response)), response), nil
 }
@@ -215,22 +216,17 @@ func validateDagRunNodes(nodes []DagRunNode) error {
 			if node.Path == "" {
 				return fmt.Errorf("node %s: path is required for check_file", node.ID)
 			}
-		case "list_tree":
+		case "web_search":
+			if node.Query == "" {
+				return fmt.Errorf("node %s: query is required for web_search", node.ID)
+			}
+		case "web_fetch":
 			if node.Path == "" {
-				return fmt.Errorf("node %s: path is required for list_tree", node.ID)
+				return fmt.Errorf("node %s: path (url) is required for web_fetch", node.ID)
 			}
-		case "run_short_command":
-			if strings.TrimSpace(dagRunCommand(node)) == "" {
-				return fmt.Errorf("node %s: script or command is required for run_short_command", node.ID)
-			}
-			if message, blocked := blockForegroundSleep(dagRunCommand(node)); blocked {
-				return fmt.Errorf("node %s: %s", node.ID, message)
-			}
-			if strings.Contains(dagRunCommand(node), "&") {
-				return fmt.Errorf("node %s: run_short_command must not background work with '&'", node.ID)
-			}
+		case "list_tree":
 		default:
-			return fmt.Errorf("node %s: unsupported kind %q; use search_text, search_files, search_structure, list_tree, read_file, check_file, or run_short_command", node.ID, node.Kind)
+			return fmt.Errorf("node %s: unsupported kind %q; use search_text, search_files, search_structure, list_tree, read_file, check_file, run_short_command, web_search, or web_fetch", node.ID, node.Kind)
 		}
 		if node.OnFailure != "" && node.OnFailure != "continue" && node.OnFailure != "skip_dependents" && node.OnFailure != "stop_graph" {
 			return fmt.Errorf("node %s: unsupported on_failure %q", node.ID, node.OnFailure)
@@ -344,7 +340,7 @@ func dagRunTimeout(seconds int) time.Duration {
 	return timeout
 }
 
-func executeDagRun(ctx context.Context, lspManager *lsp.Manager, workingDir string, nodes []DagRunNode, maxParallel int) map[string]DagRunNodeResult {
+func executeDagRun(ctx context.Context, lspManager *lsp.Manager, workingDir string, httpClient *http.Client, nodes []DagRunNode, maxParallel int) map[string]DagRunNodeResult {
 	remaining := make(map[string]DagRunNode, len(nodes))
 	byID := make(map[string]DagRunNode, len(nodes))
 	for _, node := range nodes {
@@ -389,7 +385,7 @@ func executeDagRun(ctx context.Context, lspManager *lsp.Manager, workingDir stri
 				resultsMu.Lock()
 				dependencyOutputs := dagRunDependencyOutputs(node, results)
 				resultsMu.Unlock()
-				result := executeDagRunNode(groupCtx, lspManager, workingDir, node, dependencyOutputs)
+				result := executeDagRunNode(groupCtx, lspManager, workingDir, httpClient, node, dependencyOutputs)
 				resultsMu.Lock()
 				results[node.ID] = result
 				resultsMu.Unlock()
@@ -451,10 +447,10 @@ func dagRunDependencyOutputs(node DagRunNode, results map[string]DagRunNodeResul
 	return outputs
 }
 
-func executeDagRunNode(ctx context.Context, lspManager *lsp.Manager, workingDir string, node DagRunNode, dependencyOutputs map[string]string) DagRunNodeResult {
+func executeDagRunNode(ctx context.Context, lspManager *lsp.Manager, workingDir string, httpClient *http.Client, node DagRunNode, dependencyOutputs map[string]string) DagRunNodeResult {
 	startedAt := time.Now()
 	result := DagRunNodeResult{ID: node.ID, Kind: node.Kind, Status: "completed"}
-	output, err := executeDagRunNodeOutput(ctx, lspManager, workingDir, interpolateDagRunNode(node, dependencyOutputs))
+	output, err := executeDagRunNodeOutput(ctx, lspManager, workingDir, httpClient, interpolateDagRunNode(node, dependencyOutputs))
 	result.DurationMs = time.Since(startedAt).Milliseconds()
 	result.Output, result.Truncated = truncateDagRunOutput(output, dagRunNodeOutputMaxBytes)
 	if err != nil {
@@ -465,7 +461,7 @@ func executeDagRunNode(ctx context.Context, lspManager *lsp.Manager, workingDir 
 	return result
 }
 
-func executeDagRunNodeOutput(ctx context.Context, lspManager *lsp.Manager, workingDir string, node DagRunNode) (string, error) {
+func executeDagRunNodeOutput(ctx context.Context, lspManager *lsp.Manager, workingDir string, httpClient *http.Client, node DagRunNode) (string, error) {
 	switch node.Kind {
 	case "check_file":
 		if node.Path == "" {
@@ -577,6 +573,31 @@ func executeDagRunNodeOutput(ctx context.Context, lspManager *lsp.Manager, worki
 			output = strings.TrimSpace(output + "\nrun_short_command timed out after " + dagRunShortCommandTimeout.String())
 		}
 		return output, err
+	case "web_search":
+		if node.Query == "" {
+			return "", fmt.Errorf("query is required for web_search")
+		}
+		maxResults := node.Limit
+		if maxResults <= 0 {
+			maxResults = 10
+		}
+		if maxResults > 20 {
+			maxResults = 20
+		}
+		results, err := searchDuckDuckGo(ctx, httpClient, node.Query, maxResults)
+		if err != nil {
+			return "", err
+		}
+		return formatSearchResults(results), nil
+	case "web_fetch":
+		if node.Path == "" {
+			return "", fmt.Errorf("url (path) is required for web_fetch")
+		}
+		content, err := FetchURLAndConvert(ctx, httpClient, node.Path)
+		if err != nil {
+			return "", err
+		}
+		return content, nil
 	default:
 		return "", fmt.Errorf("unsupported kind %q", node.Kind)
 	}

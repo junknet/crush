@@ -1,11 +1,11 @@
-Spawn a sub-agent for a self-contained task.
+为自包含的任务派生一个子智能体。
 
-Default role is `explore`. Use `role=explore` for read-only repository inspection, symbol walks, and evidence gathering. Use `role=worker` for edits, refactors, fixes, docs, and verification. The parent agent owns planning and final synthesis.
+默认角色是 `explore`。使用 `role=explore` 进行只读代码库检查、符号遍历和证据收集。使用 `role=worker` 进行编辑、重构、修复、文档和验证。父智能体拥有规划和最终综合权。
 
-The explore role is a fast, read-only investigator. It searches and reads the repository by path and text (`rg`), structure (`ast_grep`), and symbol (LSP-level definitions, references, call hierarchy). It chooses its own tools for the job, so give it a goal, not a method. It cannot edit, write, mutate, or commit; if the next step is a change, do it yourself or use `role=worker`.
+探索（explore）角色是一个快速、只读的调查员。它通过路径和文本（`rg`）、结构（`ast_grep`）以及符号（LSP 级别的定义、引用、调用层次结构）搜索和阅读仓库。它为工作选择自己的工具，所以给它一个目标，而不是方法。它不能编辑、写入、变动或提交；如果下一步是变更，请自己动手或使用 `role=worker`。
 
-Delegate when the task is self-contained and the role matches the work. Use `explore` for broad repo search, unknown-symbol lookup after a bounded inline pass, multi-module diagnosis, or any task where raw search output would pollute the parent context. Skip it for 1-3 direct lookups, known-file reads, or code search within 2-3 known files. Use `worker` when the result must mutate the workspace. Good prompts are specific: state the goal, name files/symbols already ruled out, and demand a concrete output shape. Vague prompts produce vague reports.
+当任务是自包含的且角色与工作匹配时进行委托。使用 `explore` 进行广泛的仓库搜索、有界内联尝试后的未知符号查找、跨模块诊断，或任何原始搜索输出会污染父级上下文的任务。对于 1-3 次直接查找、已知文件读取或 2-3 个已知文件内的代码搜索，请跳过它。当结果必须改变工作区时使用 `worker`。好的提示词应该是具体的：说明目标，命名已经排除的文件/符号，并要求具体的输出形态。模糊的提示词会产生模糊的报告。
 
-Skip the sub-agent for bounded discovery expected to finish in 3-4 tool calls, single-file lookups when you already know the path, or follow-up that needs prior context.
+对于预计在 3-4 次工具调用中完成的有界发现、已知路径的单文件查找或需要先前上下文的后续行动，请跳过子智能体。
 
-**Cost:** `explore` parallelises wide searches — a chain of `rg` + 4-6 `view`s in the parent costs 8-15 turns and bloats the parent context; one `explore` call returns the same evidence in 1 turn and frees the parent for synthesis. Dispatch when the scope is unclear, broad, or parallelizable; stay inline when the search is already bounded.
+**成本：** `explore` 并行化广泛搜索——在父级中链式调用 `rg` + 4-6 个 `view` 会消耗 8-15 个轮次并使父级上下文膨胀；一次 `explore` 调用可在 1 个轮次内返回相同的证据并释放父级进行综合。当范围不明确、广泛或可并行化时进行分发；如果搜索已经有界，请保持内联。

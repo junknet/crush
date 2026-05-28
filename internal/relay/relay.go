@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
@@ -140,22 +141,34 @@ func Run(ctx context.Context, p *tea.Program, a *app.App, store *config.ConfigSt
 		if len(msgs) > 100 {
 			start = len(msgs) - 100
 		}
+		// Parallelize backfill to speed up first sync on phones.
+		// msg_id handles deduplication if the relay restarts.
+		sem := make(chan struct{}, 16)
 		for i := start; i < len(msgs); i++ {
 			m := msgs[i]
-			payload := WrapEvent(pubsub.Event[message.Message]{
-				Type:    pubsub.CreatedEvent,
-				Payload: m,
-			})
-			if payload == nil {
-				continue
-			}
-			data, err := json.Marshal(payload)
-			if err != nil {
-				continue
-			}
-			if _, err := js.Publish(ctx, subject, data, jetstream.WithMsgID(m.ID)); err != nil {
-				slog.Debug("Relay backfill failed", "id", m.ID, "error", err)
-			}
+			sem <- struct{}{}
+			go func(m message.Message) {
+				defer func() { <-sem }()
+				payload := WrapEvent(pubsub.Event[message.Message]{
+					Type:    pubsub.CreatedEvent,
+					Payload: m,
+				})
+				if payload == nil {
+					return
+				}
+				data, err := json.Marshal(payload)
+				if err != nil {
+					return
+				}
+				if _, err := js.Publish(ctx, subject, data, jetstream.WithMsgID(m.ID)); err != nil {
+					slog.Debug("Relay backfill failed", "id", m.ID, "error", err)
+				}
+			}(m)
+		}
+		// Wait for all in-flight backfills to finish before starting the
+		// live event loop.
+		for i := 0; i < cap(sem); i++ {
+			sem <- struct{}{}
 		}
 	}
 
@@ -272,10 +285,13 @@ func presenceLoop(ctx context.Context, a *app.App, store *config.ConfigStore, se
 
 // Command is a JSON message sent from the phone to the TUI.
 type Command struct {
-	Type       string `json:"type"` // prompt, cancel, grant, set_model
-	Text       string `json:"text,omitempty"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	Action     string `json:"action,omitempty"` // allow, deny
+	Type            string `json:"type"` // prompt, cancel, grant, set_model, history_before
+	Text            string `json:"text,omitempty"`
+	ToolCallID      string `json:"tool_call_id,omitempty"`
+	Action          string `json:"action,omitempty"` // allow, deny
+	BeforeCreatedAt int64  `json:"before_created_at,omitempty"`
+	BeforeMessageID string `json:"before_message_id,omitempty"`
+	Limit           int    `json:"limit,omitempty"`
 	// set_model payload: which role's selected model to swap. Role is one
 	// of "brain" / "worker" / "explore" matching config.SelectedModelType*
 	// keys. Provider+Model are written verbatim to state.yaml via the
@@ -283,6 +299,14 @@ type Command struct {
 	Role     string `json:"role,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
+}
+
+// HistoryPage is returned directly to a requesting mobile client. History is
+// read from the authoritative local database rather than reconstructed from
+// JetStream publish timestamps, which change during relay backfill.
+type HistoryPage struct {
+	Messages  []proto.Message `json:"messages"`
+	Exhausted bool            `json:"exhausted"`
 }
 
 // RelayPromptMsg is sent to the TUI program to inject a prompt.
@@ -367,6 +391,21 @@ func commandLoop(ctx context.Context, p *tea.Program, a *app.App, sessionID stri
 					})
 				}
 			}
+		case "history_before":
+			page, err := loadHistoryPage(ctx, a, sessionID, cmd)
+			if err != nil {
+				slog.Warn("Relay history page failed", "session", sessionID, "error", err)
+				return
+			}
+			if m.Reply == "" {
+				return
+			}
+			data, err := json.Marshal(page)
+			if err != nil {
+				slog.Warn("Relay history response marshal failed", "session", sessionID, "error", err)
+				return
+			}
+			_ = m.Respond(data)
 		}
 	})
 	if err != nil {
@@ -375,6 +414,39 @@ func commandLoop(ctx context.Context, p *tea.Program, a *app.App, sessionID stri
 	}
 	defer sub.Unsubscribe()
 	<-ctx.Done()
+}
+
+func loadHistoryPage(ctx context.Context, a *app.App, sessionID string, cmd Command) (HistoryPage, error) {
+	if a == nil || a.Messages == nil {
+		return HistoryPage{}, fmt.Errorf("loadHistoryPage: message service unavailable")
+	}
+	messages, err := a.Messages.List(ctx, sessionID)
+	if err != nil {
+		return HistoryPage{}, fmt.Errorf("loadHistoryPage: list session %q messages: %w", sessionID, err)
+	}
+	limit := cmd.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	end := len(messages)
+	for i, current := range messages {
+		if cmd.BeforeMessageID != "" && current.ID == cmd.BeforeMessageID {
+			end = i
+			break
+		}
+		if cmd.BeforeMessageID == "" && cmd.BeforeCreatedAt > 0 && current.CreatedAt >= cmd.BeforeCreatedAt {
+			end = i
+			break
+		}
+	}
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	return HistoryPage{
+		Messages:  messagesToProto(messages[start:end]),
+		Exhausted: start == 0,
+	}, nil
 }
 
 // RelayModelUpdateMsg is sent to the TUI program to notify it that a model configuration was updated.

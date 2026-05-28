@@ -53,6 +53,7 @@ import (
 	crushlog "github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/memdir"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/provider"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/scheduler"
@@ -1059,6 +1060,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		go a.maybeUpdateSessionMemory(context.Background(), sessionID, model)
 	}
 
+	// Drain any in_progress todos left over when the agent exits without
+	// calling the todos tool to mark them completed. This prevents the
+	// blink icon from spinning forever in the UI after the turn ends.
+	// Use the parent ctx — genCtx may already be cancelled at this point.
+	a.drainInProgressTodos(ctx, call.SessionID)
+
 	// Release active request before publishing the notification.
 	// TUI handlers poll IsSessionBusy() and only re-evaluate when a
 	// tea.Msg arrives, so the cleanup must precede the notify or
@@ -1529,17 +1536,13 @@ func (a *sessionAgent) preparePrompt(currentSession session.Session, msgs []mess
 			reminder = `This is a reminder that your todo list is currently empty. DO NOT mention this to the user explicitly because they are already aware.
 If you are working on tasks that would benefit from a todo list please use the "todos" tool to create one.
 If not, please feel free to ignore. Again do not mention this message to the user.`
-		} else {
-			reminder = `You have an active todo list. DO NOT stop working or ask for permission until all tasks are either completed or clearly failed.
-If a task fails, try to fix it or mark it as failed using the "todos" tool before yielding.
-Always check your todo list before responding "Ready?".`
+			history = append(history, fantasy.NewUserMessage(
+				fmt.Sprintf(
+					"<system_reminder>%s</system_reminder>",
+					reminder,
+				),
+			))
 		}
-		history = append(history, fantasy.NewUserMessage(
-			fmt.Sprintf(
-				"<system_reminder>%s</system_reminder>",
-				reminder,
-			),
-		))
 	}
 	// Cancel-equals-discard: a cancelled assistant message AND the user
 	// message that triggered it are both excluded from the LLM history.
@@ -1635,7 +1638,12 @@ Always check your todo list before responding "Ready?".`
 			}
 			continue
 		}
-		aiMsgs := m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: m.Role == message.Tool})
+		var aiMsgs []fantasy.Message
+		if m.Role == message.User {
+			aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: !supportsImages})
+		} else {
+			aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: true})
+		}
 		if !supportsImages {
 			for i := range aiMsgs {
 				if aiMsgs[i].Role == fantasy.MessageRoleUser {
@@ -1658,6 +1666,9 @@ Always check your todo list before responding "Ready?".`
 	var files []fantasy.FilePart
 	for _, attachment := range attachments {
 		if attachment.IsText() {
+			continue
+		}
+		if !supportsImages && strings.HasPrefix(attachment.MimeType, "image/") {
 			continue
 		}
 		files = append(files, fantasy.FilePart{
@@ -1694,6 +1705,11 @@ func filterFileParts(parts []fantasy.MessagePart) []fantasy.MessagePart {
 	for _, part := range parts {
 		if _, ok := fantasy.AsMessagePart[fantasy.FilePart](part); ok {
 			continue
+		}
+		if textPart, ok := fantasy.AsMessagePart[fantasy.TextPart](part); ok {
+			if strings.HasPrefix(textPart.Text, "[Image: ") && strings.HasSuffix(textPart.Text, " (truncated)]") {
+				continue
+			}
 		}
 		filtered = append(filtered, part)
 	}
@@ -2734,33 +2750,21 @@ func isContextLengthExceeded(err error) bool {
 	}
 }
 
-func isDefinitiveUpstreamFailure(err error, provider string) bool {
-	if err == nil {
-		return false
+func isDefinitiveUpstreamFailure(err error, providerID string) bool {
+	if provider.IsDefinitiveFailure(err, providerID) {
+		return true
 	}
 	var providerErr *fantasy.ProviderError
 	if errors.As(err, &providerErr) {
-		code := providerErr.StatusCode
-		isWaitAI := strings.Contains(strings.ToLower(provider), "waitai")
-		if isWaitAI && (code == 400 || code == 422) {
-			// Skip treating 400/422 as definitive failures for waitai to prevent
-			// mock transient failures or verification prompts from failing tests.
-			return false
-		}
-		if code == 401 || code == 402 || code == 403 || code == 429 || code == 502 || code == 503 || code == 504 || code == 400 || code == 422 {
+		switch providerErr.StatusCode {
+		case 429, 502, 503, 504:
 			return true
 		}
 	}
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "rate limit") ||
-		strings.Contains(msg, "insufficient balance") ||
-		strings.Contains(msg, "credit limit") ||
-		strings.Contains(msg, "billing") ||
+	return strings.Contains(msg, "rate limit") ||
 		strings.Contains(msg, "first-token timeout") ||
-		strings.Contains(msg, "quota exceeded") {
-		return true
-	}
-	return false
+		strings.Contains(msg, "quota exceeded")
 }
 
 func shouldCloseProviderIdleConnections(err error, cause error) bool {
@@ -2792,4 +2796,30 @@ func isProviderConnectionPoolFailure(err error) bool {
 
 func isTesting() bool {
 	return os.Getenv("CRUSH_UNIT_TESTING") == "1" || flag.Lookup("test.v") != nil
+}
+
+// drainInProgressTodos resets any todos that are still marked in_progress
+// back to pending when the agent exits. This prevents the blinking in-progress
+// icon from spinning forever in the UI after a turn ends without the agent
+// having called the todos tool to finalize their state.
+func (a *sessionAgent) drainInProgressTodos(ctx context.Context, sessionID string) {
+	sess, err := a.sessions.Get(ctx, sessionID)
+	if err != nil {
+		slog.DebugContext(ctx, "drainInProgressTodos: failed to get session", "session_id", sessionID, "error", err)
+		return
+	}
+	dirty := false
+	for i := range sess.Todos {
+		if sess.Todos[i].Status == session.TodoStatusInProgress {
+			sess.Todos[i].Status = session.TodoStatusPending
+			sess.Todos[i].ActiveForm = ""
+			dirty = true
+		}
+	}
+	if !dirty {
+		return
+	}
+	if _, saveErr := a.sessions.Save(ctx, sess); saveErr != nil {
+		slog.WarnContext(ctx, "drainInProgressTodos: failed to save session", "session_id", sessionID, "error", saveErr)
+	}
 }

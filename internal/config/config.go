@@ -785,8 +785,12 @@ func allToolNames() []string {
 		"ssh_session_output",
 		"ssh_session_send",
 		"ssh_session_kill",
+		"ssh_session_list",
 		"ssh_mount",
 		"ssh_unmount",
+		"ssh_mount_list",
+		"ssh_mount_status",
+		"ssh_remount",
 		"sourcegraph",
 		"todos",
 		"view",
@@ -811,6 +815,7 @@ func resolveExploreTools(tools []string) []string {
 	// (edit/multiedit/write/download/todos) and nim_restart are excluded.
 	exploreTools := []string{
 		"bash", "rg", "ls", "sourcegraph", "view",
+		"list_mcp_resources", "read_mcp_resource",
 		"nim_call_hierarchy",
 		"nim_check_file",
 		"nim_definition",
@@ -860,7 +865,6 @@ func (c *Config) SetupAgents() {
 			Model:        SelectedModelTypePlan,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: resolveExploreTools(allowedTools),
-			AllowedMCP:   map[string][]string{},
 		},
 		AgentWorker: {
 			ID:           AgentWorker,
@@ -877,8 +881,6 @@ func (c *Config) SetupAgents() {
 			Model:        SelectedModelTypeExplore,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: resolveExploreTools(allowedTools),
-			// NO MCPs or LSPs by default
-			AllowedMCP: map[string][]string{},
 			// 16 turns: 8 was too tight for multi-question briefs.
 			// A typical brief has 3-4 sub-questions, each needing 2-3 reads;
 			// at 8 turns the agent would run out mid-investigation and emit
@@ -894,7 +896,6 @@ func (c *Config) SetupAgents() {
 			Model:        SelectedModelTypeAuditor,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: resolveExploreTools(allowedTools),
-			AllowedMCP:   map[string][]string{},
 		},
 	}
 
@@ -920,7 +921,6 @@ func (c *Config) SetupAgents() {
 				Description:  agent.Description,
 				Model:        cmp.Or(agent.Model, defaultAgentModelType(name)),
 				AllowedTools: allowedTools,
-				AllowedMCP:   map[string][]string{},
 				ContextPaths: c.Options.ContextPaths,
 				Disabled:     false,
 			}

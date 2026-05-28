@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/diff"
@@ -255,23 +254,6 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 	sessionID := GetSessionFromContext(edit.ctx)
 	if sessionID == "" {
 		return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for editing file")
-	}
-
-	// Check if file was read before editing
-	lastRead := edit.filetracker.LastReadTime(edit.ctx, sessionID, params.FilePath)
-	if lastRead.IsZero() {
-		return fantasy.NewTextErrorResponse("you must read the file before editing it. Use the View tool first"), nil
-	}
-
-	// Check if file was modified since last read.
-	modTime := fileInfo.ModTime().Truncate(time.Second)
-	if modTime.After(lastRead) {
-		return fantasy.NewTextErrorResponse(
-			fmt.Sprintf(
-				"file %s has been modified since it was last read (mod time: %s, last read: %s)",
-				params.FilePath, modTime.Format(time.RFC3339), lastRead.Format(time.RFC3339),
-			),
-		), nil
 	}
 
 	// Read current file content

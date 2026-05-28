@@ -21,6 +21,10 @@ type KeyMap struct {
 		// History navigation
 		HistoryPrev key.Binding
 		HistoryNext key.Binding
+
+		// Word navigation
+		WordLeft  key.Binding
+		WordRight key.Binding
 	}
 
 	Chat struct {
@@ -155,6 +159,13 @@ func DefaultKeyMap() KeyMap {
 	)
 	km.Editor.HistoryNext = key.NewBinding(
 		key.WithKeys("down"),
+	)
+	km.Editor.WordLeft = key.NewBinding(
+		key.WithKeys("ctrl+left", "alt+left", "alt+b"),
+		key.WithHelp("ctrl+←/→", "word jump"),
+	)
+	km.Editor.WordRight = key.NewBinding(
+		key.WithKeys("ctrl+right", "alt+right", "alt+f"),
 	)
 
 	km.Chat.NewSession = key.NewBinding(

@@ -70,6 +70,121 @@ func TestHasMemoryWrites(t *testing.T) {
 		},
 	}
 	assert.True(t, hasMemoryWrites(msgs3, memoryDir))
+
+	msgs4 := []message.Message{
+		{
+			Role: message.User,
+			Parts: []message.ContentPart{
+				message.TextContent{Text: "Write adjacent file"},
+			},
+		},
+		{
+			Role: message.Assistant,
+			Parts: []message.ContentPart{
+				message.ToolCall{
+					Name:  "write",
+					Input: `{"file_path":"/workspace/project/memory_backup/file.md"}`,
+				},
+			},
+		},
+	}
+	assert.False(t, hasMemoryWrites(msgs4, memoryDir))
+}
+
+func TestShouldTriggerWorkspaceMemoryExtraction(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips short ordinary turns", func(t *testing.T) {
+		t.Parallel()
+
+		msgs := []message.Message{
+			{ID: "u1", Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "what changed?"}}},
+			{ID: "a1", Role: message.Assistant, Parts: []message.ContentPart{message.TextContent{Text: "nothing durable"}}},
+		}
+
+		assert.False(t, shouldTriggerWorkspaceMemoryExtraction(msgs, workspaceMemoryExtractionState{}, 500))
+	})
+
+	t.Run("explicit durable prompt bypasses token threshold", func(t *testing.T) {
+		t.Parallel()
+
+		msgs := []message.Message{
+			{ID: "u1", Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "以后都不要用 Python，记住这个偏好"}}},
+			{ID: "a1", Role: message.Assistant, Parts: []message.ContentPart{message.TextContent{Text: "已记录"}}},
+		}
+
+		assert.True(t, shouldTriggerWorkspaceMemoryExtraction(msgs, workspaceMemoryExtractionState{}, 500))
+	})
+
+	t.Run("requires token growth before background extraction", func(t *testing.T) {
+		t.Parallel()
+
+		msgs := []message.Message{
+			{ID: "u1", Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "continue"}}},
+			{ID: "a1", Role: message.Assistant, Parts: []message.ContentPart{message.ToolCall{Name: "rg", Input: "{}"}}},
+		}
+		state := workspaceMemoryExtractionState{
+			SessionID:              "s1",
+			LastMessageID:          "u1",
+			TokensAtLastExtraction: 9_000,
+			Initialized:            true,
+		}
+
+		assert.False(t, shouldTriggerWorkspaceMemoryExtraction(msgs, state, 12_000))
+	})
+
+	t.Run("triggers at natural break after enough context growth", func(t *testing.T) {
+		t.Parallel()
+
+		msgs := []message.Message{
+			{ID: "u1", Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "continue"}}},
+			{ID: "a1", Role: message.Assistant, Parts: []message.ContentPart{message.TextContent{Text: "finished a large investigation"}}},
+		}
+		state := workspaceMemoryExtractionState{
+			SessionID:              "s1",
+			LastMessageID:          "u1",
+			TokensAtLastExtraction: 8_000,
+			Initialized:            true,
+		}
+
+		assert.True(t, shouldTriggerWorkspaceMemoryExtraction(msgs, state, 14_000))
+	})
+
+	t.Run("triggers after enough tool activity and context growth", func(t *testing.T) {
+		t.Parallel()
+
+		msgs := []message.Message{
+			{ID: "u1", Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "audit this"}}},
+			{ID: "a1", Role: message.Assistant, Parts: []message.ContentPart{
+				message.ToolCall{Name: "rg", Input: "{}"},
+				message.ToolCall{Name: "view", Input: "{}"},
+				message.ToolCall{Name: "agent", Input: "{}"},
+			}},
+		}
+		state := workspaceMemoryExtractionState{
+			SessionID:              "s1",
+			LastMessageID:          "u1",
+			TokensAtLastExtraction: 8_000,
+			Initialized:            true,
+		}
+
+		assert.True(t, shouldTriggerWorkspaceMemoryExtraction(msgs, state, 14_000))
+	})
+}
+
+func TestWorkspaceMemoryExtractionStateIsSessionScoped(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, writeWorkspaceMemoryExtractionState(dir, workspaceMemoryExtractionState{
+		SessionID:              "session-a",
+		LastMessageID:          "message-a",
+		TokensAtLastExtraction: 12_000,
+		Initialized:            true,
+	}))
+
+	assert.True(t, readWorkspaceMemoryExtractionState(dir, "session-a").Initialized)
+	assert.False(t, readWorkspaceMemoryExtractionState(dir, "session-b").Initialized)
 }
 
 func TestMemExtractToolWrapper(t *testing.T) {

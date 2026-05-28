@@ -406,6 +406,22 @@ func activeSubAgentStatus(entry subAgentEntry) string {
 	}
 }
 
+// drainRunningSubAgents transitions every subAgentRunning entry to
+// subAgentFailed. Call this when the brain agent finishes its turn so entries
+// without a Finished/Failed notification are cleaned up and the header timer
+// is cleared.
+func drainRunningSubAgents(entries []subAgentEntry) []subAgentEntry {
+	now := time.Now()
+	for i := range entries {
+		if entries[i].Status == subAgentRunning {
+			entries[i].Status = subAgentFailed
+			entries[i].LastStatus = "failed"
+			entries[i].UpdatedAt = now
+		}
+	}
+	return entries
+}
+
 // truncatePrompt shortens a multi-line prompt to a single ellipsised
 // line of the given width. width <= 4 returns "…".
 func truncatePrompt(p string, width int) string {

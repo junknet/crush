@@ -1,5 +1,12 @@
 package provider
 
+import (
+	"errors"
+	"strings"
+
+	"charm.land/fantasy"
+)
+
 // RequestPurpose describes the high-level goal of a request.
 type RequestPurpose string
 
@@ -101,4 +108,36 @@ type RequestIntent struct {
 	MaxOutputTokens int
 	ToolMode        ToolMode
 	Tools           []string
+}
+
+// IsDefinitiveFailure returns true when the error is considered non-retryable
+// (e.g. invalid arguments, billing issues, access denied). Transient errors
+// like rate limits or 5xx server errors return false.
+func IsDefinitiveFailure(err error, provider string) bool {
+	if err == nil {
+		return false
+	}
+	var providerErr *fantasy.ProviderError
+	if errors.As(err, &providerErr) {
+		code := providerErr.StatusCode
+		isWaitAI := strings.Contains(strings.ToLower(provider), "waitai")
+		if isWaitAI && (code == 400 || code == 422) {
+			// Skip treating 400/422 as definitive failures for waitai to prevent
+			// mock transient failures or verification prompts from failing tests.
+			return false
+		}
+		// Definitive: auth/billing/permissions/invalid-args.
+		// Transient (not in list): 429, 502, 503, 504.
+		if code == 401 || code == 402 || code == 403 || code == 400 || code == 422 {
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "insufficient balance") ||
+		strings.Contains(msg, "credit limit") ||
+		strings.Contains(msg, "billing") ||
+		strings.Contains(msg, "quota exceeded") {
+		return true
+	}
+	return false
 }

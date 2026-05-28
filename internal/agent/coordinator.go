@@ -18,13 +18,13 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	agentprompt "github.com/charmbracelet/crush/internal/agent/prompt"
+	"github.com/charmbracelet/crush/internal/agent/remoteregistry"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/event"
@@ -151,6 +151,8 @@ type coordinator struct {
 	traceMu     sync.RWMutex
 	lastRuntime *agentruntime.RuntimeSession
 
+	remoteRegistry *remoteregistry.Registry
+
 	currentAgent     SessionAgent
 	currentAgentName string
 	agents           map[string]SessionAgent
@@ -182,22 +184,28 @@ func NewCoordinator(
 	allSkills, activeSkills := discoverSkills(cfg)
 	skillTracker := skills.NewTracker(activeSkills)
 
+	remoteRegistry, err := remoteregistry.NewRegistry(cfg.Config().Options.DataDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize remote registry: %w", err)
+	}
+
 	c := &coordinator{
-		cfg:           cfg,
-		sessions:      sessions,
-		messages:      messages,
-		permissions:   permissions,
-		history:       history,
-		filetracker:   filetracker,
-		lspManager:    lspManager,
-		bgManager:     bgManager,
-		notify:        notify,
-		agents:        make(map[string]SessionAgent),
-		allSkills:     allSkills,
-		activeSkills:  activeSkills,
-		skillTracker:  skillTracker,
-		runtime:       agentruntime.NewSession(cfg.WorkingDir(), nil),
-		activeCancels: make(map[string]context.CancelCauseFunc),
+		cfg:            cfg,
+		sessions:       sessions,
+		messages:       messages,
+		permissions:    permissions,
+		history:        history,
+		filetracker:    filetracker,
+		lspManager:     lspManager,
+		bgManager:      bgManager,
+		notify:         notify,
+		agents:         make(map[string]SessionAgent),
+		allSkills:      allSkills,
+		activeSkills:   activeSkills,
+		skillTracker:   skillTracker,
+		remoteRegistry: remoteRegistry,
+		runtime:        agentruntime.NewSession(cfg.WorkingDir(), nil),
+		activeCancels:  make(map[string]context.CancelCauseFunc),
 	}
 
 	agentName := config.AgentBrain
@@ -709,14 +717,63 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 
 	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
 
-	if originalErr == nil && result != nil && rootProfile == scheduler.ProfileBrainAgent {
+	if originalErr == nil && result != nil && (rootProfile == scheduler.ProfileBrainAgent || rootProfile == scheduler.ProfileWorkerAgent) {
 		if !readOnlyTurn {
 			sid := sessionID
 			go c.triggerMemoryExtraction(context.Background(), sid)
+
+			// Auto-continuation if todos are unfinished.
+			// Handled in a separate goroutine so we don't block the current Run return.
+			go c.triggerTodoContinuation(context.Background(), sid)
 		}
 	}
 
 	return result, originalErr
+}
+
+func (c *coordinator) triggerTodoContinuation(ctx context.Context, sessionID string) {
+	// Give the system a moment to settle (DB writes, etc.)
+	time.Sleep(100 * time.Millisecond)
+
+	sess, err := c.sessions.Get(ctx, sessionID)
+	if err != nil {
+		return
+	}
+
+	if len(sess.Todos) == 0 {
+		return
+	}
+
+	hasIncomplete := false
+	var incompleteList strings.Builder
+	for _, t := range sess.Todos {
+		if t.Status == session.TodoStatusPending || t.Status == session.TodoStatusInProgress {
+			hasIncomplete = true
+			status := string(t.Status)
+			if t.Status == session.TodoStatusInProgress && t.ActiveForm != "" {
+				fmt.Fprintf(&incompleteList, "- [%s] %s (活动中: %s)\n", status, t.Content, t.ActiveForm)
+			} else {
+				fmt.Fprintf(&incompleteList, "- [%s] %s\n", status, t.Content)
+			}
+		}
+	}
+
+	if !hasIncomplete {
+		return
+	}
+
+	prompt := fmt.Sprintf(
+		"你的待办事项列表中还有未完成的任务。请继续工作直到所有项都被标记为已完成或失败。\n\n"+
+			"<current_todos>\n%s</current_todos>\n\n"+
+			"这是系统自动发起的继续指令，不是新的用户请求。请专注于完成上述任务。",
+		incompleteList.String())
+
+	slog.Debug("待办事项未完成，自动发起继续指令", "session_id", sessionID)
+
+	// Use WithSystemPrompt to mark this as a system-initiated run.
+	if _, err := c.Run(WithSystemPrompt(ctx), sessionID, prompt, false); err != nil {
+		slog.Error("待办事项自动继续运行失败", "session_id", sessionID, "error", err)
+	}
 }
 
 // TraceEntries returns the trace entries recorded by the most recent run.
@@ -1073,6 +1130,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	logFile := filepath.Join(c.cfg.Config().Options.DataDirectory, "logs", "crush.log")
 
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
 	// Hook runner for tool-call wrappers. Distinct from the one built in
 	// buildAgent (which feeds turn-level Stop hooks) because buildTools
 	// runs on a different control path; both share the same config so
@@ -1096,16 +1157,20 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewJobKillTool(c.bgManager),
 		tools.NewMonitorTool(c.bgManager),
 		tools.NewScheduleWakeupTool(c.cfg.Config().Options.DataDirectory),
-		tools.NewSSHExecTool(c.permissions),
-		tools.NewSSHSessionStartTool(c.permissions),
-		tools.NewSSHSessionOutputTool(c.permissions),
-		tools.NewSSHSessionSendTool(c.permissions),
-		tools.NewSSHSessionKillTool(c.permissions),
-		tools.NewSSHMountTool(c.permissions, c.cfg.Config().Options.DataDirectory),
-		tools.NewSSHUnmountTool(c.permissions),
-		tools.NewEvidenceBatchTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
-		tools.NewEvidenceGraphTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
-		tools.NewDagRunTool(c.lspManager, c.permissions, c.cfg.WorkingDir()),
+		tools.NewSSHExecTool(c.permissions, c.cfg.Config().Options.DataDirectory),
+		tools.NewSSHSessionStartTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
+		tools.NewSSHSessionOutputTool(c.permissions, c.cfg.Config().Options.DataDirectory),
+		tools.NewSSHSessionSendTool(c.permissions, c.cfg.Config().Options.DataDirectory),
+		tools.NewSSHSessionKillTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
+		tools.NewSSHMountTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
+		tools.NewSSHUnmountTool(c.permissions, c.remoteRegistry),
+		tools.NewSSHMountListTool(c.remoteRegistry),
+		tools.NewSSHMountStatusTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
+		tools.NewSSHRemountTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
+		tools.NewSSHSessionListTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
+		tools.NewEvidenceBatchTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
+		tools.NewEvidenceGraphTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
+		tools.NewDagRunTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
@@ -1173,30 +1238,28 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// bounded even when many MCP servers expose hundreds of tools.
 	var deferredRegistry *tools.DeferredRegistry
 	mcpTools := tools.GetMCPTools(c.permissions, c.cfg, c.cfg.WorkingDir())
-	if len(mcpTools) > 0 || len(c.cfg.Config().MCP) > 0 {
-		deferredRegistry = tools.NewDeferredRegistry()
-	}
-	for _, tool := range mcpTools {
-		if agent.AllowedMCP == nil {
-			// No MCP restrictions
-			deferredRegistry.Register(tool, tool.MCP())
-			continue
-		}
-		if len(agent.AllowedMCP) == 0 {
-			// No MCPs allowed
-			slog.Debug("No MCPs allowed", "tool", tool.Name(), "agent", agent.Name)
-			break
-		}
+	hasMCPRestrictions := agent.AllowedMCP != nil
+	noMCPAllowed := hasMCPRestrictions && len(agent.AllowedMCP) == 0
 
-		for mcpName, mcpTools := range agent.AllowedMCP {
-			if mcpName != tool.MCP() {
+	if (len(mcpTools) > 0 || len(c.cfg.Config().MCP) > 0) && !noMCPAllowed {
+		deferredRegistry = tools.NewDeferredRegistry()
+		for _, tool := range mcpTools {
+			if !hasMCPRestrictions {
+				// No MCP restrictions
+				deferredRegistry.Register(tool, tool.MCP())
 				continue
 			}
-			if len(mcpTools) == 0 || slices.Contains(mcpTools, tool.MCPToolName()) {
-				deferredRegistry.Register(tool, tool.MCP())
-				break
+
+			for mcpName, mcpTools := range agent.AllowedMCP {
+				if mcpName != tool.MCP() {
+					continue
+				}
+				if len(mcpTools) == 0 || slices.Contains(mcpTools, tool.MCPToolName()) {
+					deferredRegistry.Register(tool, tool.MCP())
+					break
+				}
+				slog.Debug("MCP not allowed", "tool", tool.Name(), "agent", agent.Name)
 			}
-			slog.Debug("MCP not allowed", "tool", tool.Name(), "agent", agent.Name)
 		}
 	}
 
@@ -1956,7 +2019,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		c.bindTaskNodeModel(node, model)
 		c.appendTaskInputTrace(taskRuntime, node, taskPrompt)
 		requestStartedAt := time.Now()
-		runResult, runErr := params.Agent.Run(taskCtx, SessionAgentCall{
+		runResult, runErr := params.Agent.Run(WithSystemPrompt(taskCtx), SessionAgentCall{
 			SessionID:        session.ID,
 			Prompt:           taskPrompt,
 			MaxOutputTokens:  callMaxTokens,
@@ -2607,12 +2670,7 @@ func logDiscoveryStats(
 }
 
 func (c *coordinator) triggerMemoryExtraction(ctx context.Context, sessionID string) {
-	exploreAgent := c.agentForProfile(scheduler.ProfileExploreAgent)
-	if exploreAgent == nil {
-		slog.Debug("Skipping memory extraction — explore agent not configured")
-		return
-	}
-
+	startedAt := time.Now()
 	msgs, err := c.messages.List(ctx, sessionID)
 	if err != nil {
 		slog.Error("Failed to list messages for memory extraction", "session", sessionID, "error", err)
@@ -2620,18 +2678,54 @@ func (c *coordinator) triggerMemoryExtraction(ctx context.Context, sessionID str
 	}
 
 	memoryDir := memdir.MemoryDir(c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir())
-	if err := memdir.EnsureWorkspace(c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()); err != nil {
-		slog.Debug("Failed to ensure memory workspace", "session", sessionID, "error", err)
-		return
-	}
-
 	if hasMemoryWrites(msgs, memoryDir) {
 		slog.Debug("Skipping memory extraction — turn already wrote memories", "session", sessionID)
 		return
 	}
 
+	state := readWorkspaceMemoryExtractionState(memoryDir, sessionID)
+	tokenCount := estimateSummaryMessageTokens(msgs, false)
+	if !shouldTriggerWorkspaceMemoryExtraction(msgs, state, tokenCount) {
+		slog.Debug("Skipping memory extraction — thresholds not met", "session", sessionID, "tokens", tokenCount)
+		return
+	}
+
+	exploreAgent := c.agentForProfile(scheduler.ProfileExploreAgent)
+	if exploreAgent == nil {
+		c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemorySaveFailed, memoryTraceOptions{
+			sessionID:  sessionID,
+			startedAt:  startedAt,
+			finishedAt: time.Now(),
+			err:        errors.New("explore agent not configured"),
+		})
+		slog.Debug("Skipping memory extraction — explore agent not configured")
+		return
+	}
+
+	if err := memdir.EnsureWorkspace(c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()); err != nil {
+		c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemorySaveFailed, memoryTraceOptions{
+			sessionID:  sessionID,
+			startedAt:  startedAt,
+			finishedAt: time.Now(),
+			err:        err,
+		})
+		slog.Debug("Failed to ensure memory workspace", "session", sessionID, "error", err)
+		return
+	}
+
+	c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemorySaveStarted, memoryTraceOptions{
+		sessionID: sessionID,
+		startedAt: startedAt,
+	})
+
 	derivedID := sessionID + "-mem-extract"
 	if err := c.sessions.PrepareDerivedSession(ctx, sessionID, derivedID); err != nil {
+		c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemorySaveFailed, memoryTraceOptions{
+			sessionID:  sessionID,
+			startedAt:  startedAt,
+			finishedAt: time.Now(),
+			err:        err,
+		})
 		slog.Debug("Failed to prepare memory extraction session", "session", sessionID, "error", err)
 		return
 	}
@@ -2686,8 +2780,28 @@ Tool policy:
 		Prompt:    extractionPrompt,
 	})
 	if err != nil {
+		c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemorySaveFailed, memoryTraceOptions{
+			sessionID:  sessionID,
+			startedAt:  startedAt,
+			finishedAt: time.Now(),
+			err:        err,
+		})
 		slog.Debug("Background memory extraction finished with error", "session", sessionID, "error", err)
 	} else {
+		c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemorySaveFinished, memoryTraceOptions{
+			sessionID:  sessionID,
+			startedAt:  startedAt,
+			finishedAt: time.Now(),
+		})
+		state = workspaceMemoryExtractionState{
+			SessionID:              sessionID,
+			LastMessageID:          lastMessageID(msgs),
+			TokensAtLastExtraction: tokenCount,
+			Initialized:            true,
+		}
+		if stateErr := writeWorkspaceMemoryExtractionState(memoryDir, state); stateErr != nil {
+			slog.Debug("Failed to write memory extraction state", "session", sessionID, "error", stateErr)
+		}
 		slog.Debug("Background memory extraction finished successfully", "session", sessionID)
 	}
 
@@ -2695,6 +2809,9 @@ Tool policy:
 }
 
 func hasMemoryWrites(msgs []message.Message, memoryDir string) bool {
+	if strings.TrimSpace(memoryDir) == "" {
+		return false
+	}
 	cleanMemDir := filepath.Clean(memoryDir)
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
@@ -2717,7 +2834,7 @@ func hasMemoryWrites(msgs []message.Message, memoryDir string) bool {
 					}
 					if fp != "" {
 						cleanPath := filepath.Clean(fp)
-						if strings.HasPrefix(cleanPath, cleanMemDir) {
+						if cleanPath == cleanMemDir || strings.HasPrefix(cleanPath, cleanMemDir+string(filepath.Separator)) {
 							return true
 						}
 					}
@@ -2728,10 +2845,131 @@ func hasMemoryWrites(msgs []message.Message, memoryDir string) bool {
 	return false
 }
 
+const (
+	workspaceMemoryInitTokens   int64 = 10_000
+	workspaceMemoryUpdateTokens int64 = 5_000
+	workspaceMemoryToolCalls          = 3
+)
+
+type workspaceMemoryExtractionState struct {
+	SessionID              string `json:"session_id"`
+	LastMessageID          string `json:"last_message_id"`
+	TokensAtLastExtraction int64  `json:"tokens_at_last_extraction"`
+	Initialized            bool   `json:"initialized"`
+}
+
+func workspaceMemoryExtractionStatePath(memoryDir string) string {
+	if memoryDir == "" {
+		return ""
+	}
+	return filepath.Join(memoryDir, ".extraction_state.json")
+}
+
+func readWorkspaceMemoryExtractionState(memoryDir, sessionID string) workspaceMemoryExtractionState {
+	path := workspaceMemoryExtractionStatePath(memoryDir)
+	if path == "" {
+		return workspaceMemoryExtractionState{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return workspaceMemoryExtractionState{}
+	}
+	var state workspaceMemoryExtractionState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return workspaceMemoryExtractionState{}
+	}
+	if state.SessionID != sessionID {
+		return workspaceMemoryExtractionState{}
+	}
+	return state
+}
+
+func writeWorkspaceMemoryExtractionState(memoryDir string, state workspaceMemoryExtractionState) error {
+	path := workspaceMemoryExtractionStatePath(memoryDir)
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func shouldTriggerWorkspaceMemoryExtraction(msgs []message.Message, state workspaceMemoryExtractionState, tokenCount int64) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	if workspaceMemoryPromptHasDurableSignal(lastUserPromptText(msgs)) {
+		return true
+	}
+	if !state.Initialized && tokenCount < workspaceMemoryInitTokens {
+		return false
+	}
+	if tokenCount-state.TokensAtLastExtraction < workspaceMemoryUpdateTokens {
+		return false
+	}
+	toolCalls := countToolCallsSinceMessage(msgs, state.LastMessageID)
+	return toolCalls >= workspaceMemoryToolCalls || !lastAssistantHasToolCalls(msgs)
+}
+
+func workspaceMemoryPromptHasDurableSignal(prompt string) bool {
+	prompt = strings.ToLower(strings.TrimSpace(prompt))
+	if prompt == "" {
+		return false
+	}
+	needles := [...]string{
+		"remember",
+		"save this",
+		"store this",
+		"keep this in memory",
+		"from now on",
+		"always ",
+		"never ",
+		"preference",
+		"记住",
+		"保存记忆",
+		"存储记忆",
+		"写入记忆",
+		"以后都",
+		"之后都",
+		"以后不要",
+		"不要再",
+		"偏好",
+		"纠正",
+	}
+	for _, needle := range needles {
+		if strings.Contains(prompt, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func lastUserPromptText(msgs []message.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == message.User {
+			return msgs[i].Content().Text
+		}
+	}
+	return ""
+}
+
+func lastMessageID(msgs []message.Message) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	return msgs[len(msgs)-1].ID
+}
+
 func (c *coordinator) relevantMemoryAttachments(ctx context.Context, sessionID, prompt string) []message.Attachment {
 	if !memoryRecallPromptEligible(prompt) {
 		return nil
 	}
+	startedAt := time.Now()
 	dataDir := c.cfg.Config().Options.DataDirectory
 	workingDir := c.cfg.WorkingDir()
 	alreadySurfaced := map[string]struct{}{}
@@ -2752,12 +2990,32 @@ func (c *coordinator) relevantMemoryAttachments(ctx context.Context, sessionID, 
 	}
 	memories, err := memdir.FindRelevantMemories(ctx, dataDir, workingDir, prompt, alreadySurfaced)
 	if err != nil {
+		c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemoryRecallFailed, memoryTraceOptions{
+			sessionID:  sessionID,
+			startedAt:  startedAt,
+			finishedAt: time.Now(),
+			err:        err,
+			workingDir: workingDir,
+		})
 		slog.Debug("Relevant memory recall failed", "session", sessionID, "error", err)
 		return nil
 	}
 	if len(memories) == 0 {
 		return nil
 	}
+	c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemoryRecallStarted, memoryTraceOptions{
+		sessionID:  sessionID,
+		startedAt:  startedAt,
+		count:      len(memories),
+		workingDir: workingDir,
+	})
+	c.publishMemoryRuntimeTrace(agentruntime.TraceKindMemoryRecallFinished, memoryTraceOptions{
+		sessionID:  sessionID,
+		startedAt:  startedAt,
+		finishedAt: time.Now(),
+		count:      len(memories),
+		workingDir: workingDir,
+	})
 	attachments := make([]message.Attachment, 0, len(memories))
 	for _, memory := range memories {
 		attachments = append(attachments, message.Attachment{
@@ -2772,12 +3030,65 @@ func (c *coordinator) relevantMemoryAttachments(ctx context.Context, sessionID, 
 	return attachments
 }
 
+type memoryTraceOptions struct {
+	sessionID  string
+	startedAt  time.Time
+	finishedAt time.Time
+	count      int
+	err        error
+	workingDir string
+}
+
+func (c *coordinator) publishMemoryRuntimeTrace(kind agentruntime.TraceKind, opts memoryTraceOptions) {
+	if opts.sessionID == "" {
+		return
+	}
+	startedAt := opts.startedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	finishedAt := opts.finishedAt
+	status := "running"
+	success := false
+	switch kind {
+	case agentruntime.TraceKindMemoryRecallFinished, agentruntime.TraceKindMemorySaveFinished:
+		status = "finished"
+		success = true
+	case agentruntime.TraceKindMemoryRecallFailed, agentruntime.TraceKindMemorySaveFailed:
+		status = "failed"
+	}
+	durationMs := int64(0)
+	if !finishedAt.IsZero() {
+		durationMs = finishedAt.Sub(startedAt).Milliseconds()
+	}
+	errText := ""
+	if opts.err != nil {
+		errText = opts.err.Error()
+	}
+	if opts.workingDir == "" && c != nil && c.cfg != nil {
+		opts.workingDir = c.cfg.WorkingDir()
+	}
+	agentruntime.PublishTraceEvent(agentruntime.TaskTrace{
+		StartedAt:             startedAt,
+		FinishedAt:            finishedAt,
+		DurationMs:            durationMs,
+		ConversationSessionID: opts.sessionID,
+		SessionID:             opts.sessionID,
+		RequestID:             string(kind) + ":" + opts.sessionID,
+		Kind:                  kind,
+		Status:                status,
+		Success:               success,
+		FileCount:             opts.count,
+		Error:                 errText,
+		WorkingDir:            opts.workingDir,
+	})
+}
+
 func memoryRecallPromptEligible(prompt string) bool {
-	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
+	if os.Getenv("CRUSH_DISABLE_MEMORY_RECALL") == "true" || os.Getenv("CRUSH_UNIT_TESTING") == "1" {
 		return false
 	}
-	return strings.ContainsFunc(prompt, unicode.IsSpace) || len([]rune(prompt)) >= 12
+	return strings.TrimSpace(prompt) != ""
 }
 
 type aliasTool struct {

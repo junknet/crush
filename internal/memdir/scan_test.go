@@ -2,6 +2,7 @@ package memdir
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,5 +126,59 @@ func TestReadMemoryForRecallTruncates(t *testing.T) {
 	}
 	if !strings.Contains(got, "Memory truncated") {
 		t.Fatalf("expected truncation notice, got %q", got)
+	}
+}
+
+func TestReadMemoryForRecallStripsFrontmatter(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "repo")
+	path, err := WriteMemoryFile(dir, workspace, Frontmatter{
+		Name:        "l2-microstructure-mining",
+		Description: "Level-2 feature notes",
+		Type:        MemoryReference,
+	}, "Use iceberg and aggressive buying features.")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadMemoryForRecall(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "metadata:") || strings.Contains(got, "type: reference") {
+		t.Fatalf("frontmatter leaked into recall content: %s", got)
+	}
+	if !strings.Contains(got, "Memory: l2-microstructure-mining") {
+		t.Fatalf("missing memory label: %s", got)
+	}
+	if !strings.Contains(got, "Use iceberg and aggressive buying features.") {
+		t.Fatalf("missing body: %s", got)
+	}
+}
+
+func BenchmarkFindRelevantMemories(b *testing.B) {
+	dir := b.TempDir()
+	workspace := filepath.Join(dir, "repo")
+
+	// Seed 50 mock memory files to simulate a medium/large memory directory
+	for i := 0; i < 50; i++ {
+		_, err := WriteMemoryFile(dir, workspace, Frontmatter{
+			Name:        fmt.Sprintf("topic-file-%d", i),
+			Description: fmt.Sprintf("description for topic file index %d including keyword feature-engineering", i),
+			Type:        MemoryProject,
+		}, fmt.Sprintf("This is the detailed body content of topic file %d representing quantitative Quant research.", i))
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := FindRelevantMemories(context.Background(), dir, workspace, "how to perform feature-engineering in quant research", nil)
+		if err != nil {
+			b.Fatal(err)
+		}
 	}
 }

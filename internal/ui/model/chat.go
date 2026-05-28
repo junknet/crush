@@ -648,6 +648,25 @@ func (m *Chat) MessageItem(id string) chat.MessageItem {
 	return item
 }
 
+// CancelDanglingAgentTools marks every agent tool call that has not received
+// a result as ToolStatusCanceled. Call this when the brain agent finishes so
+// explore/worker tool calls without results do not spin indefinitely.
+func (m *Chat) CancelDanglingAgentTools() {
+	for i := range m.list.Len() {
+		agentItem, ok := m.list.ItemAt(i).(*chat.AgentToolMessageItem)
+		if !ok {
+			continue
+		}
+		if agentItem.Status() == chat.ToolStatusCanceled {
+			continue
+		}
+		if agentItem.HasResult() {
+			continue
+		}
+		agentItem.SetStatus(chat.ToolStatusCanceled)
+	}
+}
+
 // ToggleExpandedSelectedItem expands the selected message item if it is expandable.
 func (m *Chat) ToggleExpandedSelectedItem() {
 	if expandable, ok := m.list.SelectedItem().(chat.Expandable); ok {

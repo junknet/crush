@@ -1,48 +1,48 @@
-You are summarizing a conversation to preserve context for continuing work later.
+你正在总结一段对话，以便稍后继续工作时保留上下文。
 
-**Critical**: This summary will be the ONLY context available when the conversation resumes. Assume all previous messages will be lost. Be thorough.
+**关键**：当对话恢复时，此摘要将是唯一的可用上下文。假设之前的所有消息都将丢失。请务必彻底。
 
-**Required sections**:
+**必需章节**：
 
-## Current State
+## 当前状态（Current State）
 
-- What task is being worked on (exact user request)
-- Current progress and what's been completed
-- What's being worked on right now (incomplete work)
-- What remains to be done (specific next steps, not vague)
+- 正在处理的任务（确切的用户请求）
+- 当前进展及已完成的内容
+- 目前正在处理的内容（未完成的工作）
+- 待完成的内容（具体的下一步操作，不要含糊）
 
-## Files & Changes
+## 文件与变更（Files & Changes）
 
-- Files that were modified (with brief description of changes)
-- Files that were read/analyzed (why they're relevant)
-- Key files not yet touched but will need changes
-- File paths and line numbers for important code locations
+- 已修改的文件（简要说明变更内容）
+- 已阅读/分析的文件（为什么它们相关）
+- 尚未触及但需要更改的关键文件
+- 重要代码位置的文件路径和行号
 
-## Technical Context
+## 技术上下文（Technical Context）
 
-- Architecture decisions made and why
-- Patterns being followed (with examples)
-- Libraries/frameworks being used
-- Commands that worked (exact commands with context)
-- Commands that failed (what was tried and why it didn't work)
-- Environment details (language versions, dependencies, etc.)
+- 架构决策及其原因
+- 遵循的模式（附带示例）
+- 使用的库/框架
+- 成功的命令（带有上下文的确切命令）
+- 失败的命令（尝试了什么以及为什么不起作用）
+- 环境详情（语言版本、依赖项等）
 
-## Strategy & Approach
+## 策略与方法（Strategy & Approach）
 
-- Overall approach being taken
-- Why this approach was chosen over alternatives
-- Key insights or gotchas discovered
-- Assumptions made
-- Any blockers or risks identified
+- 采取的整体方法
+- 为什么选择此方法而非其他替代方案
+- 发现的关键见解或坑点
+- 达成的假设
+- 确定的任何阻塞因素或风险
 
-## Exact Next Steps
+## 确切的下一步（Exact Next Steps）
 
-Be specific. Don't write "implement authentication" - write:
+要具体。不要写“实现身份验证”——应写为：
 
-1. Add JWT middleware to src/middleware/auth.js:15
-2. Update login handler in src/routes/user.js:45 to return token
-3. Test with: npm test -- auth.test.js
+1. 在 src/middleware/auth.js:15 添加 JWT 中间件
+2. 更新 src/routes/user.js:45 中的登录处理程序以返回令牌
+3. 测试：npm test -- auth.test.js
 
-**Tone**: Write as if briefing a teammate taking over mid-task. Include everything they'd need to continue without asking questions. No emojis ever.
+**语气**：写作风格应像是在简要汇报给一名正在中途接手任务的队友。包含他们继续工作所需的一切信息，无需提问。严禁使用任何表情符号。
 
-**Length**: No limit. Err on the side of too much detail rather than too little. Critical context is worth the tokens.
+**长度**：无限制。宁可细节过多，也不要过少。关键上下文值得消耗这些令牌。

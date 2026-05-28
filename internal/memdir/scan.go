@@ -231,23 +231,36 @@ var memoryStopWords = map[string]bool{
 }
 
 func ReadMemoryForRecall(path string) (string, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	buf := make([]byte, MaxRecallBytes+1)
-	n, err := f.Read(buf)
-	if err != nil && n == 0 {
-		return "", err
+	fm, body, parseErr := DecodeFrontmatter(string(data))
+	if parseErr == nil {
+		data = []byte(body)
 	}
-	content := string(buf[:n])
+	if len(data) > MaxRecallBytes {
+		data = data[:MaxRecallBytes+1]
+	}
+	content := string(data)
 	lines := strings.Split(content, "\n")
-	truncated := n > MaxRecallBytes || len(lines) > MaxRecallLines
+	truncated := len(data) > MaxRecallBytes || len(lines) > MaxRecallLines
 	if len(lines) > MaxRecallLines {
 		lines = lines[:MaxRecallLines]
 	}
-	content = strings.Join(lines, "\n")
+	content = strings.TrimSpace(strings.Join(lines, "\n"))
+	if parseErr == nil {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Memory: %s\n", fm.Name)
+		if fm.Description != "" {
+			fmt.Fprintf(&b, "Description: %s\n", fm.Description)
+		}
+		if content != "" {
+			b.WriteString("\n")
+			b.WriteString(content)
+		}
+		content = b.String()
+	}
 	if truncated {
 		content += fmt.Sprintf("\n\n[Memory truncated at %d lines / %d bytes; read %s for full content.]", MaxRecallLines, MaxRecallBytes, path)
 	}

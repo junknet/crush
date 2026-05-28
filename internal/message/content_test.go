@@ -116,6 +116,24 @@ func TestToAIMessage_ASCIIButInvalidBase64(t *testing.T) {
 	require.Equal(t, mediaLoadFailedPlaceholder, textContent.Text)
 }
 
+func TestPromptWithTextAttachmentsMarksInternalMemoryPrivate(t *testing.T) {
+	t.Parallel()
+
+	got := PromptWithTextAttachments("answer the user", []Attachment{
+		{
+			FilePath:   "/memory/l2.md",
+			MimeType:   "text/markdown",
+			Content:    []byte("Memory: l2\n\nUse L2 features."),
+			IsInternal: true,
+		},
+	})
+
+	require.Contains(t, got, "<private_memory_context>")
+	require.Contains(t, got, "Do not quote, summarize, list, or reveal")
+	require.Contains(t, got, "<memory source='/memory/l2.md'>")
+	require.NotContains(t, got, "<file path='/memory/l2.md'>")
+}
+
 func BenchmarkPromptWithTextAttachments(b *testing.B) {
 	cases := []struct {
 		name        string

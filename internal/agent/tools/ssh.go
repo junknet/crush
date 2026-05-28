@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/remoteregistry"
 	"github.com/charmbracelet/crush/internal/permission"
 )
 
@@ -26,9 +28,13 @@ const (
 	SSHSessionKillToolName   = "ssh_session_kill"
 	SSHMountToolName         = "ssh_mount"
 	SSHUnmountToolName       = "ssh_unmount"
+	SSHMountListToolName     = "ssh_mount_list"
+	SSHMountStatusToolName   = "ssh_mount_status"
+	SSHRemountToolName       = "ssh_remount"
+	SSHSessionListToolName   = "ssh_session_list"
 
 	defaultSSHTimeoutSeconds      = 120
-	defaultSSHConnectTimeout      = "ConnectTimeout=10"
+	defaultSSHConnectTimeout      = "ConnectTimeout=30"
 	defaultSSHSessionCaptureLines = 200
 )
 
@@ -110,10 +116,11 @@ type SSHResponseMetadata struct {
 type sshToolEnv struct {
 	permissions permission.Service
 	dataDir     string
+	registry    *remoteregistry.Registry
 }
 
-func NewSSHExecTool(permissions permission.Service) fantasy.AgentTool {
-	env := sshToolEnv{permissions: permissions}
+func NewSSHExecTool(permissions permission.Service, dataDir string) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir}
 	return fantasy.NewAgentTool(
 		SSHExecToolName,
 		sshExecDescription,
@@ -136,7 +143,7 @@ func NewSSHExecTool(permissions permission.Service) fantasy.AgentTool {
 			defer cancel()
 
 			remoteCommand := buildRemoteShellCommand(params.WorkingDir, params.Command)
-			output, exitCode, err := runSSHCommand(runCtx, params.Host, remoteCommand)
+			output, exitCode, err := runSSHCommand(runCtx, env.dataDir, params.Host, remoteCommand)
 			metadata := SSHResponseMetadata{
 				Host:     params.Host,
 				Command:  remoteCommand,
@@ -150,8 +157,8 @@ func NewSSHExecTool(permissions permission.Service) fantasy.AgentTool {
 	)
 }
 
-func NewSSHSessionStartTool(permissions permission.Service) fantasy.AgentTool {
-	env := sshToolEnv{permissions: permissions}
+func NewSSHSessionStartTool(permissions permission.Service, dataDir string, registry *remoteregistry.Registry) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir, registry: registry}
 	return fantasy.NewAgentTool(
 		SSHSessionStartToolName,
 		sshSessionStartDescription,
@@ -178,7 +185,14 @@ func NewSSHSessionStartTool(permissions permission.Service) fantasy.AgentTool {
 				command = "${SHELL:-sh} -l"
 			}
 			remoteCommand := buildTmuxStartCommand(session, params.WorkingDir, command)
-			output, exitCode, err := runSSHCommand(ctx, params.Host, remoteCommand)
+			output, exitCode, err := runSSHCommand(ctx, env.dataDir, params.Host, remoteCommand)
+			if err == nil && env.registry != nil {
+				_ = env.registry.AddSession(remoteregistry.Session{
+					Host:        params.Host,
+					SessionName: session,
+					LastSeen:    time.Now(),
+				})
+			}
 			metadata := SSHResponseMetadata{
 				Host:     params.Host,
 				Session:  session,
@@ -197,8 +211,8 @@ func NewSSHSessionStartTool(permissions permission.Service) fantasy.AgentTool {
 	)
 }
 
-func NewSSHSessionOutputTool(permissions permission.Service) fantasy.AgentTool {
-	env := sshToolEnv{permissions: permissions}
+func NewSSHSessionOutputTool(permissions permission.Service, dataDir string) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir}
 	return fantasy.NewAgentTool(
 		SSHSessionOutputToolName,
 		sshSessionOutputDescription,
@@ -223,7 +237,7 @@ func NewSSHSessionOutputTool(permissions permission.Service) fantasy.AgentTool {
 				lines = defaultSSHSessionCaptureLines
 			}
 			remoteCommand := fmt.Sprintf("tmux capture-pane -pt %s -S -%d", shellQuote(params.Session), lines)
-			output, exitCode, err := runSSHCommand(ctx, params.Host, remoteCommand)
+			output, exitCode, err := runSSHCommand(ctx, env.dataDir, params.Host, remoteCommand)
 			metadata := SSHResponseMetadata{Host: params.Host, Session: params.Session, Command: remoteCommand, ExitCode: exitCode}
 			if err != nil {
 				return sshToolResponse(outputWithError(output, err), metadata, true), nil
@@ -233,8 +247,8 @@ func NewSSHSessionOutputTool(permissions permission.Service) fantasy.AgentTool {
 	)
 }
 
-func NewSSHSessionSendTool(permissions permission.Service) fantasy.AgentTool {
-	env := sshToolEnv{permissions: permissions}
+func NewSSHSessionSendTool(permissions permission.Service, dataDir string) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir}
 	return fantasy.NewAgentTool(
 		SSHSessionSendToolName,
 		sshSessionSendDescription,
@@ -259,7 +273,7 @@ func NewSSHSessionSendTool(permissions permission.Service) fantasy.AgentTool {
 			}
 
 			remoteCommand := buildTmuxSendCommand(params)
-			output, exitCode, err := runSSHCommand(ctx, params.Host, remoteCommand)
+			output, exitCode, err := runSSHCommand(ctx, env.dataDir, params.Host, remoteCommand)
 			metadata := SSHResponseMetadata{Host: params.Host, Session: params.Session, Command: remoteCommand, ExitCode: exitCode}
 			if err != nil {
 				return sshToolResponse(outputWithError(output, err), metadata, true), nil
@@ -270,7 +284,7 @@ func NewSSHSessionSendTool(permissions permission.Service) fantasy.AgentTool {
 					lines = defaultSSHSessionCaptureLines
 				}
 				readCommand := fmt.Sprintf("tmux capture-pane -pt %s -S -%d", shellQuote(params.Session), lines)
-				readOutput, readExit, readErr := runSSHCommand(ctx, params.Host, readCommand)
+				readOutput, readExit, readErr := runSSHCommand(ctx, env.dataDir, params.Host, readCommand)
 				metadata.Command = remoteCommand + " && " + readCommand
 				metadata.ExitCode = readExit
 				if readErr != nil {
@@ -283,8 +297,8 @@ func NewSSHSessionSendTool(permissions permission.Service) fantasy.AgentTool {
 	)
 }
 
-func NewSSHSessionKillTool(permissions permission.Service) fantasy.AgentTool {
-	env := sshToolEnv{permissions: permissions}
+func NewSSHSessionKillTool(permissions permission.Service, dataDir string, registry *remoteregistry.Registry) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir, registry: registry}
 	return fantasy.NewAgentTool(
 		SSHSessionKillToolName,
 		sshSessionKillDescription,
@@ -305,7 +319,10 @@ func NewSSHSessionKillTool(permissions permission.Service) fantasy.AgentTool {
 				return permissionDeniedResponse(err), nil
 			}
 			remoteCommand := fmt.Sprintf("tmux kill-session -t %s", shellQuote(params.Session))
-			output, exitCode, err := runSSHCommand(ctx, params.Host, remoteCommand)
+			output, exitCode, err := runSSHCommand(ctx, env.dataDir, params.Host, remoteCommand)
+			if err == nil && env.registry != nil {
+				_ = env.registry.RemoveSession(params.Host, params.Session)
+			}
 			metadata := SSHResponseMetadata{Host: params.Host, Session: params.Session, Command: remoteCommand, ExitCode: exitCode}
 			if err != nil {
 				return sshToolResponse(outputWithError(output, err), metadata, true), nil
@@ -315,8 +332,8 @@ func NewSSHSessionKillTool(permissions permission.Service) fantasy.AgentTool {
 	)
 }
 
-func NewSSHMountTool(permissions permission.Service, dataDir string) fantasy.AgentTool {
-	env := sshToolEnv{permissions: permissions, dataDir: dataDir}
+func NewSSHMountTool(permissions permission.Service, dataDir string, registry *remoteregistry.Registry) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir, registry: registry}
 	return fantasy.NewAgentTool(
 		SSHMountToolName,
 		sshMountDescription,
@@ -352,6 +369,7 @@ func NewSSHMountTool(permissions permission.Service, dataDir string) fantasy.Age
 			target := params.Host + ":" + params.RemotePath
 			cmd := exec.CommandContext(ctx, sshfsPath,
 				"-o", "BatchMode=yes",
+				"-o", "StrictHostKeyChecking=accept-new",
 				"-o", defaultSSHConnectTimeout,
 				target,
 				absMountPath,
@@ -370,13 +388,21 @@ func NewSSHMountTool(permissions permission.Service, dataDir string) fantasy.Age
 			if err != nil {
 				return sshToolResponse(outputWithError(out.String(), err), metadata, true), nil
 			}
+			if env.registry != nil {
+				_ = env.registry.AddMount(remoteregistry.Mount{
+					Host:       params.Host,
+					RemotePath: params.RemotePath,
+					LocalPath:  absMountPath,
+					MountedAt:  time.Now(),
+				})
+			}
 			return sshToolResponse(fmt.Sprintf("Mounted %s at %s. Use local tools like rg/view/edit against that path.", target, absMountPath), metadata, false), nil
 		},
 	)
 }
 
-func NewSSHUnmountTool(permissions permission.Service) fantasy.AgentTool {
-	env := sshToolEnv{permissions: permissions}
+func NewSSHUnmountTool(permissions permission.Service, registry *remoteregistry.Registry) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, registry: registry}
 	return fantasy.NewAgentTool(
 		SSHUnmountToolName,
 		sshUnmountDescription,
@@ -405,7 +431,171 @@ func NewSSHUnmountTool(permissions permission.Service) fantasy.AgentTool {
 			if err != nil {
 				return sshToolResponse(outputWithError(out.String(), err), metadata, true), nil
 			}
+			if env.registry != nil {
+				// We don't have host/remotePath here, so we might need to find it by localPath
+				for _, m := range env.registry.ListMounts() {
+					if m.LocalPath == absMountPath {
+						_ = env.registry.RemoveMount(m.Host, m.RemotePath)
+						break
+					}
+				}
+			}
 			return sshToolResponse(fmt.Sprintf("Unmounted %s.", absMountPath), metadata, false), nil
+		},
+	)
+}
+
+func NewSSHMountListTool(registry *remoteregistry.Registry) fantasy.AgentTool {
+	return fantasy.NewAgentTool(
+		SSHMountListToolName,
+		"List all active remote mounts from the registry.",
+		func(ctx context.Context, params struct{}, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			if registry == nil {
+				return fantasy.NewTextErrorResponse("registry not initialized"), nil
+			}
+			mounts := registry.ListMounts()
+			if len(mounts) == 0 {
+				return fantasy.NewTextResponse("No active mounts."), nil
+			}
+			b, _ := json.MarshalIndent(mounts, "", "  ")
+			return fantasy.NewTextResponse(string(b)), nil
+		},
+	)
+}
+
+func NewSSHSessionListTool(permissions permission.Service, dataDir string, registry *remoteregistry.Registry) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir, registry: registry}
+	return fantasy.NewAgentTool(
+		SSHSessionListToolName,
+		"List remote tmux sessions on a host.",
+		func(ctx context.Context, params struct {
+			Host string `json:"host"`
+		}, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			if params.Host == "" {
+				return fantasy.NewTextErrorResponse("ssh_session_list: missing host"), nil
+			}
+			if ok, err := env.request(ctx, call, params.Host, "list_sessions", params); err != nil || !ok {
+				return permissionDeniedResponse(err), nil
+			}
+			output, _, err := runSSHCommand(ctx, env.dataDir, params.Host, "tmux list-sessions")
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+			return fantasy.NewTextResponse(output), nil
+		},
+	)
+}
+
+func NewSSHMountStatusTool(permissions permission.Service, dataDir string, registry *remoteregistry.Registry) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir, registry: registry}
+	return fantasy.NewAgentTool(
+		SSHMountStatusToolName,
+		"Check the status of a remote mount.",
+		func(ctx context.Context, params struct {
+			Host       string `json:"host"`
+			RemotePath string `json:"remote_path"`
+		}, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			if params.Host == "" {
+				return fantasy.NewTextErrorResponse("ssh_mount_status: missing host"), nil
+			}
+			// Check if host is reachable
+			_, _, err := runSSHCommand(ctx, env.dataDir, params.Host, "true")
+			if err != nil {
+				if env.registry != nil {
+					_ = env.registry.UpdateMountStatus(params.Host, params.RemotePath, "disconnected")
+				}
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("host unreachable: %v", err)), nil
+			}
+
+			// Find mount path in registry
+			var localPath string
+			if env.registry != nil {
+				for _, m := range env.registry.ListMounts() {
+					if m.Host == params.Host && m.RemotePath == params.RemotePath {
+						localPath = m.LocalPath
+						break
+					}
+				}
+			}
+
+			if localPath == "" {
+				return fantasy.NewTextResponse("Mount not found in registry."), nil
+			}
+
+			// Check if local path is still a mount
+			_, err = os.Stat(filepath.Join(localPath, ".")) // Accessing the dir itself
+			if err != nil {
+				if env.registry != nil {
+					_ = env.registry.UpdateMountStatus(params.Host, params.RemotePath, "stale")
+				}
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("mount stale or inaccessible: %v", err)), nil
+			}
+
+			if env.registry != nil {
+				_ = env.registry.UpdateMountStatus(params.Host, params.RemotePath, "active")
+			}
+			return fantasy.NewTextResponse("Mount is active and reachable."), nil
+		},
+	)
+}
+
+func NewSSHRemountTool(permissions permission.Service, dataDir string, registry *remoteregistry.Registry) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir, registry: registry}
+	return fantasy.NewAgentTool(
+		SSHRemountToolName,
+		"Remount a stale or disconnected remote path.",
+		func(ctx context.Context, params struct {
+			Host       string `json:"host"`
+			RemotePath string `json:"remote_path"`
+		}, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			if params.Host == "" {
+				return fantasy.NewTextErrorResponse("ssh_remount: missing host"), nil
+			}
+			// 1. Find local path
+			var localPath string
+			if env.registry != nil {
+				for _, m := range env.registry.ListMounts() {
+					if m.Host == params.Host && m.RemotePath == params.RemotePath {
+						localPath = m.LocalPath
+						break
+					}
+				}
+			}
+			if localPath == "" {
+				return fantasy.NewTextErrorResponse("mount not found in registry"), nil
+			}
+
+			// 2. Unmount (ignore errors)
+			cmdName, args := unmountCommand(localPath)
+			if cmdName != "" {
+				_ = exec.CommandContext(ctx, cmdName, args...).Run()
+			}
+
+			// 3. Mount again
+			sshfsPath, err := exec.LookPath("sshfs")
+			if err != nil {
+				return fantasy.NewTextErrorResponse("sshfs not found"), nil
+			}
+			target := params.Host + ":" + params.RemotePath
+			cmd := exec.CommandContext(ctx, sshfsPath,
+				"-o", "BatchMode=yes",
+				"-o", "StrictHostKeyChecking=accept-new",
+				"-o", defaultSSHConnectTimeout,
+				target,
+				localPath,
+			)
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			cmd.Stderr = &out
+			err = cmd.Run()
+			if err != nil {
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("remount failed: %v\n%s", err, out.String())), nil
+			}
+
+			if env.registry != nil {
+				_ = env.registry.UpdateMountStatus(params.Host, params.RemotePath, "active")
+			}
+			return fantasy.NewTextResponse(fmt.Sprintf("Successfully remounted %s at %s.", target, localPath)), nil
 		},
 	)
 }
@@ -425,13 +615,22 @@ func (s sshToolEnv) request(ctx context.Context, call fantasy.ToolCall, path, ac
 	})
 }
 
-func runSSHCommand(ctx context.Context, host, remoteCommand string) (string, int, error) {
+func runSSHCommand(ctx context.Context, dataDir, host, remoteCommand string) (string, int, error) {
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
 		return "", 127, fmt.Errorf("ssh not found in PATH")
 	}
+
+	socketDir := filepath.Join(dataDir, "ssh_sockets")
+	_ = os.MkdirAll(socketDir, 0700)
+	controlPath := filepath.Join(socketDir, "%r@%h:%p")
+
 	cmd := exec.CommandContext(ctx, sshPath,
 		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath="+controlPath,
+		"-o", "ControlPersist=600",
 		"-o", defaultSSHConnectTimeout,
 		host,
 		remoteCommand,

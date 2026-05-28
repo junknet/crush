@@ -426,6 +426,11 @@ func (t *baseToolMessageItem) SetResult(res *message.ToolResult) {
 	t.Bump()
 }
 
+// HasResult reports whether this tool message has received a tool result.
+func (t *baseToolMessageItem) HasResult() bool {
+	return t.result != nil
+}
+
 // MessageID returns the ID of the message containing this tool call.
 func (t *baseToolMessageItem) MessageID() string {
 	return t.messageID
@@ -617,7 +622,7 @@ func toolParamList(sty *styles.Styles, params []string, width int) string {
 	// ratio with TodoRatio), do not re-render with ParamMain — lipgloss
 	// would wrap the styled string in another reset and the inner SGR
 	// leaks as visible text. Pass styled strings through untouched.
-	if ansi.Strip(output) != output {
+	if strings.Contains(output, "\x1b") || strings.Contains(output, "[38;2;") {
 		return output
 	}
 	return sty.Tool.ParamMain.Render(output)

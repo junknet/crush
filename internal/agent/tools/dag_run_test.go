@@ -15,7 +15,7 @@ import (
 
 func TestDagRunToolExecutesDependencyGraph(t *testing.T) {
 	workingDir := t.TempDir()
-	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir, nil)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runDagRunTool(t, tool, ctx, DagRunParams{
@@ -40,7 +40,7 @@ func TestDagRunToolRunsReadSearchNodes(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "alpha.txt"), []byte("needle\n"), 0o644))
 	require.NoError(t, os.Mkdir(filepath.Join(workingDir, "pkg"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "pkg", "beta.txt"), []byte("beta\n"), 0o644))
-	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir, nil)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runDagRunTool(t, tool, ctx, DagRunParams{
@@ -63,7 +63,7 @@ func TestDagRunToolRunsReadSearchNodes(t *testing.T) {
 
 func TestDagRunToolBlocksForegroundSleepPolling(t *testing.T) {
 	workingDir := t.TempDir()
-	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir, nil)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runDagRunTool(t, tool, ctx, DagRunParams{
@@ -79,7 +79,7 @@ func TestDagRunToolBlocksForegroundSleepPolling(t *testing.T) {
 func TestDagRunToolMapsLegacyNodeTools(t *testing.T) {
 	workingDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "alpha.txt"), []byte("needle\n"), 0o644))
-	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir, nil)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runDagRunTool(t, tool, ctx, DagRunParams{
@@ -92,7 +92,7 @@ func TestDagRunToolMapsLegacyNodeTools(t *testing.T) {
 
 func TestEvidenceBatchIgnoresDependencies(t *testing.T) {
 	workingDir := t.TempDir()
-	tool := NewEvidenceBatchTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewEvidenceBatchTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir, nil)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp, err := tool.Run(ctx, fantasy.ToolCall{
@@ -107,7 +107,7 @@ func TestEvidenceBatchIgnoresDependencies(t *testing.T) {
 
 func TestDagRunOnFailureContinueAllowsDependentNode(t *testing.T) {
 	workingDir := t.TempDir()
-	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir, nil)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runDagRunTool(t, tool, ctx, DagRunParams{
@@ -125,7 +125,7 @@ func TestDagRunOnFailureContinueAllowsDependentNode(t *testing.T) {
 
 func TestDagRunOnFailureSkipDependentsSkipsDependentNode(t *testing.T) {
 	workingDir := t.TempDir()
-	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir)
+	tool := NewDagRunTool(nil, &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}, workingDir, nil)
 	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
 
 	resp := runDagRunTool(t, tool, ctx, DagRunParams{

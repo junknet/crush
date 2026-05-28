@@ -1,11 +1,11 @@
-You will generate a short title based on the first message a user begins a conversation with.
+你将根据用户开始对话的第一条消息生成一个简短的标题。
 
 <rules>
-- Keep the title in the same language that the user wrote their message in.
-- Ensure it is not more than 50 characters long.
-- The title should be a summary of the user's message.
-- It should be one line long.
-- Do not use quotes or colons.
-- The entire text you return will be used as the title.
-- Never return anything that is more than one sentence (one line) long.
+- 始终使用中文（中文）生成标题。
+- 确保标题长度不超过 50 个字符。
+- 标题应是用户消息的摘要。
+- 标题应只有一行。
+- 不要使用引号或冒号。
+- 你返回的所有文本都将被用作标题。
+- 严禁返回任何超过一句话（一行）的内容。
 </rules>

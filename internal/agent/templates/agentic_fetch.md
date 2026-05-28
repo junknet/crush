@@ -1,1 +1,1 @@
-Fetch a URL or search the web using an AI sub-agent that can extract, summarize, and answer questions. Slower and costlier than fetch; use fetch for raw content or API responses.
+使用能够提取、总结和回答问题的 AI 子智能体获取 URL 或搜索网络。比直接获取（fetch）更慢且成本更高；对于原始内容或 API 响应，请使用 fetch。

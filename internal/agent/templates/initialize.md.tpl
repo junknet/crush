@@ -1,29 +1,29 @@
-Analyze this codebase as the brain agent and create/update **{{.Config.Options.InitializeAs}}** to help future agents work effectively in this repository.
+以核心大脑（Brain Agent）的身份分析此代码库，并创建/更新 **{{.Config.Options.InitializeAs}}**，以帮助未来的智能体在此仓库中高效工作。
 
-**First**: Check if directory is empty or contains only config files. If so, stop and say "Directory appears empty or only contains config. Add source code first, then run this command to generate {{.Config.Options.InitializeAs}}."
+**首先**：检查目录是否为空或仅包含配置文件。如果是，请停止并回复：“目录似乎为空或仅包含配置。请先添加源代码，然后运行此命令生成 {{.Config.Options.InitializeAs}}。”
 
-**Goal**: Document what an agent needs to know to work in this codebase - commands, patterns, conventions, gotchas, overall architecture, how components fit together
+**目标**：记录智能体在此代码库中工作所需了解的一切——命令、模式、约定、坑点、整体架构、组件如何协同工作。
 
-**Discovery process**:
+**探索过程**：
 
-1. Read the repository root, then the local rule files and facade entrypoints that define the project shape.
-2. Use the `agent` tool only when breadth justifies it; choose `role=explore` for read-only survey work and `role=worker` for mutations. Do not hardcode `agent` as the first step.
-3. Identify project type from config files and directory structure.
-4. Find build/test/lint commands from config files, scripts, Makefiles, or CI configs.
-5. Read representative source files to understand code patterns, architecture, control/data flow.
-6. If {{.Config.Options.InitializeAs}} exists, read and improve it.
+1. 阅读仓库根目录，然后阅读定义项目形状的本地规则文件和外观（Facade）入口点。
+2. 仅当广度需要时才使用 `agent` 工具；选择 `role=explore` 进行只读调研工作，选择 `role=worker` 进行修改。不要将 `agent` 硬编码为第一步。
+3. 从配置文件和目录结构中识别项目类型。
+4. 从配置文件、脚本、Makefile 或 CI 配置中查找构建/测试/lint 命令。
+5. 阅读具有代表性的源文件，了解代码模式、架构、控制/数据流。
+6. 如果 {{.Config.Options.InitializeAs}} 已存在，阅读并改进它。
 
-**Content to include**:
+**要包含的内容**：
 
-- Essential commands (build, test, run, deploy, etc.) - whatever is relevant for this project
-- Code organization and structure, application architecture and control/data flow
-- Naming conventions and style patterns
-- Testing approach and patterns
-- Important gotchas or non-obvious patterns
-- Any project-specific context from existing rule files
+- 基本命令（构建、测试、运行、部署等）——与本项目相关的任何内容
+- 代码组织和结构、应用架构以及控制/数据流
+- 命名约定和风格模式
+- 测试方法和模式
+- 重要的坑点或非直观模式
+- 来自现有规则文件的任何项目特定上下文
 
-**Note:** LLM agents learn and adapt to their context as they obtain it, so mentioning obvious details they would immediately pick up from reading a file or two is actively detrimental. Keep the principles of progressive disclosure in mind and focus primarily on non-obvious knowledge that saves the agent from trial-and-error discovery: gotchas, implicit conventions, commands with surprising flags, and context that isn't self-evident from the code in a single file.
+**注意：** LLM 智能体在获取上下文时会学习并适应上下文，因此提及它们通过阅读一两个文件就能立即掌握的显而易见细节是适得其反的。请记住渐进式披露原则，主要关注能让智能体免于试错探索的非显而易见知识：坑点、隐含约定、带有令人惊讶标志的命令，以及在单个文件的代码中不言自明的上下文。
 
-**Format**: Clear markdown sections. Use your judgment on structure based on what you find. Aim for completeness over brevity - include everything an agent would need to know.
+**格式**：清晰的 Markdown 章节。根据你的发现，自行判断结构。追求完整性而非简短——包含智能体需要知道的一切。
 
-**Critical**: Only document what you actually observe. Never invent commands, patterns, or conventions. If you can't find something, don't include it.
+**关键**：仅记录你实际观察到的内容。严禁捏造命令、模式或约定。如果你找不到某些内容，请不要包含它。

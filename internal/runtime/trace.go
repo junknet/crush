@@ -30,6 +30,12 @@ const (
 	TraceKindConversationCompactionProgress TraceKind = "conversation_compaction_progress"
 	TraceKindConversationCompactionFinished TraceKind = "conversation_compaction_finished"
 	TraceKindConversationCompactionFailed   TraceKind = "conversation_compaction_failed"
+	TraceKindMemoryRecallStarted            TraceKind = "memory_recall_started"
+	TraceKindMemoryRecallFinished           TraceKind = "memory_recall_finished"
+	TraceKindMemoryRecallFailed             TraceKind = "memory_recall_failed"
+	TraceKindMemorySaveStarted              TraceKind = "memory_save_started"
+	TraceKindMemorySaveFinished             TraceKind = "memory_save_finished"
+	TraceKindMemorySaveFailed               TraceKind = "memory_save_failed"
 )
 
 // TaskTrace is an append-only record of task planning, execution, and

@@ -68,13 +68,13 @@ func TestThinAgent_OmitsSkillsAndMemory(t *testing.T) {
 	store, tmp := fixturePromptStore(t)
 	ws := filepath.Join(tmp, "ws")
 
-	t.Run("brain renders both", func(t *testing.T) {
+	t.Run("brain renders skills but not memory", func(t *testing.T) {
 		out := renderPrompt(t, "brain", minimalTpl, store, ws)
 		if !strings.Contains(out, "<available_skills>") {
 			t.Errorf("brain prompt missing available_skills block: %s", out)
 		}
-		if !strings.Contains(out, "<auto_memory>") {
-			t.Errorf("brain prompt missing auto_memory block: %s", out)
+		if strings.Contains(out, "<auto_memory>") {
+			t.Errorf("brain prompt unexpectedly contains auto_memory block: %s", out)
 		}
 	})
 

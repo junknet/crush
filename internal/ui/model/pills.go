@@ -137,8 +137,8 @@ func todoPill(todos []session.Todo, inProgressIcon string, focused, panelFocused
 }
 
 // todoList renders the expanded todo list.
-func todoList(sessionTodos []session.Todo, t *styles.Styles, width int, maxRows int) string {
-	return chat.FormatTodosListWithLimit(t, sessionTodos, width, maxRows)
+func todoList(sessionTodos []session.Todo, t *styles.Styles, width int, maxRows int, agentActive bool) string {
+	return chat.FormatTodosListWithLimit(t, sessionTodos, width, maxRows, agentActive)
 }
 
 // queueList renders the expanded queue items list.
@@ -257,7 +257,8 @@ func (m *UI) renderedTodoListHeight(maxRows int) int {
 		return 0
 	}
 	contentWidth := max(m.width-3, 0)
-	rendered := chat.FormatTodosListWithLimit(m.com.Styles, m.session.Todos, contentWidth, maxRows)
+	agentActive := m.isAgentBusy()
+	rendered := chat.FormatTodosListWithLimit(m.com.Styles, m.session.Todos, contentWidth, maxRows, agentActive)
 	if rendered == "" {
 		return 0
 	}
@@ -290,7 +291,8 @@ func (m *UI) renderPills() {
 	todosFocused := m.pillsExpanded && m.focusedPillSection == pillSectionTodos
 	queueFocused := m.pillsExpanded && m.focusedPillSection == pillSectionQueue
 
-	inProgressIcon := chat.RenderTodoInProgressIcon(t)
+	agentActive := m.isAgentBusy()
+	inProgressIcon := chat.RenderTodoInProgressIcon(t, agentActive)
 
 	var pills []string
 	if hasActive {
@@ -304,7 +306,7 @@ func (m *UI) renderPills() {
 	maxExpandedRows := m.maxExpandedPillRows()
 	if m.pillsExpanded {
 		if todosFocused && hasActive {
-			expandedList = todoList(m.session.Todos, t, contentWidth, maxExpandedRows)
+			expandedList = todoList(m.session.Todos, t, contentWidth, maxExpandedRows, agentActive)
 		} else if queueFocused && hasQueue {
 			if m.com.Workspace.AgentIsReady() {
 				queueItems := m.com.Workspace.AgentQueuedPromptsList(m.session.ID)

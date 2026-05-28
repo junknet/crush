@@ -31,9 +31,8 @@ func TestExplorePromptEmphasizesCompressionAndEvidence(t *testing.T) {
 	text, err := prompt.Build(context.Background(), "", "", store)
 	require.NoError(t, err)
 
-	require.Contains(t, text, "fast, read-only repository inspector and evidence collector")
-	require.Contains(t, text, "smallest set of durable facts")
-	require.Contains(t, text, "strategy, state, tool, or compression bugs")
+	require.Contains(t, text, "fast, read-only repository inspector")
+	require.Contains(t, text, "return durable facts to the parent agent")
 	require.Contains(t, text, "COMPRESSION")
-	require.Contains(t, text, "Absolute file paths")
+	require.Contains(t, text, "absolute paths")
 }

@@ -80,9 +80,17 @@ export type CrushEnvelope =
     | { type: 'session'; payload: { type: string; payload: Session } }
     | { type: 'agent_event'; payload: { type: string; payload: AgentEvent } }
     | { type: 'permission_request'; payload: { type: string; payload: PermissionRequest } }
-    | { type: 'permission_notification'; payload: { type: string; payload: { tool_call_id: string } } }
+    | {
+          type: 'permission_notification'
+          payload: { type: string; payload: { tool_call_id: string } }
+      }
     | { type: 'sync_complete'; payload: { session_id: string } }
     | { type: string; payload: any }
+
+export type HistoryPage = {
+    messages: Message[]
+    exhausted: boolean
+}
 
 const jc = JSONCodec<any>()
 
@@ -225,7 +233,7 @@ export class CrushApi {
         sessionID: string,
         onEvent: (envelope: CrushEnvelope) => void,
         onError?: (err: Error) => void,
-        opts2?: { historyMs?: number }
+        opts2?: { historyMs?: number; sinceTs?: number }
     ): Promise<() => void> {
         const nc = await this.connect()
         const js = nc.jetstream()
@@ -242,12 +250,18 @@ export class CrushApi {
             // batch + FlatList virtualization already handle the volume
             // (tested up to 11k events / 78MB). Pass historyMs explicitly
             // only if the caller really wants to cap.
-            if (opts2?.historyMs && opts2.historyMs > 0) {
+            if (opts2?.sinceTs && opts2.sinceTs > 0) {
+                // Reopening a locally cached session only needs events after
+                // the cached tail. Include a small overlap for streaming
+                // updates to the final cached message; map dedupe absorbs it.
+                opts.startTime(new Date(Math.max(0, opts2.sinceTs - 1000)))
+            } else if (opts2?.historyMs && opts2.historyMs > 0) {
                 opts.startAtTimeDelta(opts2.historyMs)
             } else {
-                // Pull last 20 messages by default to ensure instant load.
-                // loadOlderHistory handles backfilling older context on scroll-up.
-                opts.deliverLast(20)
+                // Cold open has no local cache, so replay the session stream.
+                // React flush batching handles large replays; later opens use
+                // sinceTs to fetch only the tail after the local cache.
+                opts.deliverAll()
             }
             const sub = await js.subscribe(subject, opts)
 
@@ -258,7 +272,10 @@ export class CrushApi {
                             onEvent(jc.decode(m.data))
                             // If pending is 0, we've caught up with history.
                             if (m.info?.pending === 0) {
-                                onEvent({ type: 'sync_complete', payload: { session_id: sessionID } })
+                                onEvent({
+                                    type: 'sync_complete',
+                                    payload: { session_id: sessionID },
+                                })
                             }
                         } catch (err) {
                             console.error('Failed to decode event', err)
@@ -278,57 +295,32 @@ export class CrushApi {
     }
 
     /**
-     * One-shot pull of older history for infinite-scroll. Creates a temporary
-     * ordered consumer starting at (untilTs - durationMs) and drains every
-     * message whose stream timestamp is strictly before `untilTs`. Returns
-     * once the historical window is exhausted (info.pending === 0) or a
-     * message has crossed into the already-loaded range. Messages are pushed
-     * through `onEvent` exactly like the live subscription so the caller's
-     * existing Map dedupe + flush path handles ordering.
-     *
-     * untilTs is a unix-millis cutoff — typically the created_at of the
-     * currently-oldest message on screen. durationMs is how far back to
-     * extend (default 30 min, matching the initial live window).
+     * Fetches one older page from the active TUI relay's authoritative local
+     * message store. JetStream cannot serve as a history cursor because DB
+     * backfill republishes old messages with current stream timestamps.
      */
-    async loadOlderHistory(
+    async loadHistoryBefore(
         sessionID: string,
-        untilTs: number,
-        durationMs: number,
-        onEvent: (envelope: CrushEnvelope) => void
-    ): Promise<number> {
+        beforeMessageID: string,
+        beforeCreatedAt: number,
+        limit: number = 50
+    ): Promise<HistoryPage> {
         const nc = await this.connect()
-        const js = nc.jetstream()
-        const subject = `crush.sess.${sessionID}.events`
-        const opts = consumerOpts()
-        opts.orderedConsumer().filterSubject(subject)
-        const startTs = Math.max(0, untilTs - durationMs)
-        opts.startTime(new Date(startTs))
-        const sub = await js.subscribe(subject, opts)
-        let count = 0
-        try {
-            for await (const m of sub) {
-                try {
-                    const tsNanos = m.info?.timestampNanos ?? 0
-                    const tsMs = tsNanos / 1e6
-                    if (tsMs > 0 && tsMs >= untilTs) break
-                    try {
-                        onEvent(jc.decode(m.data))
-                        count++
-                    } catch (err) {
-                        console.error('Failed to decode older event', err)
-                    }
-                    if (m.info?.pending === 0) break
-                } catch (err) {
-                    // m.info getter parses ack-subject; malformed reply
-                    // tokens can throw. Skip the message rather than crash
-                    // the RN bridge with an unhandled rejection.
-                    console.log('loadOlderHistory msg info parse failed:', err)
-                }
-            }
-        } finally {
-            sub.unsubscribe()
+        const response = await nc.request(
+            `crush.sess.${sessionID}.cmd`,
+            jc.encode({
+                type: 'history_before',
+                before_message_id: beforeMessageID,
+                before_created_at: beforeCreatedAt,
+                limit,
+            }),
+            { timeout: 5000 }
+        )
+        const page = jc.decode(response.data) as HistoryPage
+        if (!Array.isArray(page.messages) || typeof page.exhausted !== 'boolean') {
+            throw new Error('loadHistoryBefore: invalid relay history response')
         }
-        return count
+        return page
     }
 
     async sendMessage(sessionID: string, prompt: string): Promise<void> {

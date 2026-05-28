@@ -17,11 +17,21 @@ import (
 
 func TestSSHExecBuildsRemoteWorkingDirectoryCommand(t *testing.T) {
 	binDir := prependFakeCommand(t, "ssh", `#!/bin/sh
-printf 'host=%s\ncmd=%s\n' "$5" "$6"
+for arg do
+  case "$arg" in
+    -*) ;; # skip options
+    *:*) host="$arg" ;;
+    *@*) host="$arg" ;;
+    cd*) cmd="$arg" ;;
+    tmux*) cmd="$arg" ;;
+    ecs-app) host="$arg" ;;
+  esac
+done
+printf 'host=%s\ncmd=%s\n' "$host" "$cmd"
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	tool := NewSSHExecTool(nil)
+	tool := NewSSHExecTool(nil, t.TempDir())
 	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
 		ID:    "call-1",
 		Name:  SSHExecToolName,
@@ -38,11 +48,15 @@ printf 'host=%s\ncmd=%s\n' "$5" "$6"
 
 func TestSSHSessionStartUsesRemoteTmux(t *testing.T) {
 	binDir := prependFakeCommand(t, "ssh", `#!/bin/sh
-printf '%s\n' "$6"
+for arg do
+  case "$arg" in
+    tmux*) printf '%s\n' "$arg" ;;
+  esac
+done
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	tool := NewSSHSessionStartTool(nil)
+	tool := NewSSHSessionStartTool(nil, t.TempDir(), nil)
 	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
 		ID:   "call-1",
 		Name: SSHSessionStartToolName,
@@ -63,11 +77,15 @@ printf '%s\n' "$6"
 
 func TestSSHSessionSendBuildsLiteralTextAndEnter(t *testing.T) {
 	binDir := prependFakeCommand(t, "ssh", `#!/bin/sh
-printf '%s\n' "$6"
+for arg do
+  case "$arg" in
+    tmux*) printf '%s\n' "$arg" ;;
+  esac
+done
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	tool := NewSSHSessionSendTool(nil)
+	tool := NewSSHSessionSendTool(nil, t.TempDir())
 	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
 		ID:   "call-1",
 		Name: SSHSessionSendToolName,
@@ -101,7 +119,7 @@ mkdir -p "$mount"
 	t.Setenv("SSHFS_LOG", logPath)
 	dataDir := t.TempDir()
 
-	tool := NewSSHMountTool(nil, dataDir)
+	tool := NewSSHMountTool(nil, dataDir, nil)
 	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
 		ID:    "call-1",
 		Name:  SSHMountToolName,
@@ -130,7 +148,7 @@ printf '%s\n%s\n' "$1" "$2" > "$UNMOUNT_LOG"
 	logPath := filepath.Join(t.TempDir(), "unmount.log")
 	t.Setenv("UNMOUNT_LOG", logPath)
 
-	tool := NewSSHUnmountTool(nil)
+	tool := NewSSHUnmountTool(nil, nil)
 	resp, err := tool.Run(context.Background(), fantasy.ToolCall{
 		ID:    "call-1",
 		Name:  SSHUnmountToolName,
@@ -157,10 +175,10 @@ func TestSSHIntegrationExecAndRemoteTmux(t *testing.T) {
 
 	session := fmt.Sprintf("crush_it_%d", time.Now().UnixNano())
 	defer func() {
-		_, _, _ = runSSHCommand(context.Background(), host, "tmux kill-session -t "+shellQuote(session)+" 2>/dev/null || true")
+		_, _, _ = runSSHCommand(context.Background(), "/tmp", host, "tmux kill-session -t "+shellQuote(session)+" 2>/dev/null || true")
 	}()
 
-	execTool := NewSSHExecTool(nil)
+	execTool := NewSSHExecTool(nil, t.TempDir())
 	execResp, err := execTool.Run(ctx, fantasy.ToolCall{
 		ID:   "call-ssh-exec",
 		Name: SSHExecToolName,
@@ -173,7 +191,7 @@ func TestSSHIntegrationExecAndRemoteTmux(t *testing.T) {
 	require.False(t, execResp.IsError, execResp.Content)
 	require.Contains(t, execResp.Content, "crush-ssh-exec-ok")
 
-	startTool := NewSSHSessionStartTool(nil)
+	startTool := NewSSHSessionStartTool(nil, t.TempDir(), nil)
 	startResp, err := startTool.Run(ctx, fantasy.ToolCall{
 		ID:   "call-ssh-session-start",
 		Name: SSHSessionStartToolName,
@@ -187,7 +205,7 @@ func TestSSHIntegrationExecAndRemoteTmux(t *testing.T) {
 	require.False(t, startResp.IsError, startResp.Content)
 	require.Contains(t, startResp.Content, "Started remote tmux session "+session)
 
-	sendTool := NewSSHSessionSendTool(nil)
+	sendTool := NewSSHSessionSendTool(nil, t.TempDir())
 	sendResp, err := sendTool.Run(ctx, fantasy.ToolCall{
 		ID:   "call-ssh-session-send",
 		Name: SSHSessionSendToolName,
@@ -200,7 +218,7 @@ func TestSSHIntegrationExecAndRemoteTmux(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, sendResp.IsError, sendResp.Content)
 
-	outputTool := NewSSHSessionOutputTool(nil)
+	outputTool := NewSSHSessionOutputTool(nil, t.TempDir())
 	var outputResp fantasy.ToolResponse
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
 		var runErr error
@@ -218,7 +236,7 @@ func TestSSHIntegrationExecAndRemoteTmux(t *testing.T) {
 		require.Contains(collect, outputResp.Content, "crush-ssh-pty-ok")
 	}, 10*time.Second, 500*time.Millisecond)
 
-	killTool := NewSSHSessionKillTool(nil)
+	killTool := NewSSHSessionKillTool(nil, t.TempDir(), nil)
 	killResp, err := killTool.Run(ctx, fantasy.ToolCall{
 		ID:   "call-ssh-session-kill",
 		Name: SSHSessionKillToolName,
@@ -233,6 +251,40 @@ func TestSSHIntegrationExecAndRemoteTmux(t *testing.T) {
 	require.True(t, strings.Contains(killResp.Content, "Killed remote tmux session "+session))
 }
 
+func TestSSHControlMaster(t *testing.T) {
+	host := os.Getenv("CRUSH_SSH_INTEGRATION_HOST")
+	if host == "" {
+		t.Skip("Set CRUSH_SSH_INTEGRATION_HOST to run this test.")
+	}
+
+	dataDir := t.TempDir()
+	socketDir := filepath.Join(dataDir, "ssh_sockets")
+
+	execTool := NewSSHExecTool(nil, dataDir)
+
+	// First call should create the socket
+	_, err := execTool.Run(context.Background(), fantasy.ToolCall{
+		ID:    "call-1",
+		Name:  SSHExecToolName,
+		Input: fmt.Sprintf(`{"host":%q, "command":"true"}`, host),
+	})
+	require.NoError(t, err)
+
+	// Check if socket exists
+	files, _ := os.ReadDir(socketDir)
+	assert.NotEmpty(t, files, "SSH socket should be created")
+
+	// Second call should be faster (shared connection)
+	start := time.Now()
+	_, err = execTool.Run(context.Background(), fantasy.ToolCall{
+		ID:    "call-2",
+		Name:  SSHExecToolName,
+		Input: fmt.Sprintf(`{"host":%q, "command":"true"}`, host),
+	})
+	require.NoError(t, err)
+	duration := time.Since(start)
+	t.Logf("Second call duration: %v", duration)
+}
 func prependFakeCommand(t *testing.T, name, script string) string {
 	t.Helper()
 	dir := t.TempDir()

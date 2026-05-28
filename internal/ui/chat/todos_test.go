@@ -17,7 +17,7 @@ func TestFormatTodosListUsesBoxStateIcons(t *testing.T) {
 		{Content: "done", Status: session.TodoStatusCompleted},
 		{Content: "running", Status: session.TodoStatusInProgress},
 		{Content: "pending", Status: session.TodoStatusPending},
-	}, 120)
+	}, 120, true)
 	plain := ansi.Strip(output)
 
 	if !strings.Contains(plain, "■ done") {
@@ -38,7 +38,7 @@ func TestFormatTodosListPrioritizesOpenWorkAndSummarizesOverflow(t *testing.T) {
 		{Content: "running", Status: session.TodoStatusInProgress, ActiveForm: "doing focused work"},
 		{Content: "pending", Status: session.TodoStatusPending},
 		{Content: "failed", Status: session.TodoStatusFailed},
-	}, 120, 4)
+	}, 120, 4, true)
 	plain := ansi.Strip(output)
 	lines := strings.Split(plain, "\n")
 
