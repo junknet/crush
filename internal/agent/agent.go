@@ -1600,17 +1600,6 @@ If not, please feel free to ignore. Again do not mention this message to the use
 		}
 	}
 
-	// lastUserMsgIdx is the index of the most recent user message in msgs.
-	// Only that message's images are sent to the model (compressed); all
-	// earlier user messages have their images stripped to prevent base64
-	// blobs from accumulating in the context window across turns.
-	lastUserMsgIdx := -1
-	for i, m := range msgs {
-		if m.Role == message.User {
-			lastUserMsgIdx = i
-		}
-	}
-
 	for i, m := range msgs {
 		if len(m.Parts) == 0 {
 			continue
@@ -1654,24 +1643,20 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			continue
 		}
 		var aiMsgs []fantasy.Message
-		isLastUserMsg := m.Role == message.User && i == lastUserMsgIdx
 		if m.Role == message.User {
-			if !isLastUserMsg || !supportsImages {
-				// Historical user messages: strip images entirely to avoid
-				// accumulating base64 blobs across turns in the context window.
-				aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: true})
-			} else {
-				// Current-turn user message with a supporting provider:
-				// compress images before sending so large screenshots
-				// (e.g. Android) don't exceed provider inline-data limits.
-				aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: false})
+			// All user images go through lossy compression regardless of turn
+			// position. At 30-55 KB per image after compression the context cost
+			// is negligible (<0.1% of a 1M-token window) so historical stripping
+			// is not worth the complexity.
+			aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: !supportsImages})
+			if supportsImages {
 				for mi := range aiMsgs {
 					for pi, part := range aiMsgs[mi].Content {
 						if fp, ok := part.(fantasy.FilePart); ok {
-							compressed, outMime := compressImageForLLM(fp.Data, fp.MediaType)
+							compData, outMime := compressImageForLLM(fp.Data, fp.MediaType)
 							aiMsgs[mi].Content[pi] = fantasy.FilePart{
 								Filename:  fp.Filename,
-								Data:      compressed,
+								Data:      compData,
 								MediaType: outMime,
 							}
 						}
