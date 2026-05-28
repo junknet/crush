@@ -1168,6 +1168,8 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewSSHMountStatusTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
 		tools.NewSSHRemountTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
 		tools.NewSSHSessionListTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
+		tools.NewSSHUploadTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()),
+		tools.NewSSHDownloadTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()),
 		tools.NewEvidenceBatchTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
 		tools.NewEvidenceGraphTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
 		tools.NewDagRunTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),

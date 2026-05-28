@@ -32,6 +32,8 @@ const (
 	SSHMountStatusToolName   = "ssh_mount_status"
 	SSHRemountToolName       = "ssh_remount"
 	SSHSessionListToolName   = "ssh_session_list"
+	SSHUploadToolName        = "ssh_upload"
+	SSHDownloadToolName      = "ssh_download"
 
 	defaultSSHTimeoutSeconds      = 120
 	defaultSSHConnectTimeout      = "ConnectTimeout=30"
@@ -58,6 +60,12 @@ var sshMountDescription string
 
 //go:embed ssh_unmount.md
 var sshUnmountDescription string
+
+//go:embed ssh_upload.md
+var sshUploadDescription string
+
+//go:embed ssh_download.md
+var sshDownloadDescription string
 
 type SSHExecParams struct {
 	Host           string `json:"host" description:"OpenSSH host alias or user@host target. Prefer ~/.ssh/config aliases."`
@@ -102,6 +110,18 @@ type SSHMountParams struct {
 
 type SSHUnmountParams struct {
 	MountPath string `json:"mount_path" description:"Local sshfs mount path returned by ssh_mount"`
+}
+
+type SSHUploadParams struct {
+	Host       string `json:"host" description:"OpenSSH host alias or user@host target"`
+	LocalPath  string `json:"local_path" description:"Local file path to upload"`
+	RemotePath string `json:"remote_path" description:"Remote destination path"`
+}
+
+type SSHDownloadParams struct {
+	Host       string `json:"host" description:"OpenSSH host alias or user@host target"`
+	RemotePath string `json:"remote_path" description:"Remote file path to download"`
+	LocalPath  string `json:"local_path" description:"Local destination path"`
 }
 
 type SSHResponseMetadata struct {
@@ -600,6 +620,92 @@ func NewSSHRemountTool(permissions permission.Service, dataDir string, registry 
 	)
 }
 
+func NewSSHUploadTool(permissions permission.Service, dataDir string, workingDir string) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir}
+	return fantasy.NewAgentTool(
+		SSHUploadToolName,
+		sshUploadDescription,
+		func(ctx context.Context, params SSHUploadParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			if params.Host == "" {
+				return fantasy.NewTextErrorResponse("ssh_upload: missing host"), nil
+			}
+			if err := validateSSHTarget(params.Host); err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+			if params.LocalPath == "" {
+				return fantasy.NewTextErrorResponse("ssh_upload: missing local_path"), nil
+			}
+			if params.RemotePath == "" {
+				return fantasy.NewTextErrorResponse("ssh_upload: missing remote_path"), nil
+			}
+
+			// Resolve local path relative to working directory
+			localPath := params.LocalPath
+			if !filepath.IsAbs(localPath) {
+				localPath = filepath.Join(workingDir, localPath)
+			}
+
+			if ok, err := env.request(ctx, call, params.Host, "upload", params); err != nil || !ok {
+				return permissionDeniedResponse(err), nil
+			}
+
+			output, exitCode, err := runSCPCommand(ctx, env.dataDir, params.Host, localPath, params.RemotePath, false)
+			metadata := SSHResponseMetadata{
+				Host:       params.Host,
+				RemotePath: params.RemotePath,
+				ExitCode:   exitCode,
+			}
+			if err != nil {
+				return sshToolResponse(outputWithError(output, err), metadata, true), nil
+			}
+			return sshToolResponse(fmt.Sprintf("Successfully uploaded %s to %s:%s", params.LocalPath, params.Host, params.RemotePath), metadata, false), nil
+		},
+	)
+}
+
+func NewSSHDownloadTool(permissions permission.Service, dataDir string, workingDir string) fantasy.AgentTool {
+	env := sshToolEnv{permissions: permissions, dataDir: dataDir}
+	return fantasy.NewAgentTool(
+		SSHDownloadToolName,
+		sshDownloadDescription,
+		func(ctx context.Context, params SSHDownloadParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			if params.Host == "" {
+				return fantasy.NewTextErrorResponse("ssh_download: missing host"), nil
+			}
+			if err := validateSSHTarget(params.Host); err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+			if params.RemotePath == "" {
+				return fantasy.NewTextErrorResponse("ssh_download: missing remote_path"), nil
+			}
+			if params.LocalPath == "" {
+				return fantasy.NewTextErrorResponse("ssh_download: missing local_path"), nil
+			}
+
+			// Resolve local path relative to working directory
+			localPath := params.LocalPath
+			if !filepath.IsAbs(localPath) {
+				localPath = filepath.Join(workingDir, localPath)
+			}
+
+			if ok, err := env.request(ctx, call, params.Host, "download", params); err != nil || !ok {
+				return permissionDeniedResponse(err), nil
+			}
+
+			output, exitCode, err := runSCPCommand(ctx, env.dataDir, params.Host, params.RemotePath, localPath, true)
+			metadata := SSHResponseMetadata{
+				Host:       params.Host,
+				RemotePath: params.RemotePath,
+				ExitCode:   exitCode,
+			}
+			if err != nil {
+				return sshToolResponse(outputWithError(output, err), metadata, true), nil
+			}
+			return sshToolResponse(fmt.Sprintf("Successfully downloaded %s:%s to %s", params.Host, params.RemotePath, params.LocalPath), metadata, false), nil
+		},
+	)
+}
+
 func (s sshToolEnv) request(ctx context.Context, call fantasy.ToolCall, path, action string, params any) (bool, error) {
 	if s.permissions == nil {
 		return true, nil
@@ -635,6 +741,39 @@ func runSSHCommand(ctx context.Context, dataDir, host, remoteCommand string) (st
 		host,
 		remoteCommand,
 	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err = cmd.Run()
+	return TruncateOutput(out.String()), commandExitCode(err), err
+}
+
+func runSCPCommand(ctx context.Context, dataDir, host, src, dst string, download bool) (string, int, error) {
+	scpPath, err := exec.LookPath("scp")
+	if err != nil {
+		return "", 127, fmt.Errorf("scp not found in PATH")
+	}
+
+	socketDir := filepath.Join(dataDir, "ssh_sockets")
+	_ = os.MkdirAll(socketDir, 0700)
+	controlPath := filepath.Join(socketDir, "%r@%h:%p")
+
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + controlPath,
+		"-o", "ControlPersist=600",
+		"-o", defaultSSHConnectTimeout,
+	}
+
+	if download {
+		args = append(args, host+":"+src, dst)
+	} else {
+		args = append(args, src, host+":"+dst)
+	}
+
+	cmd := exec.CommandContext(ctx, scpPath, args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
