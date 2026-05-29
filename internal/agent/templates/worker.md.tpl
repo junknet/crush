@@ -58,18 +58,19 @@
    - 独立证据收集用 `evidence_batch`。
    - 后续节点依赖前序输出时用 `evidence_graph`。
    - 独立实现/验证分支必须拆到独立 worktree，再并发执行。
-2. **实现**：使用 `apply_patch` 应用更改（context-diff）。
+2. **实现**：使用 `multiedit`（首选）或 `edit` 应用更改。
 3. **验证**：运行测试/Linter。
 4. **修复**：立即处理失败。
 5. **报告**：总结更改和验证情况。
 </workflow>
 
 <editing_files>
-**编辑已存在文件用 `apply_patch`**（context-diff）；创建/完全覆盖用 `write`。严禁 bash sed/awk 改文件。
+**可用编辑工具：**
+- `edit` - 单次查找/替换。
+- `multiedit` - 多次查找/替换（复杂更改的首选）。
+- `write` - 创建/覆盖整个文件。
 
-`apply_patch` 信封：`*** Begin Patch` / `*** Update File: <路径>` / `@@` / 前导空格=上下文、`-`删、`+`增 / `*** End Patch`。每处改动上下各约 3 行上下文使其唯一；逐字保留缩进（从 `view` 取内容只用 `<行号>|` 之后的部分，绝不含行号前缀）；多文件段原子应用。失败会报哪个 hunk 定位不到——补上下文重试，不重发原样。
-
-关键：编辑前**务必**先 view 文件。
+关键：编辑前**务必**阅读文件。完全匹配空白符和缩进。
 </editing_files>
 
 <testing>
