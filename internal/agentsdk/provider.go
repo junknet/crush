@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
+	fantasyopenai "charm.land/fantasy/providers/openai"
 	agentsdkauth "github.com/agent-sdk/auth"
 	agentsdkclaude "github.com/agent-sdk/provider/claude"
 	agentsdkcodex "github.com/agent-sdk/provider/codex"
@@ -109,6 +110,7 @@ func (m *ClaudeLanguageModel) toChatRequest(call fantasy.Call) *agentsdkschema.C
 	if call.MaxOutputTokens != nil {
 		req.MaxTokens = int(*call.MaxOutputTokens)
 	}
+	req.ReasoningEffort = sdkReasoningEffort(call.ProviderOptions)
 	return req
 }
 
@@ -186,7 +188,28 @@ func (m *CodexLanguageModel) toChatRequest(call fantasy.Call) *agentsdkschema.Ch
 	if call.MaxOutputTokens != nil {
 		req.MaxTokens = int(*call.MaxOutputTokens)
 	}
+	req.ReasoningEffort = sdkReasoningEffort(call.ProviderOptions)
 	return req
+}
+
+func sdkReasoningEffort(options fantasy.ProviderOptions) agentsdkschema.ReasoningEffort {
+	raw, ok := options[fantasyopenai.Name]
+	if !ok || raw == nil {
+		return ""
+	}
+
+	var effort *fantasyopenai.ReasoningEffort
+	switch opt := raw.(type) {
+	case *fantasyopenai.ProviderOptions:
+		effort = opt.ReasoningEffort
+	case *fantasyopenai.ResponsesProviderOptions:
+		effort = opt.ReasoningEffort
+	}
+	if effort == nil {
+		return ""
+	}
+
+	return agentsdkschema.ReasoningEffort(*effort)
 }
 
 func codexCredential(apiKey string) agentsdkauth.Credential {
