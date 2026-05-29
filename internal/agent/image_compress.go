@@ -53,7 +53,7 @@ func compressImageForLLM(rawBytes []byte, mimeType string) (compressed []byte, o
 
 	img, _, err := image.Decode(bytes.NewReader(rawBytes))
 	if err != nil {
-		slog.Warn("compressImageForLLM: failed to decode image, using original",
+		slog.Warn("CompressImageForLLM: failed to decode image, using original",
 			"mime_type", mimeType,
 			"input_bytes", len(rawBytes),
 			"error", err,
@@ -65,7 +65,7 @@ func compressImageForLLM(rawBytes []byte, mimeType string) (compressed []byte, o
 
 	var buf bytes.Buffer
 	if encErr := jpeg.Encode(&buf, scaled, &jpeg.Options{Quality: jpegQuality}); encErr != nil {
-		slog.Warn("compressImageForLLM: JPEG encode failed, using original",
+		slog.Warn("CompressImageForLLM: JPEG encode failed, using original",
 			"mime_type", mimeType,
 			"input_bytes", len(rawBytes),
 			"error", encErr,
@@ -73,7 +73,7 @@ func compressImageForLLM(rawBytes []byte, mimeType string) (compressed []byte, o
 		return rawBytes, mimeType
 	}
 
-	slog.Debug("compressImageForLLM: image compressed",
+	slog.Debug("CompressImageForLLM: image compressed",
 		"input_bytes", len(rawBytes),
 		"output_bytes", buf.Len(),
 		"original_bounds", img.Bounds(),

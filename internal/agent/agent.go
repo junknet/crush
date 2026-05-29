@@ -863,6 +863,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						return updateErr
 					}
 					a.microCompactStep(genCtx, call.SessionID)
+					a.compactRedundantToolResults(genCtx, call.SessionID)
 					if a.hookRunner != nil && (finishReason == message.FinishReasonEndTurn || finishReason == message.FinishReasonMaxTokens) {
 						a.fireStopHook(genCtx, call.SessionID, finishReason, stepResult)
 					}

@@ -215,6 +215,12 @@ func validateDagRunNodes(nodes []DagRunNode) error {
 			return fmt.Errorf("duplicate evidence node id: %s", node.ID)
 		}
 		seen[node.ID] = struct{}{}
+		switch node.Kind {
+		case "run_short_command":
+			if message, blocked := blockForegroundSleep(dagRunCommand(node)); blocked {
+				return fmt.Errorf("%s", message)
+			}
+		}
 		if node.OnFailure != "" && node.OnFailure != "continue" && node.OnFailure != "skip_dependents" && node.OnFailure != "stop_graph" {
 			return fmt.Errorf("node %s: unsupported on_failure %q", node.ID, node.OnFailure)
 		}
