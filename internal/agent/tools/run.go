@@ -43,7 +43,7 @@ func NewRunTool(permissions permission.Service, workingDir string) fantasy.Agent
 				language = "shell"
 			}
 			if language != "shell" && language != "python" && language != "node" {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("unsupported language %q; use shell, python, or node", params.Language)), nil
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("run supports only shell/python/node, not %q. For a compiled language (rust/go/etc.), use the bash tool to invoke its toolchain (e.g. `cargo run`, `go run`).", params.Language)), nil
 			}
 
 			sessionID := GetSessionFromContext(ctx)

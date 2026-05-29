@@ -90,8 +90,13 @@ func wrapToolsWithTimeout(tools []fantasy.AgentTool, timeout time.Duration) []fa
 		// delegation tools. The ctx still cancels on session cancel.
 		// "remote_attach"/"remote_detach" are tools.RemoteAttach/DetachToolName;
 		// the literal is used because the `tools` param shadows the package here.
+		// "run" self-times via its own timeout_seconds param (default 60, max
+		// 300) with a graceful "run timed out" message; the outer 60s wrapper
+		// would otherwise hard-kill it at 60s and make its advertised 300s max a
+		// lie (12 such premature timeouts in real traces).
 		if name == AgentToolName || name == "agentic_fetch" || name == "agent_tool" || name == "agentic_fetch_tool" ||
-			name == "remote_attach" || name == "remote_detach" {
+			name == "remote_attach" || name == "remote_detach" ||
+			name == "run" || name == "run_tool" {
 			out[i] = tool
 		} else {
 			out[i] = newTimeoutTool(tool, timeout)
