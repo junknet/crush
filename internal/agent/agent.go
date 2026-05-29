@@ -2977,6 +2977,8 @@ func isDefinitiveUpstreamFailure(err error, providerID string) bool {
 		strings.Contains(msg, "first-token timeout") ||
 		strings.Contains(msg, "convert_request_failed") ||
 		strings.Contains(msg, "not implemented") ||
+		strings.Contains(msg, "insufficient permissions") ||
+		strings.Contains(msg, "missing scopes") ||
 		strings.Contains(msg, "quota exceeded")
 }
 

@@ -212,6 +212,8 @@ func isNonRetryableTaskError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "convert_request_failed") ||
 		strings.Contains(msg, "not implemented") ||
+		strings.Contains(msg, "insufficient permissions") ||
+		strings.Contains(msg, "missing scopes") ||
 		strings.Contains(msg, "invalid_request_error") ||
 		strings.Contains(msg, "unsupported")
 }

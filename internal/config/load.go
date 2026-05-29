@@ -346,6 +346,9 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 		providerConfig.Name = cmp.Or(providerConfig.Name, id) // Use ID as name if not set
 		// default to OpenAI if not set
 		providerConfig.Type = cmp.Or(providerConfig.Type, catwalk.TypeOpenAICompat)
+		if providerConfig.Type == "gemini" {
+			providerConfig.Type = catwalk.TypeGoogle
+		}
 		isAntigravity := providerConfig.Type == antigravity.Name
 		isAnthropicOAuth := providerConfig.Type == anthropicoauth.Name
 		noAuthRequired := isAntigravity || isAnthropicOAuth
