@@ -156,7 +156,190 @@ func resolveOldString(content, oldString, newString string) (string, string, boo
 	if len(applied) > 0 && strings.Contains(content, desanitized) {
 		return desanitized, applyDesanitizations(newString, applied), true
 	}
+	// Leading-indentation-tolerant fallback. Runs ONLY after every exact and
+	// fuzzy path above has missed. Real-trace analysis shows the dominant
+	// edit-miss class is leading-indent drift (model emits 4 spaces, file
+	// uses a tab, etc.). See resolveLeadingIndent for the exact matching and
+	// reindent rules — it is deliberately fail-safe and returns changed=false
+	// rather than guessing whenever the match or reindent is ambiguous.
+	if actual, fixedNew, ok := resolveLeadingIndent(content, oldString, newString); ok {
+		return actual, fixedNew, true
+	}
 	return oldString, newString, false
+}
+
+// leadingWhitespace returns the maximal prefix of s composed solely of space
+// and tab bytes, plus the remainder. Only ' ' and '\t' count as indentation;
+// any other byte (including other Unicode space) terminates the run so we
+// never silently absorb meaningful characters.
+func leadingWhitespace(s string) (indent string, rest string) {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return s[:i], s[i:]
+}
+
+// isBlankLine reports whether the line is empty or contains only space/tab
+// bytes. Blank lines carry no body to match and no indent to anchor on, so
+// the matching and reindent rules treat them as transparent.
+func isBlankLine(s string) bool {
+	_, rest := leadingWhitespace(s)
+	return rest == ""
+}
+
+// resolveLeadingIndent implements the leading-indentation-tolerant fallback
+// for edit/multiedit old_string matching. It is the LAST resort: callers must
+// have already exhausted exact, quote-insensitive, and provider-desanitize
+// matching before invoking it.
+//
+// MATCHING RULE
+//
+//	Split oldString and content into lines on '\n'. A content line-window of
+//	length N (N == number of oldString lines) MATCHES iff, for every i, the
+//	content line and the oldString line are equal AFTER stripping their
+//	leading run of ' '/'\t' from BOTH. Interior and trailing whitespace must
+//	still match byte-for-byte — only LEADING indentation is tolerated.
+//
+// UNIQUENESS GATE
+//
+//	Succeed only if EXACTLY ONE such window exists. 0 or >=2 windows ->
+//	return changed=false. We never guess between candidates.
+//
+// REINDENT RULE (fail-safe, per-level mapping)
+//
+//	From the matched non-blank lines we build an indent-translation map
+//	M: oldIndent -> fileIndent (the model's leading ws on each matched line
+//	mapped to the file's actual leading ws on the corresponding line). This
+//	captures per-nesting-level changes (e.g. "" -> "", "    " -> "\t",
+//	"        " -> "\t\t") that a single common-prefix rewrite cannot express.
+//
+//	The map must be a well-defined FUNCTION: if the same oldIndent appears on
+//	two matched lines mapping to DIFFERENT fileIndents, the transform is
+//	ambiguous and we ABORT.
+//
+//	Reindent newString line-by-line: each non-blank newString line's leading
+//	ws MUST be a key in M; we replace it with M[key]. A non-blank newString
+//	line whose indent is NOT a known key cannot be safely reindented -> ABORT
+//	(we refuse rather than guess an indent for a level the match never
+//	observed). Blank newString lines pass through unchanged.
+//
+//	When M is the identity on every key (oldIndent == fileIndent for all),
+//	there is no indent drift to repair on this path and we return newString
+//	untouched.
+//
+// On success returns the file's actual matched bytes as old_string (a true
+// contiguous substring of content, so downstream strings.Index/ReplaceAll
+// slicing stays correct) and the reindented new_string.
+func resolveLeadingIndent(content, oldString, newString string) (string, string, bool) {
+	oldLines := strings.Split(oldString, "\n")
+	contentLines := strings.Split(content, "\n")
+	n := len(oldLines)
+	if n == 0 || n > len(contentLines) {
+		return "", "", false
+	}
+
+	// Pre-strip oldString line bodies once.
+	oldBodies := make([]string, n)
+	oldIndents := make([]string, n)
+	for i, l := range oldLines {
+		oldIndents[i], oldBodies[i] = leadingWhitespace(l)
+	}
+
+	// Find all matching windows. Track the first match's file indents for
+	// reindenting; bail as not-unique on the second match.
+	matchCount := 0
+	var matchStart int
+	var fileIndents []string
+	for start := 0; start+n <= len(contentLines); start++ {
+		ok := true
+		windowIndents := make([]string, n)
+		for i := 0; i < n; i++ {
+			ind, body := leadingWhitespace(contentLines[start+i])
+			if body != oldBodies[i] {
+				ok = false
+				break
+			}
+			windowIndents[i] = ind
+		}
+		if !ok {
+			continue
+		}
+		matchCount++
+		if matchCount == 1 {
+			matchStart = start
+			fileIndents = windowIndents
+		}
+		if matchCount >= 2 {
+			// Ambiguous: refuse to guess.
+			return "", "", false
+		}
+	}
+	if matchCount != 1 {
+		return "", "", false
+	}
+
+	// Derive the actual matched file bytes (contiguous substring of content).
+	actualOld := reconstructWindow(contentLines, matchStart, n)
+	if !strings.Contains(content, actualOld) {
+		// Defensive: should always hold, but never return a non-substring.
+		return "", "", false
+	}
+
+	// Build the indent-translation map over non-blank matched lines. Reject
+	// any oldIndent that maps to two different fileIndents (ambiguous).
+	indentMap := make(map[string]string, n)
+	identity := true
+	for i := 0; i < n; i++ {
+		if isBlankLine(oldLines[i]) {
+			continue
+		}
+		from, to := oldIndents[i], fileIndents[i]
+		if prev, seen := indentMap[from]; seen {
+			if prev != to {
+				return "", "", false
+			}
+			continue
+		}
+		indentMap[from] = to
+		if from != to {
+			identity = false
+		}
+	}
+	if len(indentMap) == 0 {
+		// Whole block is blank lines — nothing meaningful to reindent; refuse.
+		return "", "", false
+	}
+	if identity {
+		// No indent drift to repair (every observed level is unchanged).
+		return actualOld, newString, true
+	}
+
+	// Reindent newString: every non-blank line's leading ws must be a known
+	// key; otherwise we cannot safely place it and abort.
+	newLines := strings.Split(newString, "\n")
+	for i, l := range newLines {
+		if isBlankLine(l) {
+			continue
+		}
+		ind, rest := leadingWhitespace(l)
+		to, ok := indentMap[ind]
+		if !ok {
+			// new_string introduced an indent level the match never
+			// observed; refuse rather than guess.
+			return "", "", false
+		}
+		newLines[i] = to + rest
+	}
+	return actualOld, strings.Join(newLines, "\n"), true
+}
+
+// reconstructWindow rebuilds the exact substring of the original content that
+// the line-window [start, start+n) occupied, including the interior '\n'
+// separators. Because strings.Split on '\n' drops the separators, we re-join
+// with '\n' — which faithfully reproduces the original bytes for that span.
+func reconstructWindow(contentLines []string, start, n int) string {
+	return strings.Join(contentLines[start:start+n], "\n")
 }
 
 // mapNormalizedIndex returns the byte offset in s that corresponds to

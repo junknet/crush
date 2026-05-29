@@ -73,7 +73,9 @@ func notFoundDiagnostic(content, oldString, pathHint string) string {
 	// explicitly rather than leaving the model to spot it in the visualization.
 	specific := ""
 	fileLine := lines[lineNumber-1]
-	if fi, si := leadingWhitespace(fileLine), leadingWhitespace(firstLine); fi != si && strings.TrimSpace(fileLine) == trimmed {
+	fi, _ := leadingWhitespace(fileLine)
+	si, _ := leadingWhitespace(firstLine)
+	if fi != si && strings.TrimSpace(fileLine) == trimmed {
 		specific = fmt.Sprintf(
 			"\nMost likely cause: the line content matches but the LEADING INDENTATION differs — the file uses %s, your old_string uses %s. Copy the file's exact leading whitespace.\n",
 			describeIndent(fi), describeIndent(si),
@@ -84,11 +86,6 @@ func notFoundDiagnostic(content, oldString, pathHint string) string {
 		"%s\n\nDiagnostic: a similar line exists%s near line %d. Common causes: indentation/whitespace mismatch, tab vs space, or trailing whitespace.%s File excerpt (· = space, → = tab, ¶ = end of line):\n\n%s\nCopy the exact bytes between · markers from the file (or re-read with `view`) before retrying.",
 		baseMsg, hint, lineNumber, specific, excerpt.String(),
 	)
-}
-
-// leadingWhitespace returns the run of spaces/tabs at the start of s.
-func leadingWhitespace(s string) string {
-	return s[:len(s)-len(strings.TrimLeft(s, " \t"))]
 }
 
 // describeIndent renders a leading-whitespace run as a human count, e.g.
