@@ -25,15 +25,13 @@ const (
 	defaultInitializeAs  = "CLAUDE.md"
 )
 
+// Single self-maintained project context file. The other ecosystems'
+// conventions (AGENTS/CRUSH/GEMINI, *.local variants) were dropped: a lone-wolf
+// repo needs one source of truth, not eight competing files. Verification /
+// craft discipline lives in the global ~/.claude/CLAUDE.md constitution, which
+// is injected separately as <user_constitution>.
 var defaultContextPaths = []string{
-	"AGENTS.md",
-	"AGENTS.local.md",
 	"CLAUDE.md",
-	"CLAUDE.local.md",
-	"CRUSH.md",
-	"CRUSH.local.md",
-	"GEMINI.md",
-	"GEMINI.local.md",
 }
 
 type SelectedModelType string
@@ -878,7 +876,7 @@ func (c *Config) SetupAgents() {
 			// a half-finished "going to look at X" line that looked like a
 			// truncated return to the parent.
 			MaxTurns:      16,
-			ParallelTools: []string{"rg", "view", "ls", "bash", "nu", "sourcegraph", "code_triage", "bug_triage", "evidence_batch", "evidence_graph"},
+			ParallelTools: []string{"rg", "view", "ls", "bash", "sourcegraph", "code_triage", "bug_triage", "evidence_batch", "evidence_graph"},
 		},
 		AgentAuditor: {
 			ID:           AgentAuditor,

@@ -511,14 +511,14 @@ limitations.
 
 When you initialize a project, Crush analyzes your codebase and creates
 a context file that helps it work more effectively in future sessions.
-By default, this file is named `AGENTS.md`, but you can customize the
+By default, this file is named `CLAUDE.md`, but you can customize the
 name and location with the `initialize_as` option:
 
 ```json
 {
   "$schema": "https://charm.land/crush.json",
   "options": {
-    "initialize_as": "AGENTS.md"
+    "initialize_as": "CLAUDE.md"
   }
 }
 ```

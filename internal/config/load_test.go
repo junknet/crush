@@ -2328,16 +2328,6 @@ func TestConfig_configureProviders_UnsetAzureEndpointSkipsProvider(t *testing.T)
 }
 
 func TestContextPathsExist_DefaultAgentFiles(t *testing.T) {
-	t.Run("accepts agent instruction files", func(t *testing.T) {
-		dir := t.TempDir()
-
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(""), 0o644))
-
-		exists, err := contextPathsExist(dir)
-		require.NoError(t, err)
-		require.True(t, exists)
-	})
-
 	t.Run("accepts claude md", func(t *testing.T) {
 		dir := t.TempDir()
 
@@ -2346,5 +2336,15 @@ func TestContextPathsExist_DefaultAgentFiles(t *testing.T) {
 		exists, err := contextPathsExist(dir)
 		require.NoError(t, err)
 		require.True(t, exists)
+	})
+
+	t.Run("ignores other ecosystems' files", func(t *testing.T) {
+		dir := t.TempDir()
+
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(""), 0o644))
+
+		exists, err := contextPathsExist(dir)
+		require.NoError(t, err)
+		require.False(t, exists)
 	})
 }
