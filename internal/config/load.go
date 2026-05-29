@@ -408,10 +408,6 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 		c.Providers.Set(id, providerConfig)
 	}
 
-	if c.Providers.Len() == 0 && c.Options.DisableDefaultProviders {
-		return fmt.Errorf("default providers are disabled and there are no custom providers are configured")
-	}
-
 	return nil
 }
 

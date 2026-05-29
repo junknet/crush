@@ -159,7 +159,7 @@ command_finished 1
 
 | profile | model | provider |
 |:---|:---|:---|
-| `brain_agent` | `claude-opus-4-7` | `waitai-anthropic` |
+| `brain_agent` | `claude-opus-4-7` | `mock-anthropic` |
 | `explore_agent` | `gpt-5.4-mini` | `wecode` |
 | `worker_agent` | `gpt-5.5` | `wecode` |
 

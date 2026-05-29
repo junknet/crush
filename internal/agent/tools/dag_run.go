@@ -284,8 +284,6 @@ func legacyDagRunKind(node DagRunNode) string {
 		return "search_text"
 	case "view":
 		return "read_file"
-	case "nim_check_file":
-		return "check_file"
 	case "run", "shell":
 		return "run_short_command"
 	default:

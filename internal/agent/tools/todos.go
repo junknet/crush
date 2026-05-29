@@ -21,7 +21,7 @@ type TodosParams struct {
 
 type TodoItem struct {
 	Content    string `json:"content" description:"What needs to be done (imperative form)"`
-	Status     string `json:"status" description:"Task status: pending, in_progress, or completed"`
+	Status     string `json:"status" description:"Task status: pending, in_progress, completed, or failed"`
 	ActiveForm string `json:"active_form" description:"Present continuous form (e.g., 'Running tests')"`
 }
 
@@ -60,11 +60,24 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 			}
 
 			for _, item := range params.Todos {
+				if item.Content == "" {
+					return fantasy.ToolResponse{}, fmt.Errorf("todo content cannot be empty")
+				}
 				switch item.Status {
 				case "pending", "in_progress", "completed", "failed":
 				default:
 					return fantasy.ToolResponse{}, fmt.Errorf("invalid status %q for todo %q", item.Status, item.Content)
 				}
+			}
+
+			inProgressCount := 0
+			for _, item := range params.Todos {
+				if item.Status == "in_progress" {
+					inProgressCount++
+				}
+			}
+			if inProgressCount > 1 {
+				return fantasy.ToolResponse{}, fmt.Errorf("invalid todos: multiple in_progress tasks (%d), only one is allowed", inProgressCount)
 			}
 
 			todos := make([]session.Todo, len(params.Todos))
@@ -116,7 +129,7 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 			response := "Todo list updated successfully.\n\n"
 
 			pendingCount := 0
-			inProgressCount := 0
+			inProgressCurrentCount := 0
 			failedCount := 0
 
 			for _, todo := range todos {
@@ -124,14 +137,14 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 				case session.TodoStatusPending:
 					pendingCount++
 				case session.TodoStatusInProgress:
-					inProgressCount++
+					inProgressCurrentCount++
 				case session.TodoStatusFailed:
 					failedCount++
 				}
 			}
 
 			response += fmt.Sprintf("Status: %d pending, %d in progress, %d completed, %d failed\n",
-				pendingCount, inProgressCount, completedCount, failedCount)
+				pendingCount, inProgressCurrentCount, completedCount, failedCount)
 
 			response += "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable."
 

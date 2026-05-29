@@ -120,12 +120,6 @@ func IsDefinitiveFailure(err error, provider string) bool {
 	var providerErr *fantasy.ProviderError
 	if errors.As(err, &providerErr) {
 		code := providerErr.StatusCode
-		isWaitAI := strings.Contains(strings.ToLower(provider), "waitai")
-		if isWaitAI && (code == 400 || code == 422) {
-			// Skip treating 400/422 as definitive failures for waitai to prevent
-			// mock transient failures or verification prompts from failing tests.
-			return false
-		}
 		// Definitive: auth/billing/permissions/invalid-args.
 		// Transient (not in list): 429, 502, 503, 504.
 		if code == 401 || code == 402 || code == 403 || code == 400 || code == 422 {

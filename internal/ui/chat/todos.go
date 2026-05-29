@@ -191,18 +191,22 @@ func formatTodosList(sty *styles.Styles, todos []session.Todo, width int, maxLin
 		return ""
 	}
 
-	sorted := make([]session.Todo, len(todos))
-	copy(sorted, todos)
-	sortTodos(sorted)
+	displayTodos := make([]session.Todo, 0, len(todos))
+	for _, todo := range todos {
+		if strings.TrimSpace(todo.Content) != "" {
+			displayTodos = append(displayTodos, todo)
+		}
+	}
+	sortTodos(displayTodos)
 
 	visibleLineBudget := maxLines
-	if maxLines > 0 && todosRenderedLineCount(sorted) > maxLines && maxLines > 1 {
+	if maxLines > 0 && todosRenderedLineCount(displayTodos) > maxLines && maxLines > 1 {
 		visibleLineBudget = maxLines - 1
 	}
 
 	var lines []string
 	var hidden []session.Todo
-	for _, todo := range sorted {
+	for _, todo := range displayTodos {
 		todoLines := formatTodoItemLines(sty, todo, width, agentActive)
 		if visibleLineBudget > 0 && len(lines)+len(todoLines) > visibleLineBudget {
 			hidden = append(hidden, todo)
@@ -228,6 +232,9 @@ func todosRenderedLineCount(todos []session.Todo) int {
 }
 
 func formatTodoItemLines(sty *styles.Styles, todo session.Todo, width int, agentActive bool) []string {
+	if strings.TrimSpace(todo.Content) == "" {
+		return nil
+	}
 	var prefix string
 	textStyle := sty.Tool.TodoItem
 

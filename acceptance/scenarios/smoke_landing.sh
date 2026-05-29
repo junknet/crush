@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # smoke_landing.sh — crush 启动后 landing 页正确渲染(无 LLM)
-# 不需要 WaitAI,仅验证 TUI shell + skills 加载 + 配置解析
+# 不需要 Mock,仅验证 TUI shell + skills 加载 + 配置解析
 
 source "$(dirname "$0")/../common.sh"
 need_tui
 
 log "starting crush in tmux"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
+  "cd $REPO && CRUSH_MOCK_API_KEY=\"${CRUSH_MOCK_API_KEY:-}\" CRUSH_MOCK_KEY=\"${CRUSH_MOCK_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
   | tee -a "$LOG"
 
 log "waiting for landing page"

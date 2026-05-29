@@ -227,6 +227,10 @@ func NewToolMessageItem(
 		item = NewMultiEditToolMessageItem(sty, toolCall, result, canceled)
 	case tools.RgToolName:
 		item = NewRgToolMessageItem(sty, toolCall, result, canceled)
+	case tools.CodeTriageToolName:
+		item = NewCodeTriageToolMessageItem(sty, toolCall, result, canceled)
+	case tools.BugTriageToolName:
+		item = NewCodeTriageToolMessageItem(sty, toolCall, result, canceled)
 	case tools.LSToolName:
 		item = NewLSToolMessageItem(sty, toolCall, result, canceled)
 	case tools.DownloadToolName:
@@ -235,8 +239,6 @@ func NewToolMessageItem(
 		item = NewFetchToolMessageItem(sty, toolCall, result, canceled)
 	case tools.SourcegraphToolName:
 		item = NewSourcegraphToolMessageItem(sty, toolCall, result, canceled)
-	case tools.DiagnosticsToolName:
-		item = NewDiagnosticsToolMessageItem(sty, toolCall, result, canceled)
 	case agent.AgentToolName:
 		item = NewAgentToolMessageItem(sty, toolCall, result, canceled)
 	case tools.AgenticFetchToolName:
@@ -247,10 +249,6 @@ func NewToolMessageItem(
 		item = NewWebSearchToolMessageItem(sty, toolCall, result, canceled)
 	case tools.TodosToolName:
 		item = NewTodosToolMessageItem(sty, toolCall, result, canceled)
-	case tools.ReferencesToolName:
-		item = NewReferencesToolMessageItem(sty, toolCall, result, canceled)
-	case tools.NimRestartToolName:
-		item = NewNimRestartToolMessageItem(sty, toolCall, result, canceled)
 	default:
 		if IsDockerMCPTool(toolCall.Name) {
 			item = NewDockerMCPToolMessageItem(sty, toolCall, result, canceled)
@@ -1309,8 +1307,6 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 			}
 			return strings.Join(parts, "\n")
 		}
-	case tools.DiagnosticsToolName:
-		return "**Project:** diagnostics"
 	case agent.AgentToolName:
 		var params agent.AgentParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
@@ -1366,7 +1362,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatWebFetchResultForCopy()
 	case agent.AgentToolName:
 		return t.formatAgentResultForCopy()
-	case tools.DownloadToolName, tools.RgToolName, tools.LSToolName, tools.SourcegraphToolName, tools.DiagnosticsToolName, tools.TodosToolName:
+	case tools.DownloadToolName, tools.RgToolName, tools.LSToolName, tools.SourcegraphToolName, tools.TodosToolName:
 		return fmt.Sprintf("```\n%s\n```", t.result.Content)
 	default:
 		return t.result.Content
@@ -1707,6 +1703,8 @@ func prettifyToolName(name string) string {
 		return tools.WebSearchToolName
 	case tools.RgToolName:
 		return tools.RgToolName
+	case tools.CodeTriageToolName:
+		return tools.CodeTriageToolName
 	case tools.LSToolName:
 		return tools.LSToolName
 	case tools.SourcegraphToolName:
@@ -1731,6 +1729,8 @@ func normalizeToolName(name string) string {
 	switch name {
 	case "multiedit":
 		return "edit:multi"
+	case tools.BugTriageToolName:
+		return tools.CodeTriageToolName
 	case "list":
 		return "ls"
 	default:

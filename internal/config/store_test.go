@@ -363,13 +363,13 @@ func TestSetConfigField_RoutesStateKeyToStateFile(t *testing.T) {
 		configBase: basePath,
 	}
 
-	require.NoError(t, store.SetConfigField("providers.waitai-openai.api_key", "secret"))
+	require.NoError(t, store.SetConfigField("providers.mock-openai.api_key", "secret"))
 
 	statePath := filepath.Join(dir, "state.yaml")
 	data, err := os.ReadFile(statePath)
 	require.NoError(t, err)
 	require.Contains(t, string(data), "providers:")
-	require.Contains(t, string(data), "waitai-openai:")
+	require.Contains(t, string(data), "mock-openai:")
 	require.Contains(t, string(data), "api_key: secret")
 
 	// The declarative file must not exist for a pure state write.

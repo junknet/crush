@@ -24,6 +24,10 @@ type AstGrepParams struct {
 
 const AstGrepToolName = "ast_grep"
 
+var astGrepUnsupportedLanguages = map[string]struct{}{
+	"nim": {},
+}
+
 //go:embed ast_grep.md.tpl
 var astGrepDescriptionTmpl []byte
 
@@ -110,6 +114,10 @@ type astGrepMatch struct {
 }
 
 func runAstGrepScan(ctx context.Context, params AstGrepParams, path string, cfg config.ToolAstGrep) (fantasy.ToolResponse, error) {
+	if err := validateAstGrepLanguage(params.Lang); err != nil {
+		return fantasy.NewTextErrorResponse(err.Error()), nil
+	}
+
 	args := []string{"run", "--pattern", params.Pattern, "--json"}
 	if params.Lang != "" {
 		args = append(args, "--lang", params.Lang)
@@ -165,6 +173,10 @@ func runAstGrepScan(ctx context.Context, params AstGrepParams, path string, cfg 
 }
 
 func runAstGrepRewrite(ctx context.Context, params AstGrepParams, path string, cfg config.ToolAstGrep) (fantasy.ToolResponse, error) {
+	if err := validateAstGrepLanguage(params.Lang); err != nil {
+		return fantasy.NewTextErrorResponse(err.Error()), nil
+	}
+
 	args := []string{"run", "--pattern", params.Pattern, "--rewrite", params.Rewrite, "--update-all"}
 	if params.Lang != "" {
 		args = append(args, "--lang", params.Lang)
@@ -181,4 +193,15 @@ func runAstGrepRewrite(ctx context.Context, params AstGrepParams, path string, c
 	}
 
 	return fantasy.NewTextResponse(fmt.Sprintf("Successfully applied rewrites.\n%s", string(output))), nil
+}
+
+func validateAstGrepLanguage(lang string) error {
+	normalized := strings.ToLower(strings.TrimSpace(lang))
+	if normalized == "" {
+		return nil
+	}
+	if _, unsupported := astGrepUnsupportedLanguages[normalized]; unsupported {
+		return fmt.Errorf("ast_grep does not support language %q. Use rg/search_text for this language, or omit lang only when ast-grep can infer a supported parser from the file extension", lang)
+	}
+	return nil
 }

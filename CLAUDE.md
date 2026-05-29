@@ -1,9 +1,8 @@
 # Crush Facade (L0 Entrypoint)
 
 Go CLI/TUI agent runner. Bubble Tea v2 front end, Fantasy agent loop (charm.land),
-sqlc/SQLite persistence, mvdan `sh/v3` interpreter for the embedded shell, and a
-heavily extended LSP/MCP surface (custom Nim LSP methods exposed as `nim_*`
-tools).
+sqlc/SQLite persistence, mvdan `sh/v3` interpreter for the embedded shell, and
+MCP/LSP integration through generic evidence and resource tools.
 
 ---
 
@@ -86,20 +85,10 @@ provider ID, task node ID (`tools.go:29-51`). New tools must accept this
 context and emit task-node IDs into events so the sidebar/sub-agent sidecar
 can attribute output.
 
-**Custom Nim LSP methods** are wired through `client.CallCustom()`:
-
-| Tool | LSP method |
-|------|-----------|
-| `nim_project_maps` | `nimlsp/projectMaps` |
-| `nim_macro_expand` | `extension/macroExpand` |
-| `nim_safe_to_delete` | `nimlsp/safeToDelete` |
-| `nim_call_hierarchy` | `textDocument/prepareCallHierarchy` + `callHierarchy/{incoming,outgoing}Calls` |
-| `nim_check_file` | drives standard `textDocument/publishDiagnostics` but refreshes the file first |
-
-When extending the Nim toolset, mirror the existing pattern in
-`internal/agent/tools/nim_*.go` and update the `<nim_first>` system-prompt
-table in `internal/agent/prompts.go` / templates so the agent knows the tool
-exists.
+Language-specific helper tools are intentionally not part of the built-in
+surface. Prefer generic evidence/code-intelligence tools over one-off
+`nim_*`-style tools; language-specific integrations should live behind MCP or
+inside a generic reducer with a language adapter.
 
 ### MCP
 
@@ -157,9 +146,9 @@ Builtin command interception (e.g. coreutils replacements, `jq`) is wired via
 ### UI (`internal/ui/`)
 
 Bubble Tea v2 (`charm.land/bubbletea/v2`). Top-level model in
-`internal/ui/model/ui.go` (large file). Chat rendering split across 29 files
-in `internal/ui/chat/` — one per content kind (`bash.go`, `fetch.go`,
-`mcp.go`, `diagnostics.go`, `references.go`, `nim_restart.go`, etc.). When
+`internal/ui/model/ui.go` (large file). Chat rendering is split across focused
+files in `internal/ui/chat/` — one per content kind (`bash.go`, `fetch.go`,
+`mcp.go`, `todos.go`, etc.). When
 adding a new tool with bespoke rendering, add a sibling file there and wire
 it from `chat.go`.
 
@@ -206,8 +195,8 @@ project-level walk-up, no `.crush/` workspace config, and no
   (url/model catalog/`api_key` via `${ENV}` interpolation), `mcp`, `agents`,
   `options` (context window, auto-summarize threshold, tools), `skills`, and a
   `models` block that serves as the **default** model per role. Env
-  interpolation (`${WAITAI_CRUSH_BASE:-http://127.0.0.1:43917}`,
-  `${WAITAI_API_KEY:-${NCODER_WAITAI_KEY:?...}}`) is resolved at use time.
+  interpolation (`${CRUSH_MOCK_LLM_BASE:-http://127.0.0.1:43917}`,
+  `${CRUSH_MOCK_API_KEY:-${CRUSH_MOCK_KEY:?...}}`) is resolved at use time.
 - `state.yaml` — **runtime state the app writes**, never hand-edit: current
   `models` selection (picker / think toggle / reasoning effort), `recent_models`,
   and oauth tokens / api keys obtained at runtime. It is merged at the **highest

@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -113,6 +114,98 @@ func TestBackgroundShellManager_KillNonExistent(t *testing.T) {
 	err := manager.Kill("non-existent-id")
 	if err == nil {
 		t.Error("expected error when killing non-existent shell")
+	}
+}
+
+func TestBackgroundShellManager_StartMonitorUnknownShellListsKnownIDs(t *testing.T) {
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := NewBackgroundShellManager()
+
+	bgShell, err := manager.Start(ctx, workingDir, nil, "sleep 10", "", "session-known")
+	require.NoError(t, err)
+	defer manager.Kill(bgShell.ID)
+
+	err = manager.StartMonitor("missing-shell", "ready", time.Second, "session-known")
+	require.Error(t, err)
+
+	var notFound *BackgroundShellNotFoundError
+	require.True(t, errors.As(err, &notFound))
+	require.Equal(t, "missing-shell", notFound.ShellID)
+	require.Len(t, notFound.Known, 1)
+	require.Equal(t, bgShell.ID, notFound.Known[0].ID)
+	require.Contains(t, err.Error(), "known shell IDs: "+bgShell.ID)
+}
+
+func TestBackgroundShellManager_StartMonitorCompletedShellCanHit(t *testing.T) {
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := NewBackgroundShellManager()
+	events := SubscribeBackgroundJobs(ctx)
+
+	bgShell, err := manager.Start(ctx, workingDir, nil, "printf 'ready\\n'", "", "session-monitor-hit")
+	require.NoError(t, err)
+	defer manager.Kill(bgShell.ID)
+	bgShell.Wait()
+
+	require.NoError(t, manager.StartMonitor(bgShell.ID, "ready", time.Second, "session-monitor-hit"))
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for monitor hit")
+		case ev := <-events:
+			job := ev.Payload
+			if job.SessionID != "session-monitor-hit" || job.ID != bgShell.ID {
+				continue
+			}
+			if job.Kind != BackgroundKindMonitorHit {
+				continue
+			}
+			require.Equal(t, BackgroundKindMonitorHit, job.Kind)
+			require.Equal(t, "ready", job.MatchLine)
+			require.Contains(t, job.OutputTail, "ready")
+			return
+		}
+	}
+}
+
+func TestBackgroundShellManager_MonitorSuppressesDoneWake(t *testing.T) {
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := NewBackgroundShellManager()
+	events := SubscribeBackgroundJobs(ctx)
+
+	bgShell, err := manager.Start(ctx, workingDir, nil, "sleep 0.2; printf 'ready\\n'", "", "session-monitor-only")
+	require.NoError(t, err)
+	defer manager.Kill(bgShell.ID)
+	bgShell.MarkBackgrounded()
+
+	require.NoError(t, manager.StartMonitor(bgShell.ID, "ready", time.Second, "session-monitor-only"))
+
+	deadline := time.After(2 * time.Second)
+	var sawHit bool
+	for {
+		select {
+		case <-deadline:
+			require.True(t, sawHit, "timed out waiting for monitor hit")
+			return
+		case ev := <-events:
+			job := ev.Payload
+			if job.SessionID != "session-monitor-only" || job.ID != bgShell.ID {
+				continue
+			}
+			require.NotEqual(t, BackgroundKindDone, job.Kind)
+			if job.Kind == BackgroundKindMonitorHit {
+				require.Equal(t, "ready", job.MatchLine)
+				sawHit = true
+			}
+			if sawHit {
+				time.Sleep(100 * time.Millisecond)
+				return
+			}
+		}
 	}
 }
 

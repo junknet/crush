@@ -255,6 +255,7 @@ func (m *Chat) SetMessages(msgs ...chat.MessageItem) {
 
 // AppendMessages appends a new message item to the chat list.
 func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
+	wasAtBottom := m.AtBottom()
 	items := make([]list.Item, len(msgs))
 	indexOffset := m.list.Len()
 	for i, msg := range msgs {
@@ -270,9 +271,13 @@ func (m *Chat) AppendMessages(msgs ...chat.MessageItem) {
 	m.list.AppendItems(items...)
 	// Sticky-bottom: newly arrived tool calls / assistant chunks must stay
 	// pinned to the viewport bottom while the user has not scrolled up.
-	// ScrollToBottom is follow-aware so a user reading older context is
-	// not yanked away.
-	m.ScrollToBottom()
+	// If we were at the bottom before appending, force the scroll to keep
+	// the new items in view and re-enable follow mode in case it was lost.
+	if wasAtBottom {
+		m.ForceScrollToBottom()
+	} else {
+		m.ScrollToBottom()
+	}
 }
 
 // UpsertRuntimeActivity appends a runtime activity when it is not already in

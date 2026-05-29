@@ -279,6 +279,26 @@ func TestReadOnlyDagRunPolicy(t *testing.T) {
 	assert.True(t, resp.StopTurn)
 }
 
+func TestReadOnlyCodeTriagePolicy(t *testing.T) {
+	wrapper := &readOnlyToolWrapper{inner: &dummyTool{}}
+
+	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
+		Name:  tools.CodeTriageToolName,
+		Input: `{"queries":[{"id":"q","query":"TODO"}],"check_commands":[{"name":"quick","command":"go test ./..."}]}`,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "code_triage run", resp.Content)
+	assert.False(t, resp.StopTurn)
+
+	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
+		Name:  tools.CodeTriageToolName,
+		Input: `{"check_commands":[{"name":"unsafe","command":"rm -rf /tmp/foo"}]}`,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, resp.Content, "Code triage check command")
+	assert.True(t, resp.StopTurn)
+}
+
 func TestPromptReadOnlyAndExplorePreflightDetection(t *testing.T) {
 	t.Parallel()
 

@@ -72,7 +72,10 @@ const (
 	// proportional point as small ones.
 	autoSummarizeUsedRatio = 0.70
 
-	firstModelEventTimeout = 60 * time.Second
+	minFirstModelEventTimeout = 60 * time.Second
+	maxFirstModelEventTimeout = 5 * time.Minute
+
+	maxInlineMessageAttachmentBytes = 1 << 20
 )
 
 var userAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
@@ -547,17 +550,33 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 			}
 			observer := newLLMTraceObserver(streamCtx, requestID, attempt)
 
-			receivedFirstToken := false
-			firstTokenTimer := time.AfterFunc(firstModelEventTimeout, func() {
-				if !receivedFirstToken {
-					cancelStream(fmt.Errorf("first-token timeout: no response received from %s (provider: %s) within %s. Please check your network connection, API keys, or provider status", currentModel.CatwalkCfg.Name, currentModel.ModelCfg.Provider, firstModelEventTimeout))
+			var receivedFirstToken atomic.Bool
+			firstTokenTimeout := minFirstModelEventTimeout
+			firstTokenTimer := time.AfterFunc(firstTokenTimeout, func(timeout time.Duration) func() {
+				return func() {
+					if !receivedFirstToken.Load() {
+						cancelStream(firstModelEventTimeoutError(currentModel, timeout, llmRequestMetrics{}))
+					}
 				}
-			})
-			defer firstTokenTimer.Stop()
+			}(firstTokenTimeout))
+			defer func() {
+				firstTokenTimer.Stop()
+			}()
+			resetFirstTokenTimer := func(timeout time.Duration, metrics llmRequestMetrics) {
+				if receivedFirstToken.Load() {
+					return
+				}
+				firstTokenTimeout = timeout
+				firstTokenTimer.Stop()
+				firstTokenTimer = time.AfterFunc(timeout, func() {
+					if !receivedFirstToken.Load() {
+						cancelStream(firstModelEventTimeoutError(currentModel, timeout, metrics))
+					}
+				})
+			}
 
 			stopFirstTokenTimer := func() {
-				if !receivedFirstToken {
-					receivedFirstToken = true
+				if receivedFirstToken.CompareAndSwap(false, true) {
 					firstTokenTimer.Stop()
 				}
 			}
@@ -651,7 +670,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						maxOutputTokenValue = *maxOutputTokens
 					}
 					contextWindowTokens := resolvedModelContextWindow(currentModel)
-					observer.start(options.StepNumber, buildLLMRequestMetrics(prepared.Messages, prepared.Tools, files, call.Attachments, contextWindowTokens, maxOutputTokenValue))
+					metrics := buildLLMRequestMetrics(prepared.Messages, prepared.Tools, files, call.Attachments, contextWindowTokens, maxOutputTokenValue)
+					observer.start(options.StepNumber, metrics)
+					resetFirstTokenTimer(firstModelEventTimeoutForMetrics(metrics), metrics)
 
 					if isFirstStep && currentAssistant != nil {
 						if deleteErr := a.messages.Delete(callContext, currentAssistant.ID); deleteErr != nil {
@@ -1520,16 +1541,25 @@ func wasPreviousTurnCancelled(msgs []message.Message) bool {
 }
 
 func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentCall) (message.Message, error) {
-	parts := []message.ContentPart{message.TextContent{Text: call.Prompt}}
+	prompt := call.Prompt
 	var attachmentParts []message.ContentPart
 	for _, attachment := range call.Attachments {
+		data := attachment.Content
+		mimeType := attachment.MimeType
+		if shouldOmitInlineAttachment(attachment.MimeType, len(data)) {
+			notice := largeAttachmentNotice(attachment.FilePath, attachment.FileName, attachment.MimeType, len(data))
+			prompt = appendLargeAttachmentNotice(prompt, attachment.FilePath, attachment.FileName, attachment.MimeType, len(data))
+			data = []byte(notice)
+			mimeType = "text/plain"
+		}
 		attachmentParts = append(attachmentParts, message.BinaryContent{
 			Path:       attachment.FilePath,
-			MIMEType:   attachment.MimeType,
-			Data:       attachment.Content,
+			MIMEType:   mimeType,
+			Data:       data,
 			IsInternal: attachment.IsInternal,
 		})
 	}
+	parts := []message.ContentPart{message.TextContent{Text: prompt}}
 	parts = append(parts, attachmentParts...)
 	role := message.User
 	if call.IsSystem {
@@ -1543,6 +1573,32 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 		return message.Message{}, fmt.Errorf("failed to create user message: %w", err)
 	}
 	return msg, nil
+}
+
+func shouldOmitInlineAttachment(mimeType string, size int) bool {
+	if size <= maxInlineMessageAttachmentBytes {
+		return false
+	}
+	return !strings.HasPrefix(mimeType, "image/")
+}
+
+func appendLargeAttachmentNotice(prompt, filePath, fileName, mimeType string, size int) string {
+	notice := largeAttachmentNotice(filePath, fileName, mimeType, size)
+	if strings.TrimSpace(prompt) == "" {
+		return notice
+	}
+	return prompt + "\n\n" + notice
+}
+
+func largeAttachmentNotice(filePath, fileName, mimeType string, size int) string {
+	name := filePath
+	if name == "" {
+		name = fileName
+	}
+	if name == "" {
+		name = "attachment"
+	}
+	return fmt.Sprintf("[Large attachment omitted from model context: %s (%s, %d bytes). Use filesystem tools to inspect this file by path instead of relying on inline attachment content.]", name, mimeType, size)
 }
 
 func (a *sessionAgent) preparePrompt(currentSession session.Session, msgs []message.Message, supportsImages bool, providerType catwalk.Type, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
@@ -1661,7 +1717,8 @@ If not, please feel free to ignore. Again do not mention this message to the use
 			// position. At 30-55 KB per image after compression the context cost
 			// is negligible (<0.1% of a 1M-token window) so historical stripping
 			// is not worth the complexity.
-			aiMsgs = m.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: !supportsImages})
+			sanitized := sanitizeLargeMessageAttachments(m)
+			aiMsgs = sanitized.ToAIMessage(message.ToAIMessageOptions{TruncateMedia: !supportsImages})
 			if supportsImages {
 				for mi := range aiMsgs {
 					for pi, part := range aiMsgs[mi].Content {
@@ -1715,6 +1772,41 @@ If not, please feel free to ignore. Again do not mention this message to the use
 	}
 
 	return history, files
+}
+
+func sanitizeLargeMessageAttachments(m message.Message) message.Message {
+	var changed bool
+	for i, part := range m.Parts {
+		binary, ok := part.(message.BinaryContent)
+		if !ok || !shouldOmitInlineAttachment(binary.MIMEType, len(binary.Data)) {
+			continue
+		}
+		if !changed {
+			m = m.Clone()
+			changed = true
+		}
+		data := []byte(largeAttachmentNotice(binary.Path, "", binary.MIMEType, len(binary.Data)))
+		m.Parts[i] = message.BinaryContent{
+			Path:       binary.Path,
+			MIMEType:   "text/plain",
+			Data:       data,
+			IsInternal: binary.IsInternal,
+		}
+	}
+	if changed {
+		notice := "[One or more large attachments were omitted from model context. Use filesystem tools to inspect them by path.]"
+		for i, part := range m.Parts {
+			text, ok := part.(message.TextContent)
+			if !ok {
+				continue
+			}
+			text.Text = strings.TrimSpace(text.Text + "\n\n" + notice)
+			m.Parts[i] = text
+			return m
+		}
+		m.Parts = append([]message.ContentPart{message.TextContent{Text: notice}}, m.Parts...)
+	}
+	return m
 }
 
 func ensureAnthropicToolResultVisibility(msg fantasy.Message) fantasy.Message {
@@ -2026,6 +2118,42 @@ func resolvedModelContextWindow(model Model) int64 {
 
 func autoSummarizeUsedTokens(session session.Session) int64 {
 	return session.CompletionTokens + session.PromptTokens
+}
+
+func firstModelEventTimeoutForMetrics(metrics llmRequestMetrics) time.Duration {
+	timeout := minFirstModelEventTimeout
+	if metrics.preflightEstimatedInputTokens > 0 {
+		extraBuckets := (metrics.preflightEstimatedInputTokens + 49_999) / 50_000
+		timeout += time.Duration(extraBuckets) * 20 * time.Second
+	}
+	if metrics.toolSchemaBytes > 0 {
+		extraBuckets := (metrics.toolSchemaBytes + 99_999) / 100_000
+		timeout += time.Duration(extraBuckets) * 20 * time.Second
+	}
+	if timeout > maxFirstModelEventTimeout {
+		return maxFirstModelEventTimeout
+	}
+	return timeout
+}
+
+func firstModelEventTimeoutError(model Model, timeout time.Duration, metrics llmRequestMetrics) error {
+	details := ""
+	if metrics.preflightEstimatedInputTokens > 0 || metrics.contextBytes > 0 || metrics.toolSchemaBytes > 0 {
+		details = fmt.Sprintf(
+			" Request size: estimated_input_tokens=%d, context_bytes=%d, tool_count=%d, tool_schema_bytes=%d.",
+			metrics.preflightEstimatedInputTokens,
+			metrics.contextBytes,
+			metrics.toolCount,
+			metrics.toolSchemaBytes,
+		)
+	}
+	return fmt.Errorf(
+		"first-token timeout: no response received from %s (provider: %s) within %s.%s Please check your network connection, API keys, provider status, or reduce/compact the session context",
+		model.CatwalkCfg.Name,
+		model.ModelCfg.Provider,
+		timeout,
+		details,
+	)
 }
 
 func autoSummarizeThresholdTokens(contextWindow int64) int64 {
@@ -2522,7 +2650,6 @@ var readOnlyBlockedTools = map[string]struct{}{
 	tools.EditToolName:            {},
 	tools.JobKillToolName:         {},
 	tools.MultiEditToolName:       {},
-	tools.NimRestartToolName:      {},
 	tools.NuToolName:              {},
 	tools.RunToolName:             {},
 	tools.ScheduleWakeupToolName:  {},
@@ -2565,8 +2692,14 @@ func (r *readOnlyToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (f
 		}
 		return r.inner.Run(ctx, call)
 	}
+	if call.Name == tools.CodeTriageToolName || call.Name == tools.BugTriageToolName {
+		if resp, blocked := readOnlyCodeTriageToolResponse(call); blocked {
+			return resp, nil
+		}
+		return r.inner.Run(ctx, call)
+	}
 	if _, blocked := readOnlyBlockedTools[call.Name]; blocked {
-		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because this turn is read-only. Use view, ls, rg, ast_grep, sourcegraph, fetch, or read-only LSP tools instead.", call.Name))
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because this turn is read-only. Use view, ls, rg, ast_grep, sourcegraph, or fetch instead.", call.Name))
 		resp.StopTurn = true
 		return resp, nil
 	}
@@ -2616,8 +2749,6 @@ func readOnlyDagRunToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bo
 				}
 			case "view":
 				kind = "read_file"
-			case "nim_check_file":
-				kind = "check_file"
 			}
 		}
 		switch kind {
@@ -2630,6 +2761,45 @@ func readOnlyDagRunToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bo
 		}
 	}
 	return fantasy.ToolResponse{}, false
+}
+
+func readOnlyCodeTriageToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bool) {
+	var params tools.CodeTriageParams
+	if err := json.Unmarshal([]byte(call.Input), &params); err != nil {
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because its input could not be parsed for read-only policy: %v", call.Name, err))
+		resp.StopTurn = true
+		return resp, true
+	}
+	for _, cmd := range params.CheckCommands {
+		if !isReadOnlySafeCodeTriageCommand(cmd.Command) {
+			resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Code triage check command %q is blocked in read-only mode; use compile/test commands that do not write or mutate files", cmd.Command))
+			resp.StopTurn = true
+			return resp, true
+		}
+	}
+	return fantasy.ToolResponse{}, false
+}
+
+func isReadOnlySafeCodeTriageCommand(cmd string) bool {
+	cmd = strings.TrimSpace(strings.ToLower(cmd))
+	if cmd == "" {
+		return false
+	}
+	for _, blocked := range []string{"&&", "||", ";", "|", ">", "<", "$(", "`", "sudo", "rm ", "mv ", "cp ", "chmod ", "chown ", "tee ", "dd ", "curl ", "wget "} {
+		if strings.Contains(cmd, blocked) {
+			return false
+		}
+	}
+	firstWord := strings.Fields(cmd)
+	if len(firstWord) == 0 {
+		return false
+	}
+	switch firstWord[0] {
+	case "go", "python", "python3", "node", "npm", "pnpm", "yarn", "cargo", "make", "deno", "bun":
+		return true
+	default:
+		return false
+	}
 }
 
 type memExtractToolWrapper struct {

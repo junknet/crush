@@ -15,7 +15,7 @@
 </critical_rules>
 
 <workflow>
-1. **批量搜索**（第 1 轮）：使用 `evidence_batch`。
+1. **批量搜索**（第 1 轮）：定位/理解/review 使用 `code_triage`；无明确意图的并行证据收集使用 `evidence_batch`。
 2. **验证**（第 2-3 轮）：针对性读取。
 3. **报告**：仅返回简洁的发现。
 </workflow>

@@ -25,6 +25,9 @@ const (
 	// carries, so a follow-up agent run gets enough context without dragging a
 	// huge log into the prompt.
 	maxBackgroundTailBytes = 4096
+	// backgroundDoneGrace gives the agent one short turn to attach a monitor to
+	// a just-backgrounded command before the generic completion wake fires.
+	backgroundDoneGrace = 750 * time.Millisecond
 )
 
 // BackgroundEventKind classifies why a background event fired.
@@ -112,6 +115,8 @@ type BackgroundShell struct {
 	completedAt  atomic.Int64 // Unix timestamp when job completed (0 if still running)
 	backgrounded atomic.Bool  // true once handed back to the agent as a background job
 	notifyOnce   sync.Once    // guards single completion event publish
+	monitorCount atomic.Int64
+	monitorDone  atomic.Bool
 }
 
 // BackgroundShellManager manages background shell instances.
@@ -126,6 +131,24 @@ type BackgroundShellStats struct {
 	Running        int
 	Completed      int
 	ActiveMonitors int
+}
+
+// BackgroundShellNotFoundError describes a missing background shell lookup and
+// includes the shells still known to the manager.
+type BackgroundShellNotFoundError struct {
+	ShellID string
+	Known   []BackgroundShellInfo
+}
+
+func (e *BackgroundShellNotFoundError) Error() string {
+	ids := make([]string, 0, len(e.Known))
+	for _, info := range e.Known {
+		ids = append(ids, info.ID)
+	}
+	if len(ids) == 0 {
+		return fmt.Sprintf("StartMonitor: background shell not found: %s (known shell IDs: none)", e.ShellID)
+	}
+	return fmt.Sprintf("StartMonitor: background shell not found: %s (known shell IDs: %s)", e.ShellID, strings.Join(ids, ", "))
 }
 
 // idCounter assigns globally-unique background job IDs across all managers.
@@ -251,17 +274,26 @@ func (bs *BackgroundShell) maybePublishDone() {
 	if !bs.backgrounded.Load() || bs.completedAt.Load() == 0 {
 		return
 	}
+	if bs.monitorCount.Load() > 0 || bs.monitorDone.Load() {
+		return
+	}
 	bs.notifyOnce.Do(func() {
-		backgroundBroker.Publish(pubsub.CreatedEvent, BackgroundJobEvent{
-			Kind:        BackgroundKindDone,
-			ID:          bs.ID,
-			SessionID:   bs.SessionID,
-			Command:     bs.Command,
-			Description: bs.Description,
-			ExitCode:    ExitCode(bs.exitErr),
-			Interrupted: IsInterrupt(bs.exitErr),
-			OutputTail:  backgroundOutputTail(bs.stdout.String(), bs.stderr.String()),
-		})
+		go func() {
+			time.Sleep(backgroundDoneGrace)
+			if bs.monitorCount.Load() > 0 || bs.monitorDone.Load() {
+				return
+			}
+			backgroundBroker.Publish(pubsub.CreatedEvent, BackgroundJobEvent{
+				Kind:        BackgroundKindDone,
+				ID:          bs.ID,
+				SessionID:   bs.SessionID,
+				Command:     bs.Command,
+				Description: bs.Description,
+				ExitCode:    ExitCode(bs.exitErr),
+				Interrupted: IsInterrupt(bs.exitErr),
+				OutputTail:  backgroundOutputTail(bs.stdout.String(), bs.stderr.String()),
+			})
+		}()
 	})
 }
 
@@ -273,7 +305,10 @@ func (bs *BackgroundShell) maybePublishDone() {
 func (m *BackgroundShellManager) StartMonitor(shellID, pattern string, timeout time.Duration, sessionID string) error {
 	bgShell, ok := m.shells.Get(shellID)
 	if !ok {
-		return fmt.Errorf("StartMonitor: background shell not found: %s", shellID)
+		return &BackgroundShellNotFoundError{
+			ShellID: shellID,
+			Known:   m.ListInfo(),
+		}
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -281,8 +316,12 @@ func (m *BackgroundShellManager) StartMonitor(shellID, pattern string, timeout t
 	}
 
 	m.activeMonitors.Add(1)
+	bgShell.monitorCount.Add(1)
 	go func() {
-		defer m.activeMonitors.Add(-1)
+		defer func() {
+			bgShell.monitorCount.Add(-1)
+			m.activeMonitors.Add(-1)
+		}()
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		deadline := time.After(timeout)
@@ -303,6 +342,7 @@ func (m *BackgroundShellManager) StartMonitor(shellID, pattern string, timeout t
 			case <-ticker.C:
 				stdout, stderr, done, exitErr := bgShell.GetOutput()
 				if line, matched := firstMatchingLine(re, stdout, stderr); matched {
+					bgShell.monitorDone.Store(true)
 					ev := base
 					ev.Kind = BackgroundKindMonitorHit
 					ev.MatchLine = line
@@ -311,6 +351,7 @@ func (m *BackgroundShellManager) StartMonitor(shellID, pattern string, timeout t
 					return
 				}
 				if done {
+					bgShell.monitorDone.Store(true)
 					ev := base
 					ev.Kind = BackgroundKindMonitorEOF
 					ev.ExitCode = ExitCode(exitErr)
@@ -429,15 +470,36 @@ type BackgroundShellInfo struct {
 	ID          string
 	Command     string
 	Description string
+	SessionID   string
+	Done        bool
 }
 
 // List returns all background shell IDs.
 func (m *BackgroundShellManager) List() []string {
-	ids := make([]string, 0, m.shells.Len())
-	for id := range m.shells.Seq2() {
-		ids = append(ids, id)
+	infos := m.ListInfo()
+	ids := make([]string, 0, len(infos))
+	for _, info := range infos {
+		ids = append(ids, info.ID)
 	}
 	return ids
+}
+
+// ListInfo returns a stable summary of all known background shells.
+func (m *BackgroundShellManager) ListInfo() []BackgroundShellInfo {
+	infos := make([]BackgroundShellInfo, 0, m.shells.Len())
+	for shell := range m.shells.Seq() {
+		infos = append(infos, BackgroundShellInfo{
+			ID:          shell.ID,
+			Command:     shell.Command,
+			Description: shell.Description,
+			SessionID:   shell.SessionID,
+			Done:        shell.IsDone(),
+		})
+	}
+	slices.SortFunc(infos, func(a, b BackgroundShellInfo) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return infos
 }
 
 // Cleanup removes completed jobs that have been finished for more than the retention period

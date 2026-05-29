@@ -132,12 +132,13 @@ assistant: 客户端在 src/services/process.go:712 的 `connectToServer` 函数
 </workflow>
 
 **快速工具选择**：
-1. **文件名或内容搜索**：使用 `rg`（检索文件名时使用 `files_only=true`）。
-2. **结构化代码搜索或重写**：使用 `ast_grep`。
-3. **已知文件路径**：使用 `view`。
-4. **并行本地证据**：对独立的 `search_text`/`search_files`/`search_structure`/`list_tree`/`read_file` 节点使用 `evidence_batch`；仅在节点依赖于 `${other.output}` 时使用 `evidence_graph`。
-5. **广泛的未知探索**：使用 `agent(role=explore)` 并提供具体的证据形态需求。
-6. **编辑**：在阅读目标文件后使用 `edit`/`multiedit`；立即运行针对性测试。
+1. **带意图的定位/理解/review/验证**：优先使用 `code_triage`，用 `intent` 明确目标，并让工具返回 `evidence`/`guidance` 折叠摘要。
+2. **文件名或内容搜索**：仅在搜索目标非常明确且只需一次原始匹配时使用 `rg`（检索文件名时使用 `files_only=true`）。
+3. **结构化代码搜索或重写**：使用 `ast_grep`。
+4. **已知文件路径**：使用 `view`。
+5. **并行本地证据**：对独立的 `search_text`/`search_files`/`search_structure`/`list_tree`/`read_file` 节点使用 `evidence_batch`；仅在节点依赖于 `${other.output}` 时使用 `evidence_graph`。
+6. **广泛的未知探索**：使用 `agent(role=explore)` 并提供具体的证据形态需求。
+7. **编辑**：在阅读目标文件后使用 `edit`/`multiedit`；立即运行针对性测试。
 
 <delegation_decision>
 在进行任何广泛的读取/搜索行动之前，在 2 秒内做出此决策。选择能够兼顾速度、上下文质量和综合质量的最优路径。

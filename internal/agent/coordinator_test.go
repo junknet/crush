@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -11,9 +12,11 @@ import (
 	"charm.land/fantasy/providers/bedrock"
 	toolsPkg "github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/eventbus"
 	"github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/scheduler"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,6 +89,34 @@ func agentResultWithText(text string) *fantasy.AgentResult {
 				fantasy.TextContent{Text: text},
 			},
 		},
+	}
+}
+
+func TestHandleBackgroundJobEventDoesNotMirrorToEventbus(t *testing.T) {
+	oldBus := eventbus.Default
+	eventbus.Default = eventbus.New()
+	t.Cleanup(func() {
+		eventbus.Default = oldBus
+	})
+
+	env := testEnv(t)
+	coord := &coordinator{sessions: env.sessions}
+	sessionID := "session-background-eventbus"
+	_ = eventbus.Default.Subscribe(sessionID)
+
+	coord.handleBackgroundJobEvent(t.Context(), shell.BackgroundJobEvent{
+		Kind:       shell.BackgroundKindDone,
+		ID:         "001",
+		SessionID:  sessionID,
+		Command:    "echo done",
+		ExitCode:   0,
+		OutputTail: "done",
+	})
+
+	select {
+	case ev := <-eventbus.Default.Subscribe(sessionID):
+		t.Fatalf("background event was mirrored to eventbus: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -575,4 +606,34 @@ func TestNewCoordinatorWithAuditor(t *testing.T) {
 	auditor, ok := c.agents[config.AgentAuditor]
 	require.True(t, ok, "auditor agent should be initialized")
 	require.NotNil(t, auditor)
+}
+
+func TestCoordinatorPropagateSubAgentTracesDeduplicatesParentTrace(t *testing.T) {
+	t.Parallel()
+
+	parentRuntime := runtime.NewSession("/tmp/project", nil)
+	subRuntime := runtime.NewSession("/tmp/project", nil)
+	coord := &coordinator{}
+	coord.setLastRuntime(parentRuntime)
+
+	entry := runtime.TaskTrace{
+		RecordedAt:            time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC),
+		ConversationSessionID: "conversation-1",
+		SessionID:             "session-1",
+		NodeID:                "node-1",
+		Kind:                  runtime.TraceKindTaskOutput,
+		Status:                "completed",
+		Goal:                  "fetch docs",
+		Output:                "done",
+		ToolName:              "agentic_fetch",
+		ToolCallID:            "call-1",
+	}
+	parentRuntime.AppendTrace(entry)
+	subRuntime.AppendTrace(entry)
+
+	coord.propagateSubAgentTraces(subRuntime)
+	traces := parentRuntime.TraceEntries()
+
+	require.Len(t, traces, 1)
+	require.Equal(t, int64(1), traces[0].Sequence)
 }

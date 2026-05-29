@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # wave5_hooks_spill.sh — verify Wave 5 G6 Spiller + G7 Pre/Post/Stop hooks
-# end-to-end. Spawns a real crush TUI against WaitAI, runs a single prompt
+# end-to-end. Spawns a real crush TUI against Mock, runs a single prompt
 # that forces a large bash output (Spiller path) and one tool call (Pre/Post
 # hooks), then asserts the on-disk side effects.
 #
-# Skips when WaitAI unreachable or TUI helper missing.
+# Skips when Mock unreachable or TUI helper missing.
 
 source "$(dirname "$0")/../common.sh"
 need_tui
-need_waitai
+need_mock_llm
 
 HOOK_LOG="$(mktemp -t crush_wave5_hooks_XXXXXX.log)"
 trap 'rm -f "$HOOK_LOG"' EXIT
@@ -29,23 +29,23 @@ agents:
 models:
   brain:
     model: claude-sonnet-4-6
-    provider: waitai-anthropic
+    provider: mock-anthropic
   explore:
     model: claude-haiku-4-5-20251001
-    provider: waitai-anthropic
+    provider: mock-anthropic
   worker:
     model: claude-sonnet-4-6
-    provider: waitai-anthropic
+    provider: mock-anthropic
   plan:
     model: claude-sonnet-4-6
-    provider: waitai-anthropic
+    provider: mock-anthropic
   auditor:
     model: claude-sonnet-4-6
-    provider: waitai-anthropic
+    provider: mock-anthropic
 providers:
-  waitai-anthropic:
-    api_key: \${WAITAI_API_KEY:-\${NCODER_WAITAI_KEY:-test}}
-    base_url: \${WAITAI_CRUSH_BASE:-http://127.0.0.1:43917/v1}
+  mock-anthropic:
+    api_key: \${CRUSH_MOCK_API_KEY:-\${CRUSH_MOCK_KEY:-test}}
+    base_url: \${CRUSH_MOCK_LLM_BASE:-http://127.0.0.1:43917/v1}
     models:
       - id: claude-opus-4-7
         name: Claude Opus 4.7
@@ -73,7 +73,7 @@ trap 'rm -f "$HOOK_LOG"; rm -rf "$CFG_DIR" "$DATA_DIR"' EXIT
 
 log "starting crush in tmux"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CFG_DIR CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $DATA_DIR --trace-file $TRACE" \
+  "cd $REPO && CRUSH_MOCK_API_KEY=\"${CRUSH_MOCK_API_KEY:-}\" CRUSH_MOCK_KEY=\"${CRUSH_MOCK_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CFG_DIR CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $DATA_DIR --trace-file $TRACE" \
   | tee -a "$LOG"
 
 "$TUI" expect "$SESS" 'Ready' 15 || fail "TUI not ready"

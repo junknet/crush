@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"charm.land/fantasy"
-	"github.com/charmbracelet/crush/internal/eventbus"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/google/uuid"
 )
@@ -56,6 +55,7 @@ func SubscribeWakeups(ctx context.Context) <-chan pubsub.Event[WakeupRequest] {
 type persistedTask struct {
 	ID             string    `json:"id"`
 	SessionID      string    `json:"session_id"`
+	Key            string    `json:"key,omitempty"`
 	Reason         string    `json:"reason"`
 	CronExpression string    `json:"cron_expression,omitempty"`
 	NextFireAt     time.Time `json:"next_fire_at"`
@@ -65,11 +65,14 @@ type persistedTask struct {
 	Recurring      bool      `json:"recurring"`
 }
 
+type scheduleTaskResult struct {
+	task          *persistedTask
+	replacedCount int
+}
+
 // scheduler is the singleton timer loop backing schedule_wakeup. It owns the
-// on-disk task file, runs a 1s tick loop, and fires events through both the
-// legacy wakeupBroker (so the coordinator's existing watch loop keeps
-// working) and the unified eventbus (so PrepareStep can drain them as
-// task-notifications).
+// on-disk task file, runs a 1s tick loop, and fires events through the
+// wakeupBroker so the coordinator can drive exactly one automatic continuation.
 type scheduler struct {
 	mu       sync.Mutex
 	tasks    map[string]*persistedTask
@@ -165,40 +168,77 @@ func (s *scheduler) saveLocked() {
 	}
 }
 
+func (s *scheduler) deleteWakeupsLocked(sessionID, key string) int {
+	if sessionID == "" || key == "" {
+		return 0
+	}
+	count := 0
+	for id, task := range s.tasks {
+		if task.SessionID == sessionID && task.Key == key {
+			delete(s.tasks, id)
+			count++
+		}
+	}
+	return count
+}
+
+func (s *scheduler) cancelWakeups(sessionID, key string) int {
+	s.mu.Lock()
+	count := s.deleteWakeupsLocked(sessionID, key)
+	if count > 0 {
+		s.saveLocked()
+	}
+	s.mu.Unlock()
+	return count
+}
+
+// CancelWakeups removes pending scheduled wake-ups for the session/key pair.
+// It is intended for package peers that know an async task completed or was
+// superseded before its wake-up fired.
+func CancelWakeups(sessionID, key string) int {
+	return defaultScheduler.cancelWakeups(sessionID, key)
+}
+
 // addDelayTask enqueues a one-shot delay task.
-func (s *scheduler) addDelayTask(sessionID, reason string, delay time.Duration) *persistedTask {
+func (s *scheduler) addDelayTask(sessionID, key, reason string, delay time.Duration, replaceExisting bool) scheduleTaskResult {
 	now := s.clock().UTC()
 	task := &persistedTask{
 		ID:         uuid.NewString(),
 		SessionID:  sessionID,
+		Key:        key,
 		Reason:     reason,
 		NextFireAt: now.Add(delay),
 		CreatedAt:  now,
 		Recurring:  false,
 	}
 	s.mu.Lock()
+	replacedCount := 0
+	if replaceExisting {
+		replacedCount = s.deleteWakeupsLocked(sessionID, key)
+	}
 	s.tasks[task.ID] = task
 	s.saveLocked()
 	s.mu.Unlock()
-	return task
+	return scheduleTaskResult{task: task, replacedCount: replacedCount}
 }
 
 // addCronTask enqueues a recurring cron-driven task. Returns an error if the
 // cron expression is unparseable.
-func (s *scheduler) addCronTask(sessionID, reason, expr string) (*persistedTask, error) {
+func (s *scheduler) addCronTask(sessionID, key, reason, expr string, replaceExisting bool) (scheduleTaskResult, error) {
 	spec, err := parseCronExpression(expr)
 	if err != nil {
-		return nil, err
+		return scheduleTaskResult{}, err
 	}
 	now := s.clock().UTC()
 	next, err := spec.next(now)
 	if err != nil {
-		return nil, err
+		return scheduleTaskResult{}, err
 	}
 	next = s.jitter(next)
 	task := &persistedTask{
 		ID:             uuid.NewString(),
 		SessionID:      sessionID,
+		Key:            key,
 		Reason:         reason,
 		CronExpression: expr,
 		NextFireAt:     next,
@@ -207,10 +247,14 @@ func (s *scheduler) addCronTask(sessionID, reason, expr string) (*persistedTask,
 		Recurring:      true,
 	}
 	s.mu.Lock()
+	replacedCount := 0
+	if replaceExisting {
+		replacedCount = s.deleteWakeupsLocked(sessionID, key)
+	}
 	s.tasks[task.ID] = task
 	s.saveLocked()
 	s.mu.Unlock()
-	return task, nil
+	return scheduleTaskResult{task: task, replacedCount: replacedCount}, nil
 }
 
 // jitter spreads identical schedules to avoid thundering-herd polling.
@@ -305,33 +349,23 @@ func (s *scheduler) tick() {
 	}
 }
 
-// publishWakeup fans a fired task out to both surfaces: the legacy
-// pubsub broker (existing coordinator drives c.Run from it) and the unified
-// eventbus (PrepareStep drains it as a task-notification).
+// publishWakeup fans a fired task out to the coordinator broker. It deliberately
+// does not also publish to eventbus, because the coordinator's c.Run path is the
+// single owner that injects the wake-up into the model context.
 func publishWakeup(task *persistedTask) {
 	wakeupBroker.Publish(pubsub.CreatedEvent, WakeupRequest{
 		SessionID: task.SessionID,
 		Reason:    task.Reason,
 	})
-	payload := map[string]any{
-		"task_id":         task.ID,
-		"reason":          task.Reason,
-		"cron_expression": task.CronExpression,
-		"recurring":       task.Recurring,
-		"fired_at":        task.LastFireAt.Format(time.RFC3339),
-	}
-	eventbus.Default.Publish(eventbus.Event{
-		Kind:      "cron_fired",
-		SessionID: task.SessionID,
-		Payload:   eventbus.MarshalJSONPayload(payload),
-		Priority:  eventbus.PriorityNext,
-	})
 }
 
 type ScheduleWakeupParams struct {
-	DelaySeconds   int    `json:"delay_seconds,omitempty" description:"Seconds from now to wake the agent once (5..86400). Ignored if cron_expression is set."`
-	CronExpression string `json:"cron_expression,omitempty" description:"Standard 5-field cron expression for a recurring wake-up. Wins over delay_seconds. Auto-expires after 7 days."`
-	Reason         string `json:"reason" description:"What to do or check when woken (concrete, e.g. 're-check CI run 123')"`
+	DelaySeconds    int    `json:"delay_seconds,omitempty" description:"Seconds from now to wake the agent once (5..86400). Ignored if cron_expression is set."`
+	CronExpression  string `json:"cron_expression,omitempty" description:"Standard 5-field cron expression for a recurring wake-up. Wins over delay_seconds. Auto-expires after 7 days."`
+	Reason          string `json:"reason" description:"What to do or check when woken (concrete, e.g. 're-check CI run 123')"`
+	Key             string `json:"key,omitempty" description:"Optional semantic key for this async task. Calls with the same session and key replace older pending wake-ups by default."`
+	TaskKey         string `json:"task_key,omitempty" description:"Alias for key."`
+	ReplaceExisting *bool  `json:"replace_existing,omitempty" description:"When key/task_key is set, replace older pending wake-ups with the same session and key. Defaults to true."`
 }
 
 type ScheduleWakeupResponseMetadata struct {
@@ -339,8 +373,27 @@ type ScheduleWakeupResponseMetadata struct {
 	CronExpression string    `json:"cron_expression,omitempty"`
 	Reason         string    `json:"reason"`
 	TaskID         string    `json:"task_id"`
+	Key            string    `json:"key,omitempty"`
+	ReplacedCount  int       `json:"replaced_count"`
 	NextFireAt     time.Time `json:"next_fire_at"`
 	Recurring      bool      `json:"recurring"`
+}
+
+func (p ScheduleWakeupParams) semanticKey() string {
+	if p.Key != "" {
+		return p.Key
+	}
+	return p.TaskKey
+}
+
+func (p ScheduleWakeupParams) shouldReplaceExisting(key string) bool {
+	if key == "" {
+		return false
+	}
+	if p.ReplaceExisting == nil {
+		return true
+	}
+	return *p.ReplaceExisting
 }
 
 // NewScheduleWakeupTool returns the tool wired to a per-workspace DataDirectory
@@ -360,16 +413,21 @@ func NewScheduleWakeupTool(dataDir string) fantasy.AgentTool {
 			if sessionID == "" {
 				return fantasy.NewTextErrorResponse("schedule_wakeup requires an active session"), nil
 			}
+			key := params.semanticKey()
+			replaceExisting := params.shouldReplaceExisting(key)
 
 			if params.CronExpression != "" {
-				task, err := defaultScheduler.addCronTask(sessionID, params.Reason, params.CronExpression)
+				result, err := defaultScheduler.addCronTask(sessionID, key, params.Reason, params.CronExpression, replaceExisting)
 				if err != nil {
 					return fantasy.NewTextErrorResponse(fmt.Sprintf("invalid cron_expression: %v", err)), nil
 				}
+				task := result.task
 				metadata := ScheduleWakeupResponseMetadata{
 					CronExpression: params.CronExpression,
 					Reason:         params.Reason,
 					TaskID:         task.ID,
+					Key:            task.Key,
+					ReplacedCount:  result.replacedCount,
 					NextFireAt:     task.NextFireAt,
 					Recurring:      true,
 				}
@@ -386,13 +444,16 @@ func NewScheduleWakeupTool(dataDir string) fantasy.AgentTool {
 			if delay > MaxWakeupSeconds {
 				delay = MaxWakeupSeconds
 			}
-			task := defaultScheduler.addDelayTask(sessionID, params.Reason, time.Duration(delay)*time.Second)
+			result := defaultScheduler.addDelayTask(sessionID, key, params.Reason, time.Duration(delay)*time.Second, replaceExisting)
+			task := result.task
 			metadata := ScheduleWakeupResponseMetadata{
-				DelaySeconds: delay,
-				Reason:       params.Reason,
-				TaskID:       task.ID,
-				NextFireAt:   task.NextFireAt,
-				Recurring:    false,
+				DelaySeconds:  delay,
+				Reason:        params.Reason,
+				TaskID:        task.ID,
+				Key:           task.Key,
+				ReplacedCount: result.replacedCount,
+				NextFireAt:    task.NextFireAt,
+				Recurring:     false,
 			}
 			response := fmt.Sprintf(
 				"Scheduled a wake-up in %ds. This turn will end now; you'll be automatically continued then. Reason: %s. Do not poll.",

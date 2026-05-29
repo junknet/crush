@@ -595,7 +595,7 @@ type Config struct {
 	Schema string `json:"$schema,omitempty"`
 
 	// Model profiles used by the built-in roles.
-	Models map[SelectedModelType]SelectedModel `json:"models,omitempty" jsonschema:"description=Model configurations for different model types,example={\"brain\":{\"model\":\"claude-opus-4-7\",\"provider\":\"waitai-anthropic\"}}"`
+	Models map[SelectedModelType]SelectedModel `json:"models,omitempty" jsonschema:"description=Model configurations for different model types,example={\"brain\":{\"model\":\"claude-opus-4-7\",\"provider\":\"mock-anthropic\"}}"`
 
 	// Recently used models stored in the data directory config.
 	RecentModels map[SelectedModelType][]SelectedModel `json:"recent_models,omitempty" jsonschema:"-"`
@@ -753,26 +753,16 @@ func allToolNames() []string {
 		"bash",
 		"crush_info",
 		"crush_logs",
+		"bug_triage",
 		"dag_run",
 		"evidence_batch",
 		"evidence_graph",
+		"code_triage",
 		"job_output",
 		"job_kill",
 		"download",
 		"edit",
 		"multiedit",
-		"nim_call_hierarchy",
-		"nim_check_file",
-		"nim_definition",
-		"nim_diagnostics",
-		"nim_document_symbols",
-		"nim_hover",
-		"nim_macro_expand",
-		"nim_project_maps",
-		"nim_references",
-		"nim_restart",
-		"nim_safe_to_delete",
-		"nim_workspace_symbols",
 		"fetch",
 		"agentic_fetch",
 		"rg",
@@ -812,21 +802,10 @@ func resolveExploreTools(tools []string) []string {
 	// Tools the explore agent is allowed to use. Bash is included because the
 	// role is Haiku plus a strong prompt plus tool execution; the prompt
 	// constrains it to read-only inspection commands. Direct mutators
-	// (edit/multiedit/write/download/todos) and nim_restart are excluded.
+	// (edit/multiedit/write/download/todos) are excluded.
 	exploreTools := []string{
-		"bash", "rg", "ls", "sourcegraph", "view",
+		"bash", "rg", "ls", "sourcegraph", "view", "code_triage", "bug_triage", "evidence_batch", "evidence_graph",
 		"list_mcp_resources", "read_mcp_resource",
-		"nim_call_hierarchy",
-		"nim_check_file",
-		"nim_definition",
-		"nim_diagnostics",
-		"nim_document_symbols",
-		"nim_hover",
-		"nim_macro_expand",
-		"nim_project_maps",
-		"nim_references",
-		"nim_safe_to_delete",
-		"nim_workspace_symbols",
 	}
 	return filterSlice(tools, exploreTools, true)
 }

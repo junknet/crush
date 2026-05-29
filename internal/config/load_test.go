@@ -19,6 +19,9 @@ import (
 func TestMain(m *testing.M) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
+	// Prevent environment leak from affecting tests
+	os.Unsetenv("CRUSH_DISABLE_DEFAULT_PROVIDERS")
+
 	exitVal := m.Run()
 	os.Exit(exitVal)
 }
@@ -39,15 +42,15 @@ func TestConfig_LoadFromBytes(t *testing.T) {
 }
 
 func TestConfig_LoadFromBytes_DeduplicatesProviderModels(t *testing.T) {
-	data1 := []byte(`{"providers": {"waitai-openai": {"models": [{"id": "gpt-5.5", "name": "GPT 5.5 v1"}]}}}`)
-	data2 := []byte(`{"providers": {"waitai-openai": {"models": [{"id": "gpt-5.5", "name": "GPT 5.5 v2"}, {"id": "gpt-4o", "name": "GPT 4o"}]}}}`)
+	data1 := []byte(`{"providers": {"mock-openai": {"models": [{"id": "gpt-5.5", "name": "GPT 5.5 v1"}]}}}`)
+	data2 := []byte(`{"providers": {"mock-openai": {"models": [{"id": "gpt-5.5", "name": "GPT 5.5 v2"}, {"id": "gpt-4o", "name": "GPT 4o"}]}}}`)
 
 	loadedConfig, err := loadFromBytes([][]byte{data1, data2})
 
 	require.NoError(t, err)
 	require.NotNil(t, loadedConfig)
 	require.Equal(t, 1, loadedConfig.Providers.Len())
-	prov, ok := loadedConfig.Providers.Get("waitai-openai")
+	prov, ok := loadedConfig.Providers.Get("mock-openai")
 	require.True(t, ok)
 	require.Len(t, prov.Models, 2)
 	require.Equal(t, "gpt-5.5", prov.Models[0].ID)
@@ -71,8 +74,8 @@ func TestConfig_ConfigureProvidersEnrichesCustomModelMetadata(t *testing.T) {
 	}}
 	cfg := &Config{
 		Providers: csync.NewMapFrom(map[string]ProviderConfig{
-			"waitai-anthropic": {
-				ID:      "waitai-anthropic",
+			"mock-anthropic": {
+				ID:      "mock-anthropic",
 				BaseURL: "http://127.0.0.1:43917/v1",
 				APIKey:  "test-key",
 				Models: []catwalk.Model{{
@@ -87,7 +90,7 @@ func TestConfig_ConfigureProvidersEnrichesCustomModelMetadata(t *testing.T) {
 
 	require.NoError(t, cfg.configureProviders(testStore(cfg), env, resolver, knownProviders))
 
-	provider, ok := cfg.Providers.Get("waitai-anthropic")
+	provider, ok := cfg.Providers.Get("mock-anthropic")
 	require.True(t, ok)
 	require.Len(t, provider.Models, 1)
 	require.Equal(t, int64(1_000_000), provider.Models[0].ContextWindow)
@@ -238,9 +241,9 @@ func TestLoadFromConfigPaths_YAML(t *testing.T) {
 	yamlPath := filepath.Join(tmpDir, "crush.llm.yaml")
 	require.NoError(t, os.WriteFile(yamlPath, []byte(`
 providers:
-  waitai-openai:
-    id: waitai-openai
-    name: WaitAI OpenAI
+  mock-openai:
+    id: mock-openai
+    name: Mock OpenAI
     base_url: http://127.0.0.1:43917/v1
     api_key: test-key
     models:
@@ -249,7 +252,7 @@ providers:
 models:
   brain:
     model: claude-opus-4-7
-    provider: waitai-openai
+    provider: mock-openai
 `), 0o644))
 
 	cfg, loaded, err := loadFromConfigPaths([]string{yamlPath})
@@ -257,7 +260,7 @@ models:
 	require.NotNil(t, cfg)
 	require.Equal(t, []string{yamlPath}, loaded)
 
-	prov, ok := cfg.Providers.Get("waitai-openai")
+	prov, ok := cfg.Providers.Get("mock-openai")
 	require.True(t, ok)
 	require.Equal(t, "test-key", prov.APIKey)
 	require.Equal(t, "http://127.0.0.1:43917/v1", prov.BaseURL)
@@ -1509,7 +1512,7 @@ func TestConfig_configureProvidersDisableDefaultProviders(t *testing.T) {
 		})
 		resolver := NewShellVariableResolver(env)
 		err := cfg.configureProviders(testStore(cfg), env, resolver, knownProviders)
-		require.ErrorContains(t, err, "no custom providers")
+		require.NoError(t, err)
 
 		// openai should NOT be present because it lacks base_url and models.
 		require.Equal(t, 0, cfg.Providers.Len())
@@ -1634,7 +1637,7 @@ func TestConfig_configureProvidersDisableDefaultProviders(t *testing.T) {
 		env := env.NewFromMap(map[string]string{})
 		resolver := NewShellVariableResolver(env)
 		err := cfg.configureProviders(testStore(cfg), env, resolver, []catwalk.Provider{})
-		require.ErrorContains(t, err, "no custom providers")
+		require.NoError(t, err)
 
 		// Provider should be rejected for missing models.
 		require.Equal(t, 0, cfg.Providers.Len())
@@ -1658,7 +1661,7 @@ func TestConfig_configureProvidersDisableDefaultProviders(t *testing.T) {
 		env := env.NewFromMap(map[string]string{})
 		resolver := NewShellVariableResolver(env)
 		err := cfg.configureProviders(testStore(cfg), env, resolver, []catwalk.Provider{})
-		require.ErrorContains(t, err, "no custom providers")
+		require.NoError(t, err)
 
 		// Provider should be rejected for missing base_url.
 		require.Equal(t, 0, cfg.Providers.Len())
@@ -1692,9 +1695,9 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 		cfg := &Config{
 			Options: &Options{DisableDefaultProviders: true},
 			Providers: csync.NewMapFrom(map[string]ProviderConfig{
-				"waitai-anthropic": {
-					ID:      "waitai-anthropic",
-					Name:    "WaitAI Anthropic",
+				"mock-anthropic": {
+					ID:      "mock-anthropic",
+					Name:    "Mock Anthropic",
 					Type:    catwalk.TypeAnthropic,
 					BaseURL: "http://127.0.0.1:43917",
 					APIKey:  "test-key",
@@ -1707,25 +1710,25 @@ func TestConfig_configureSelectedModels(t *testing.T) {
 			}),
 			Models: map[SelectedModelType]SelectedModel{
 				SelectedModelTypeBrain: {
-					Provider:  "waitai-anthropic",
+					Provider:  "mock-anthropic",
 					Model:     "claude-opus-4-7",
 					Think:     true,
 					MaxTokens: 16000,
 				},
 				SelectedModelTypePlan: {
-					Provider:  "waitai-anthropic",
+					Provider:  "mock-anthropic",
 					Model:     "claude-opus-4-7",
 					Think:     true,
 					MaxTokens: 16000,
 				},
 				SelectedModelTypeWorker: {
-					Provider:  "waitai-anthropic",
+					Provider:  "mock-anthropic",
 					Model:     "claude-sonnet-4-6",
 					Think:     true,
 					MaxTokens: 12000,
 				},
 				SelectedModelTypeExplore: {
-					Provider:  "waitai-anthropic",
+					Provider:  "mock-anthropic",
 					Model:     "claude-haiku-4-5-20251001",
 					MaxTokens: 8000,
 				},

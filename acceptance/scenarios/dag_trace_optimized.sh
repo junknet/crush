@@ -5,13 +5,13 @@
 
 source "$(dirname "$0")/../common.sh"
 need_tui
-need_waitai
+need_mock_llm
 
 PROMPT="${PROMPT:-Please use the 'agent' tool to delegate all parts of this task. First, delegate to an explore agent to check if the file 'test_done.txt' exists in the repository. Second, delegate to a worker agent to write 'done' into a new file named 'test_done.txt' in the repository root, verify it contains 'done' and then delete the file. You must NOT use sequential explore-then-worker roundtrips for writing, verifying, and deleting; consolidate those actions into a single worker task.}"
 
-log "starting crush against WaitAI"
+log "starting crush against Mock"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
+  "cd $REPO && CRUSH_MOCK_API_KEY=\"${CRUSH_MOCK_API_KEY:-}\" CRUSH_MOCK_KEY=\"${CRUSH_MOCK_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
   | tee -a "$LOG"
 
 log "waiting for landing"

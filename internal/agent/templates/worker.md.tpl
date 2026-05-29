@@ -52,7 +52,7 @@
 </ai_first_development_standards>
 
 <workflow>
-1. **定位与阅读**：了解当前状态。
+1. **定位与阅读**：对定位、理解、review、验证类任务优先使用 `code_triage` 获取结构化 `evidence`/`guidance`；只有目标极窄时才裸用 `rg`。
 2. **实现**：使用 `multiedit`（首选）或 `edit` 应用更改。
 3. **验证**：运行测试/Linter。
 4. **修复**：立即处理失败。

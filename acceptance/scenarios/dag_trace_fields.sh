@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # dag_trace_fields.sh — 真路径:发 prompt → 3-profile DAG 完整跑 → trace 字段填齐
-# 需要 WaitAI 后端 + API key
+# 需要 Mock 后端 + API key
 
 source "$(dirname "$0")/../common.sh"
 need_tui
-need_waitai
+need_mock_llm
 
 PROMPT="${PROMPT:-Please use the 'agent' tool to delegate all parts of this task. You must not run bash commands directly in the brain agent. First, delegate to an explore agent (role='explore') to check if the file 'test_done.txt' exists in the repository. Second, delegate to a worker agent (role='worker') to write 'done' into a new file named 'test_done.txt' in the repository root. Third, delegate to an explore agent (role='explore') to view 'test_done.txt' and verify it contains 'done'. Fourth, delegate to a worker agent (role='worker') to delete the file 'test_done.txt'. You must use the agent tool for each step.}"
 
-log "starting crush against WaitAI"
+log "starting crush against Mock"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
+  "cd $REPO && CRUSH_MOCK_API_KEY=\"${CRUSH_MOCK_API_KEY:-}\" CRUSH_MOCK_KEY=\"${CRUSH_MOCK_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
   | tee -a "$LOG"
 
 log "waiting for landing"

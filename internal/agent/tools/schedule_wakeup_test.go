@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,27 @@ import (
 	"github.com/charmbracelet/crush/internal/eventbus"
 	"github.com/charmbracelet/crush/internal/pubsub"
 )
+
+func newTestScheduler(t *testing.T) *scheduler {
+	t.Helper()
+	return &scheduler{
+		tasks:    make(map[string]*persistedTask),
+		filePath: filepath.Join(t.TempDir(), scheduledTasksFilename),
+		clock: func() time.Time {
+			return time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+		},
+		rng: rand.New(rand.NewSource(1)),
+	}
+}
+
+func decodeScheduleWakeupMetadata(t *testing.T, resp fantasy.ToolResponse) ScheduleWakeupResponseMetadata {
+	t.Helper()
+	var metadata ScheduleWakeupResponseMetadata
+	if err := json.Unmarshal([]byte(resp.Metadata), &metadata); err != nil {
+		t.Fatalf("unmarshal metadata %q: %v", resp.Metadata, err)
+	}
+	return metadata
+}
 
 // TestScheduleWakeupBrokerRoundTrip proves the subscribe/publish path the
 // coordinator relies on to receive timer wake-ups.
@@ -65,6 +87,125 @@ func TestScheduleWakeupToolFires(t *testing.T) {
 		}
 	case <-time.After(8 * time.Second):
 		t.Fatal("scheduled wake-up never fired")
+	}
+}
+
+func TestScheduleWakeupReplacesSameKey(t *testing.T) {
+	s := newTestScheduler(t)
+
+	first := s.addDelayTask("sess-key", "download:123", "old poll", time.Hour, true)
+	second := s.addDelayTask("sess-key", "download:123", "new poll", 2*time.Hour, true)
+
+	if first.replacedCount != 0 {
+		t.Fatalf("first replaced_count=%d, want 0", first.replacedCount)
+	}
+	if second.replacedCount != 1 {
+		t.Fatalf("second replaced_count=%d, want 1", second.replacedCount)
+	}
+	if len(s.tasks) != 1 {
+		t.Fatalf("task count=%d, want 1", len(s.tasks))
+	}
+	if _, ok := s.tasks[first.task.ID]; ok {
+		t.Fatal("old keyed task was not replaced")
+	}
+	if got := s.tasks[second.task.ID].Reason; got != "new poll" {
+		t.Fatalf("remaining reason=%q, want new poll", got)
+	}
+}
+
+func TestScheduleWakeupDifferentKeysCoexist(t *testing.T) {
+	s := newTestScheduler(t)
+
+	s.addDelayTask("sess-key", "download:123", "poll download", time.Hour, true)
+	second := s.addDelayTask("sess-key", "deploy:456", "poll deploy", time.Hour, true)
+
+	if second.replacedCount != 0 {
+		t.Fatalf("replaced_count=%d, want 0", second.replacedCount)
+	}
+	if len(s.tasks) != 2 {
+		t.Fatalf("task count=%d, want 2", len(s.tasks))
+	}
+}
+
+func TestScheduleWakeupCancelWakeups(t *testing.T) {
+	s := newTestScheduler(t)
+
+	s.addDelayTask("sess-cancel", "download:123", "poll download", time.Hour, true)
+	s.addDelayTask("sess-cancel", "deploy:456", "poll deploy", time.Hour, true)
+	s.addDelayTask("other-session", "download:123", "poll other", time.Hour, true)
+
+	if got := s.cancelWakeups("sess-cancel", "download:123"); got != 1 {
+		t.Fatalf("cancelled=%d, want 1", got)
+	}
+	if len(s.tasks) != 2 {
+		t.Fatalf("task count=%d, want 2", len(s.tasks))
+	}
+	for _, task := range s.tasks {
+		if task.SessionID == "sess-cancel" && task.Key == "download:123" {
+			t.Fatal("cancelled task is still present")
+		}
+	}
+}
+
+func TestScheduleWakeupNoKeyKeepsLegacyBehavior(t *testing.T) {
+	s := newTestScheduler(t)
+
+	first := s.addDelayTask("sess-legacy", "", "first poll", time.Hour, true)
+	second := s.addDelayTask("sess-legacy", "", "second poll", time.Hour, true)
+
+	if first.replacedCount != 0 || second.replacedCount != 0 {
+		t.Fatalf("replaced counts=(%d,%d), want both 0", first.replacedCount, second.replacedCount)
+	}
+	if len(s.tasks) != 2 {
+		t.Fatalf("task count=%d, want 2", len(s.tasks))
+	}
+}
+
+func TestScheduleWakeupMetadataIncludesKeyAndReplacedCount(t *testing.T) {
+	tool := NewScheduleWakeupTool(t.TempDir())
+	callCtx := context.WithValue(context.Background(), SessionIDContextKey, "sess-meta")
+	key := "download:metadata-test"
+	defer CancelWakeups("sess-meta", key)
+
+	resp, err := tool.Run(callCtx, fantasy.ToolCall{
+		ID:    "meta-1",
+		Name:  ScheduleWakeupToolName,
+		Input: `{"delay_seconds":86400,"reason":"old poll","key":"download:metadata-test"}`,
+	})
+	if err != nil {
+		t.Fatalf("tool run error: %v", err)
+	}
+	if resp.IsError {
+		t.Fatalf("tool returned error response: %s", resp.Content)
+	}
+	first := decodeScheduleWakeupMetadata(t, resp)
+	if first.Key != key {
+		t.Fatalf("metadata key=%q, want %q", first.Key, key)
+	}
+	if first.ReplacedCount != 0 {
+		t.Fatalf("first replaced_count=%d, want 0", first.ReplacedCount)
+	}
+
+	resp, err = tool.Run(callCtx, fantasy.ToolCall{
+		ID:    "meta-2",
+		Name:  ScheduleWakeupToolName,
+		Input: `{"delay_seconds":86400,"reason":"new poll","task_key":"download:metadata-test"}`,
+	})
+	if err != nil {
+		t.Fatalf("tool run error: %v", err)
+	}
+	if resp.IsError {
+		t.Fatalf("tool returned error response: %s", resp.Content)
+	}
+	second := decodeScheduleWakeupMetadata(t, resp)
+	if second.TaskID == first.TaskID {
+		t.Fatal("replacement reused the old task id")
+	}
+	if second.Key != key {
+		t.Fatalf("metadata key=%q, want %q", second.Key, key)
+	}
+	if second.ReplacedCount != 1 {
+		t.Fatalf("second replaced_count=%d, want 1", second.ReplacedCount)
 	}
 }
 
@@ -176,10 +317,20 @@ func TestSchedulerPersistsCronTask(t *testing.T) {
 	}
 }
 
-// TestEventBusReceivesCronFire verifies that when the scheduler tick fires a
-// task, it publishes a cron_fired event onto the unified eventbus.
-func TestEventBusReceivesCronFire(t *testing.T) {
-	ch := eventbus.Default.Subscribe("sess-bus")
+// TestPublishWakeupUsesOnlyCoordinatorBroker verifies that a fired timer wakes
+// the coordinator through wakeupBroker without also queueing a task-notification
+// event. The direct c.Run continuation is the single injection path.
+func TestPublishWakeupUsesOnlyCoordinatorBroker(t *testing.T) {
+	oldBus := eventbus.Default
+	eventbus.Default = eventbus.New()
+	t.Cleanup(func() {
+		eventbus.Default = oldBus
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wakeupCh := SubscribeWakeups(ctx)
+	eventCh := eventbus.Default.Subscribe("sess-bus")
 	task := &persistedTask{
 		ID:             "t1",
 		SessionID:      "sess-bus",
@@ -191,14 +342,17 @@ func TestEventBusReceivesCronFire(t *testing.T) {
 	publishWakeup(task)
 
 	select {
-	case ev := <-ch:
-		if ev.Kind != "cron_fired" {
-			t.Fatalf("unexpected kind: %s", ev.Kind)
-		}
-		if ev.SessionID != "sess-bus" {
-			t.Fatalf("unexpected session: %s", ev.SessionID)
+	case ev := <-wakeupCh:
+		if ev.Payload.SessionID != "sess-bus" {
+			t.Fatalf("unexpected session: %s", ev.Payload.SessionID)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("eventbus never saw cron_fired")
+		t.Fatal("wakeup broker never saw fired task")
+	}
+
+	select {
+	case ev := <-eventCh:
+		t.Fatalf("unexpected eventbus notification: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
 	}
 }

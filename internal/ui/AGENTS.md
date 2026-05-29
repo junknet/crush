@@ -137,9 +137,6 @@ tool names to specific types:
 | `chat/search.go`      | Glob, Grep, LS, Sourcegraph                    |
 | `chat/fetch.go`       | Fetch, WebFetch, WebSearch                     |
 | `chat/agent.go`       | Agent, AgenticFetch                            |
-| `chat/diagnostics.go` | Diagnostics                                    |
-| `chat/references.go`  | References                                     |
-| `chat/nim_restart.go` | NimRestart                                     |
 | `chat/todos.go`       | Todos                                          |
 | `chat/mcp.go`         | MCP tools (`mcp_` prefix)                      |
 | `chat/generic.go`     | Fallback for unrecognized tools                |

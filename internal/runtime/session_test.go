@@ -98,6 +98,78 @@ func TestRuntimeSessionCloneForRunKeepsPersistentState(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestRuntimeSessionAppendTraceDeduplicatesIdenticalEntries(t *testing.T) {
+	t.Parallel()
+
+	session := NewSession("/tmp/project", nil)
+	recordedAt := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	entry := TaskTrace{
+		RecordedAt:            recordedAt,
+		SessionID:             "session-1",
+		NodeID:                "node-1",
+		Kind:                  TraceKindTaskOutput,
+		Status:                "completed",
+		Goal:                  "fetch docs",
+		Output:                "done",
+		ToolName:              "agentic_fetch",
+		ToolCallID:            "call-1",
+		ConversationSessionID: "conversation-1",
+	}
+
+	first := session.AppendTrace(entry)
+	duplicate := session.AppendTrace(entry)
+	next := session.AppendTrace(TaskTrace{
+		RecordedAt:            recordedAt.Add(time.Second),
+		SessionID:             "session-1",
+		NodeID:                "node-1",
+		Kind:                  TraceKindTaskOutput,
+		Status:                "completed",
+		Goal:                  "fetch docs",
+		Output:                "done",
+		ToolName:              "agentic_fetch",
+		ToolCallID:            "call-1",
+		ConversationSessionID: "conversation-1",
+	})
+
+	require.Equal(t, int64(1), first.Sequence)
+	require.Equal(t, first, duplicate)
+	require.Equal(t, int64(2), next.Sequence)
+	require.Len(t, session.TraceEntries(), 2)
+}
+
+func TestRuntimeSessionAppendTraceKeepsSimilarEntries(t *testing.T) {
+	t.Parallel()
+
+	session := NewSession("/tmp/project", nil)
+	recordedAt := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	base := TaskTrace{
+		RecordedAt:            recordedAt,
+		SessionID:             "session-1",
+		NodeID:                "node-1",
+		Kind:                  TraceKindTaskOutput,
+		Status:                "completed",
+		Goal:                  "fetch docs",
+		Output:                "first output",
+		ToolName:              "agentic_fetch",
+		ToolCallID:            "call-1",
+		ConversationSessionID: "conversation-1",
+	}
+	differentTime := base
+	differentTime.RecordedAt = recordedAt.Add(time.Nanosecond)
+	differentOutput := base
+	differentOutput.Output = "second output"
+
+	session.AppendTrace(base)
+	session.AppendTrace(differentTime)
+	session.AppendTrace(differentOutput)
+
+	traces := session.TraceEntries()
+	require.Len(t, traces, 3)
+	require.Equal(t, int64(1), traces[0].Sequence)
+	require.Equal(t, int64(2), traces[1].Sequence)
+	require.Equal(t, int64(3), traces[2].Sequence)
+}
+
 func mustFact(t *testing.T, session *RuntimeSession, key string) string {
 	t.Helper()
 	value, ok := session.Fact(key)

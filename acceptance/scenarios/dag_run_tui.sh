@@ -3,14 +3,14 @@
 
 source "$(dirname "$0")/../common.sh"
 need_tui
-need_waitai
+need_mock_llm
 
 FINAL_MARKER="TUI_DAG_DONE_7391"
 PROMPT="${PROMPT:-Your first tool call must be dag_run. Do not use bash, rg, or view directly. Use one dag_run call with max_parallel=3 and these nodes: (1) rg node id files pattern dag_run path internal/agent/tools files_only=true, (2) rg node id symbol pattern DagRunToolName path internal/agent/tools/dag_run.go literal_text=true, (3) view node id docs file_path internal/agent/tools/dag_run.md limit 80, (4) run node id hold language python script that imports time, sleeps for 4 seconds, then prints status-visible. After the tool result, reply exactly with the concatenation of these seven fragments and then mention the completed node count: TUI, _, DAG, _, DONE, _, 7391.}"
 
-log "starting crush against WaitAI"
+log "starting crush against Mock"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
+  "cd $REPO && CRUSH_MOCK_API_KEY=\"${CRUSH_MOCK_API_KEY:-}\" CRUSH_MOCK_KEY=\"${CRUSH_MOCK_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
   | tee -a "$LOG"
 
 log "waiting for landing"

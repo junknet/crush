@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,6 +124,95 @@ func TestPreparePrompt_CompressesCurrentTurnImageAttachment(t *testing.T) {
 	require.True(t, len(files[0].Data) >= 3)
 	require.Equal(t, []byte{0xff, 0xd8, 0xff}, files[0].Data[:3])
 	require.NotEqual(t, rawImage, files[0].Data)
+}
+
+func TestCreateUserMessage_OmitsLargeTextAttachmentData(t *testing.T) {
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test", session.ModeExecute)
+	require.NoError(t, err)
+
+	large := []byte(strings.Repeat("x", maxInlineMessageAttachmentBytes+1))
+	msg, err := agent.createUserMessage(ctx, SessionAgentCall{
+		SessionID: sess.ID,
+		Prompt:    "parse this",
+		Attachments: []message.Attachment{{
+			FilePath: "/tmp/1.har",
+			FileName: "1.har",
+			MimeType: "text/plain",
+			Content:  large,
+		}},
+	})
+	require.NoError(t, err)
+
+	require.Contains(t, msg.Content().Text, "Large attachment omitted")
+	require.Len(t, msg.BinaryContent(), 1)
+	require.Less(t, len(msg.BinaryContent()[0].Data), len(large))
+	require.Contains(t, string(msg.BinaryContent()[0].Data), "/tmp/1.har")
+}
+
+func TestPreparePrompt_SanitizesLargeHistoricalAttachment(t *testing.T) {
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test", session.ModeExecute)
+	require.NoError(t, err)
+
+	large := []byte(strings.Repeat("x", maxInlineMessageAttachmentBytes+1))
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "parse this"},
+			message.BinaryContent{Path: "/tmp/1.har", MIMEType: "text/plain", Data: large},
+		},
+	})
+	require.NoError(t, err)
+
+	msgs, err := env.messages.List(ctx, sess.ID)
+	require.NoError(t, err)
+	history, _ := agent.preparePrompt(sess, msgs, true, catwalk.Type(""))
+
+	require.Len(t, history, 2)
+	text, ok := fantasy.AsMessagePart[fantasy.TextPart](history[1].Content[0])
+	require.True(t, ok)
+	require.Contains(t, text.Text, "Large attachment omitted")
+	require.NotContains(t, text.Text, strings.Repeat("x", 1024))
+}
+
+func TestPreparePrompt_SanitizesLargeHistoricalNonTextAttachment(t *testing.T) {
+	env := testEnv(t)
+	sa := testSessionAgent(env, nil, nil, "test prompt")
+	agent := sa.(*sessionAgent)
+
+	ctx := t.Context()
+	sess, err := env.sessions.Create(ctx, "test", session.ModeExecute)
+	require.NoError(t, err)
+
+	large := []byte(strings.Repeat("x", maxInlineMessageAttachmentBytes+1))
+	_, err = env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
+		Role: message.User,
+		Parts: []message.ContentPart{
+			message.TextContent{Text: "parse this"},
+			message.BinaryContent{Path: "/tmp/1.har", MIMEType: "application/json", Data: large},
+		},
+	})
+	require.NoError(t, err)
+
+	msgs, err := env.messages.List(ctx, sess.ID)
+	require.NoError(t, err)
+	history, _ := agent.preparePrompt(sess, msgs, true, catwalk.Type(""))
+
+	require.Len(t, history, 2)
+	require.Len(t, history[1].Content, 1)
+	text, ok := fantasy.AsMessagePart[fantasy.TextPart](history[1].Content[0])
+	require.True(t, ok)
+	require.Contains(t, text.Text, "Large attachment omitted")
+	require.NotContains(t, text.Text, strings.Repeat("x", 1024))
 }
 
 func TestPreparePrompt_DropsUserMessageAfterUnsupportedAttachmentFiltering(t *testing.T) {

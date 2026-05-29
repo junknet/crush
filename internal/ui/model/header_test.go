@@ -13,7 +13,7 @@ func TestBrainHeaderModelLabelUsesConcreteSelectedModel(t *testing.T) {
 	cfg := &config.Config{
 		Models: map[config.SelectedModelType]config.SelectedModel{
 			config.SelectedModelTypeBrain: {
-				Provider: "waitai-openai",
+				Provider: "mock-openai",
 				Model:    "gpt-5.5",
 			},
 		},
@@ -22,7 +22,7 @@ func TestBrainHeaderModelLabelUsesConcreteSelectedModel(t *testing.T) {
 		},
 	}
 
-	require.Equal(t, "BRAIN waitai-openai/gpt-5.5", brainHeaderModelLabel(cfg))
+	require.Equal(t, "BRAIN mock-openai/gpt-5.5", brainHeaderModelLabel(cfg))
 }
 
 func TestBrainHeaderModelLabelFallsBackToModelSlot(t *testing.T) {

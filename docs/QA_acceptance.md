@@ -157,7 +157,7 @@ adb exec-out screencap -p > /tmp/shot.png
 
 **步骤**：
 1. 在一个有较多文件的工程下（如 crush 本身）启动 `crush-dev`
-2. 发 prompt：`这个 codebase 里有哪些 nim_* tool？它们在哪定义？`（典型跨多文件查询）
+2. 发 prompt：`这个 codebase 里证据收集工具有哪些？它们在哪定义？`（典型跨多文件查询）
 3. 看 trace JSONL 第一轮工具调用
 
 **Result**：

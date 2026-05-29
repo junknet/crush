@@ -813,6 +813,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.todoIsSpinning = true
 				cmds = append(cmds, m.todoSpinner.Tick)
 				m.updateLayoutAndSize()
+				if m.state == uiChat {
+					if m.chat.Follow() {
+						if cmd := m.chat.ForceScrollToBottomAndAnimate(); cmd != nil {
+							cmds = append(cmds, cmd)
+						}
+					} else if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+				}
 			}
 			// Schedule a re-render to handle recently completed TTL
 			cmds = append(cmds, tea.Tick(chat.TodoRecentlyCompletedTTL, func(time.Time) tea.Msg {
@@ -1348,7 +1357,9 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			}
 		}
 		m.chat.AppendMessages(items...)
-		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+		if m.chat.Follow() {
+			cmds = append(cmds, m.chat.ForceScrollToBottomAndAnimate())
+		} else if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		if msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn {
@@ -1416,6 +1427,7 @@ func (m *UI) handleClickFocus(msg tea.MouseClickMsg) (cmd tea.Cmd) {
 // calls as well that is why we need to handle creating/updating each tool call
 // message too.
 func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
+	wasAtBottom := m.chat.AtBottom()
 	var cmds []tea.Cmd
 	existingItem := m.chat.MessageItem(msg.ID)
 
@@ -1472,7 +1484,9 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 	}
 
 	m.chat.AppendMessages(items...)
-	if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+	if m.chat.Follow() || wasAtBottom {
+		cmds = append(cmds, m.chat.ForceScrollToBottomAndAnimate())
+	} else if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 	m.chat.SelectLast()
@@ -5240,7 +5254,16 @@ func (m *UI) handleSchedulerEvent(ev scheduler.Event) tea.Cmd {
 			Msg:  "Task started: " + taskLabel,
 			TTL:  3 * time.Second,
 		})
-		return clearInfoMsgCmd(msgID, 3*time.Second)
+		var cmds []tea.Cmd
+		cmds = append(cmds, clearInfoMsgCmd(msgID, 3*time.Second))
+		if m.state == uiChat {
+			if m.chat.Follow() {
+				cmds = append(cmds, m.chat.ForceScrollToBottomAndAnimate())
+			} else if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return tea.Batch(cmds...)
 	case scheduler.EventTaskProgress:
 		msg := ev.Status
 		if msg == "" {
@@ -5251,7 +5274,16 @@ func (m *UI) handleSchedulerEvent(ev scheduler.Event) tea.Cmd {
 			Msg:  "Task progress: " + msg,
 			TTL:  3 * time.Second,
 		})
-		return clearInfoMsgCmd(msgID, 3*time.Second)
+		var cmds []tea.Cmd
+		cmds = append(cmds, clearInfoMsgCmd(msgID, 3*time.Second))
+		if m.state == uiChat {
+			if m.chat.Follow() {
+				cmds = append(cmds, m.chat.ForceScrollToBottomAndAnimate())
+			} else if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return tea.Batch(cmds...)
 	case scheduler.EventTaskFinished:
 		msgID := m.status.SetInfoMsg(util.InfoMsg{
 			Type: util.InfoTypeSuccess,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # relay_mobile_joint.sh — 真实联调: crush-test TUI + local NATS relay + mobile client
-# 需要 WaitAI、adb、jq、go; mobile app 需已安装到设备。
+# 需要 Mock、adb、jq、go; mobile app 需已安装到设备。
 
 source "$(dirname "$0")/../common.sh"
 
@@ -8,7 +8,7 @@ CRUSH_TEST_BIN="${CRUSH_TEST_BIN:-$HOME/.local/bin/crush-test}"
 CRUSH_BIN="$CRUSH_TEST_BIN"
 
 need_tui
-need_waitai
+need_mock_llm
 command -v adb >/dev/null || skip "adb not installed"
 command -v go >/dev/null || skip "go not installed"
 command -v curl >/dev/null || skip "curl not installed"
@@ -20,8 +20,8 @@ NATS_HTTP_PORT="${CRUSH_RELAY_HTTP_PORT:-8222}"
 NATS_WS_PORT="${CRUSH_RELAY_WS_PORT:-9091}"
 NATS_HOST="${CRUSH_RELAY_HOST:-127.0.0.1}"
 NATS_URL="${CRUSH_RELAY_NATS_URL:-ws://${NATS_HOST}:${NATS_WS_PORT}}"
-WAITAI_BASE="${WAITAI_CRUSH_BASE:-${WAITAI_BASE:-http://127.0.0.1:43917}}"
-WAITAI_KEY="${WAITAI_API_KEY:-${NCODER_WAITAI_KEY:-}}"
+CRUSH_MOCK_BASE="${CRUSH_MOCK_LLM_BASE:-${CRUSH_MOCK_BASE:-http://127.0.0.1:43917}}"
+CRUSH_MOCK_KEY="${CRUSH_MOCK_API_KEY:-${CRUSH_MOCK_KEY:-}}"
 WECODE_KEY="${WECODE_API_KEY:-}"
 if [[ -z "$WECODE_KEY" && -f "$HOME/.codex/auth.json" ]]; then
   WECODE_KEY="$(jq -r '.OPENAI_API_KEY // empty' "$HOME/.codex/auth.json" 2>/dev/null || true)"
@@ -51,9 +51,9 @@ set -euo pipefail
 export CRUSH_DISABLE_METRICS=1
 export CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1
 export CRUSH_DISABLE_DEFAULT_PROVIDERS=1
-export WAITAI_CRUSH_BASE=$(printf '%q' "$WAITAI_BASE")
-export WAITAI_API_KEY=$(printf '%q' "$WAITAI_KEY")
-export NCODER_WAITAI_KEY=$(printf '%q' "$WAITAI_KEY")
+export CRUSH_MOCK_LLM_BASE=$(printf '%q' "$CRUSH_MOCK_BASE")
+export CRUSH_MOCK_API_KEY=$(printf '%q' "$CRUSH_MOCK_KEY")
+export CRUSH_MOCK_KEY=$(printf '%q' "$CRUSH_MOCK_KEY")
 export WECODE_API_KEY=$(printf '%q' "$WECODE_KEY")
 export CRUSH_RELAY_NATS_URL=$(printf '%q' "$NATS_URL")
 export CRUSH_RELAY_TOKEN=$(printf '%q' "$NATS_TOKEN")

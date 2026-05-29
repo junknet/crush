@@ -9,6 +9,10 @@ Two scheduling modes:
 
 If both `cron_expression` and `delay_seconds` are given, `cron_expression` wins. Exactly one must be set.
 
+Use `key` (or `task_key`) for wake-ups tied to a specific async task, such as `github-actions:run-12345` or `download:https://example.com/file.zip`. A new pending wake-up with the same session and key replaces older pending wake-ups by default, so stale reminders do not wake the agent after a newer attempt has superseded them. Set `replace_existing:false` only when you intentionally want multiple pending wake-ups with the same key.
+
+The tool response metadata includes `task_id`, `key`, `replaced_count`, `next_fire_at`, and the schedule details. Use `task_id` for logging and `key` for semantic cancellation/replacement.
+
 Do NOT use this to wait on local background jobs — those already wake you on completion (just background the command), and use the `monitor` tool to watch their output streams. `schedule_wakeup` is specifically for "nothing here can tell me when it changes, so check again later."
 
 Pick the schedule to match how fast the external state actually changes — short polls (30–120s) for an active CI run, longer (600s+) or a cron expression for slow queues. Keep `reason` concrete (e.g. "re-check GitHub Actions run 12345 status", not "check").

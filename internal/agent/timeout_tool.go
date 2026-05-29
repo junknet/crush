@@ -56,10 +56,26 @@ func (t *timeoutTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.T
 		return res.resp, res.err
 	case <-timeoutCtx.Done():
 		if timeoutCtx.Err() == context.DeadlineExceeded {
-			errMsg := fmt.Sprintf("Tool %s execution timed out after %v. Long-running tasks must run in the background (e.g. using the background execution flag or background commands).", call.Name, t.timeout)
+			errMsg := toolTimeoutMessage(call.Name, t.timeout)
 			return fantasy.NewTextErrorResponse(errMsg), nil
 		}
 		return fantasy.ToolResponse{}, timeoutCtx.Err()
+	}
+}
+
+func toolTimeoutMessage(name string, timeout time.Duration) string {
+	if isBackgroundCapableTool(name) {
+		return fmt.Sprintf("Tool %s execution timed out after %v. Long-running commands must run in the background with the tool's background option.", name, timeout)
+	}
+	return fmt.Sprintf("Tool %s execution timed out after %v. This tool is expected to finish quickly; the operation was canceled instead of being converted to a background job.", name, timeout)
+}
+
+func isBackgroundCapableTool(name string) bool {
+	switch name {
+	case "bash", "bash_tool", "nu", "nu_tool", "ssh", "ssh_tool":
+		return true
+	default:
+		return false
 	}
 }
 

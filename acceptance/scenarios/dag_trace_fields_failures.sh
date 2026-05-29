@@ -15,13 +15,13 @@
 
 source "$(dirname "$0")/../common.sh"
 need_tui
-need_waitai
+need_mock_llm
 
 PROMPT="${PROMPT:-Please run a check. Use the 'agent' tool to delegate a task to an explore agent (role='explore'). The explore agent MUST use the bash tool to run ONLY the command \`exit 2\` to simulate a failure. The explore agent must NOT run any other command. After the explore agent reports back that the command failed with exit code 2, reply with 'task failed as expected' in one short sentence.}"
 
-log "starting crush against WaitAI"
+log "starting crush against Mock"
 "$TUI" start "$SESS" 160 45 -- \
-  "cd $REPO && WAITAI_API_KEY=\"${WAITAI_API_KEY:-}\" NCODER_WAITAI_KEY=\"${NCODER_WAITAI_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
+  "cd $REPO && CRUSH_MOCK_API_KEY=\"${CRUSH_MOCK_API_KEY:-}\" CRUSH_MOCK_KEY=\"${CRUSH_MOCK_KEY:-}\" CRUSH_GLOBAL_CONFIG=$CRUSH_GLOBAL_CONFIG CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 $CRUSH_BIN --data-dir $ART/data --trace-file $TRACE" \
   | tee -a "$LOG"
 
 log "waiting for landing"

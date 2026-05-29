@@ -10,7 +10,7 @@
 #   $NIMLSP_BIN        nimlsp binary(若存在)
 #   $NIM_CORE_PATH     nim-core 仓库根(若存在,用作真 Nim 项目 fixture)
 #   assert / refute / log / fail / pass 辅助函数
-#   need_waitai / need_nimlsp / need_tui 前置环境检查(失败 SKIP)
+#   need_mock_llm / need_nimlsp / need_tui 前置环境检查(失败 SKIP)
 
 set -uo pipefail
 
@@ -64,12 +64,31 @@ need_tui() {
   [[ -x "$CRUSH_BIN" ]]         || skip "crush binary missing: $CRUSH_BIN (run: go build -o crush . in $REPO)"
 }
 
-need_waitai() {
-  local base="${WAITAI_CRUSH_BASE:-${WAITAI_BASE:-http://127.0.0.1:43917}}"
-  [[ -n "${WAITAI_API_KEY:-${NCODER_WAITAI_KEY:-}}" ]] \
-    || skip "WAITAI_API_KEY / NCODER_WAITAI_KEY not set"
+need_mock_llm() {
+  local base="${CRUSH_MOCK_LLM_BASE:-${MOCK_LLM_BASE:-http://127.0.0.1:43917}}"
+  local key="${MOCK_LLM_API_KEY:-${CRUSH_MOCK_API_KEY:-${CRUSH_MOCK_KEY:-}}}"
+  [[ -n "$key" ]] \
+    || skip "MOCK_LLM_API_KEY / CRUSH_MOCK_API_KEY / CRUSH_MOCK_KEY not set"
   curl -s -m 2 -o /dev/null -w '%{http_code}' "$base" 2>/dev/null | grep -q '^[23]' \
-    || skip "WaitAI backend $base unreachable"
+    || skip "Mock LLM backend $base unreachable"
+
+  local root="${base%/}"
+  local completions="$root/v1/chat/completions"
+  if [[ "$root" == */v1 ]]; then
+    completions="$root/chat/completions"
+  fi
+
+  local code
+  code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $key" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' \
+    "$completions" 2>/dev/null || true)"
+  case "$code" in
+    2*|3*) ;;
+    401|403) skip "Mock LLM backend $base rejected the configured API key" ;;
+    *) skip "Mock LLM backend $base chat probe failed with HTTP $code" ;;
+  esac
 }
 
 need_nimlsp() {
@@ -83,7 +102,7 @@ SESS="acceptance-$SCENARIO_NAME"
 # We generate a temporary configuration directory for each test run to
 # isolate it from the user's real ~/.config/crush/crush.yaml. This prevents
 # rate limits, token conflicts, and cost on real providers.
-# We map all model profiles to the WaitAI mock provider.
+# We map all model profiles to a mock provider.
 
 TEST_CFG_DIR=""
 if [[ -z "${CRUSH_GLOBAL_CONFIG:-}" ]]; then
@@ -99,23 +118,23 @@ agents:
 models:
   brain:
     model: claude-opus-4-7
-    provider: waitai-anthropic
+    provider: mock-anthropic
   explore:
     model: claude-haiku-4-5-20251001
-    provider: waitai-anthropic
+    provider: mock-anthropic
   worker:
     model: claude-sonnet-4-6
-    provider: waitai-anthropic
+    provider: mock-anthropic
   plan:
     model: claude-sonnet-4-6
-    provider: waitai-anthropic
+    provider: mock-anthropic
   auditor:
     model: claude-sonnet-4-6
-    provider: waitai-anthropic
+    provider: mock-anthropic
 providers:
-  waitai-anthropic:
-    api_key: \${WAITAI_API_KEY:-\${NCODER_WAITAI_KEY:-test}}
-    base_url: \${WAITAI_CRUSH_BASE:-http://127.0.0.1:43917/v1}
+  mock-anthropic:
+    api_key: \${MOCK_LLM_API_KEY:-\${CRUSH_MOCK_API_KEY:-\${CRUSH_MOCK_KEY:-test}}}
+    base_url: \${CRUSH_MOCK_LLM_BASE:-http://127.0.0.1:43917/v1}
     models:
       - id: claude-opus-4-7
         name: Claude Opus 4.7

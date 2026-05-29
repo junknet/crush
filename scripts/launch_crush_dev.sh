@@ -34,11 +34,11 @@ ts=$(date +%Y%m%d-%H%M%S)
 trace_file="$state_dir/trace-$ts.jsonl"
 http_dump_dir="$state_dir/http-$ts"
 
-waitai_base="${WAITAI_CRUSH_BASE:-${WAITAI_BASE:-http://127.0.0.1:43917}}"
-waitai_key="${WAITAI_API_KEY:-${NCODER_WAITAI_KEY:-}}"
+mock_base="${CRUSH_MOCK_LLM_BASE:-${CRUSH_MOCK_BASE:-http://127.0.0.1:43917}}"
+mock_key="${CRUSH_MOCK_API_KEY:-${CRUSH_MOCK_KEY:-}}"
 
-if [ -z "$waitai_key" ]; then
-  echo "Missing WAITAI_API_KEY or NCODER_WAITAI_KEY." >&2
+if [ -z "$mock_key" ]; then
+  echo "Missing CRUSH_MOCK_API_KEY or CRUSH_MOCK_KEY." >&2
   exit 1
 fi
 if [ ! -d "$repo_root" ]; then
@@ -72,9 +72,9 @@ exec env \
   CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 \
   CRUSH_DISABLE_DEFAULT_PROVIDERS=1 \
   CRUSH_HTTP_DUMP_DIR="$http_dump_dir" \
-  WAITAI_CRUSH_BASE="$waitai_base" \
-  WAITAI_API_KEY="$waitai_key" \
-  NCODER_WAITAI_KEY="$waitai_key" \
+  CRUSH_MOCK_LLM_BASE="$mock_base" \
+  CRUSH_MOCK_API_KEY="$mock_key" \
+  CRUSH_MOCK_KEY="$mock_key" \
   WECODE_API_KEY="$wecode_key" \
   CRUSH_RELAY_NATS_URL="$relay_nats_url" \
   CRUSH_RELAY_TOKEN="$relay_token" \

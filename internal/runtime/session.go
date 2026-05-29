@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ type RuntimeSession struct {
 	mcpStates      map[string]string
 	traceSeq       int64
 	trace          []TaskTrace
+	traceKeys      map[string]int
 
 	eventBus EventBus
 }
@@ -52,6 +54,7 @@ func NewSession(rootPath string, bus EventBus) *RuntimeSession {
 		tools:     make(map[string]struct{}),
 		lspStates: make(map[string]string),
 		mcpStates: make(map[string]string),
+		traceKeys: make(map[string]int),
 		eventBus:  bus,
 	}
 }
@@ -117,6 +120,7 @@ func (s *RuntimeSession) CloneForRun(sessionID string) *RuntimeSession {
 		mcpStates: make(map[string]string, len(s.mcpStates)),
 		trace:     nil,
 		traceSeq:  0,
+		traceKeys: make(map[string]int),
 		eventBus:  s.eventBus,
 	}
 	for name := range s.tools {
@@ -182,6 +186,7 @@ func (s *RuntimeSession) ResetEphemeralState() {
 	s.facts = make(map[string]string)
 	s.trace = nil
 	s.traceSeq = 0
+	s.traceKeys = make(map[string]int)
 	s.mu.Unlock()
 }
 
@@ -283,6 +288,22 @@ func (s *RuntimeSession) AppendTrace(entry TaskTrace) TaskTrace {
 	if entry.RecordedAt.IsZero() {
 		entry.RecordedAt = timeNow()
 	}
+	entry.Scope = append([]string(nil), entry.Scope...)
+
+	traceKey := traceDedupKey(entry)
+	if s.traceKeys == nil {
+		s.traceKeys = make(map[string]int, len(s.trace)+1)
+		for i, existing := range s.trace {
+			s.traceKeys[traceDedupKey(existing)] = i
+		}
+	}
+	if index, ok := s.traceKeys[traceKey]; ok {
+		existing := s.trace[index]
+		existing.Scope = append([]string(nil), existing.Scope...)
+		s.mu.Unlock()
+		return existing
+	}
+
 	if entry.Sequence <= 0 {
 		s.traceSeq++
 		entry.Sequence = s.traceSeq
@@ -290,7 +311,7 @@ func (s *RuntimeSession) AppendTrace(entry TaskTrace) TaskTrace {
 		s.traceSeq = entry.Sequence
 	}
 
-	entry.Scope = append([]string(nil), entry.Scope...)
+	s.traceKeys[traceKey] = len(s.trace)
 	s.trace = append(s.trace, entry)
 	s.mu.Unlock()
 
@@ -315,4 +336,149 @@ func (s *RuntimeSession) TraceEntries() []TaskTrace {
 
 func timeNow() time.Time {
 	return time.Now().UTC()
+}
+
+func traceDedupKey(entry TaskTrace) string {
+	type traceEntryDedup struct {
+		RecordedAt                    time.Time
+		StartedAt                     time.Time
+		FinishedAt                    time.Time
+		DurationMs                    int64
+		ConversationSessionID         string
+		SessionID                     string
+		NodeID                        string
+		ParentID                      string
+		Depth                         int
+		Profile                       string
+		ProviderID                    string
+		ProviderType                  string
+		ModelID                       string
+		RequestID                     string
+		HTTPTraceID                   string
+		Kind                          TraceKind
+		Status                        string
+		Success                       bool
+		Goal                          string
+		Scope                         []string
+		Attempt                       int
+		StepNumber                    int
+		Input                         string
+		Output                        string
+		Error                         string
+		InputBytes                    int
+		OutputBytes                   int
+		InputTokens                   int64
+		OutputTokens                  int64
+		TotalTokens                   int64
+		ReasoningTokens               int64
+		CacheCreationTokens           int64
+		CacheReadTokens               int64
+		EstimatedCostUSD              float64
+		ContextMessageCount           int
+		ContextBytes                  int
+		PreflightEstimatedInputTokens int64
+		ContextWindowTokens           int64
+		AutoSummarizeThresholdRatio   float64
+		AutoSummarizeThresholdTokens  int64
+		AutoSummarizeUsedTokens       int64
+		AutoSummarizeTriggered        bool
+		AttachmentCount               int
+		FileCount                     int
+		ToolCount                     int
+		ToolSchemaBytes               int
+		MaxOutputTokens               int64
+		FirstEventType                string
+		FirstEventLatencyMs           int64
+		FirstTextLatencyMs            int64
+		RetryDelayMs                  int64
+		FinishReason                  string
+		ToolName                      string
+		ToolCallID                    string
+		ToolInput                     string
+		ToolOutput                    string
+		ToolInputBytes                int
+		ToolOutputBytes               int
+		ToolIsError                   bool
+		ToolStopTurn                  bool
+		CommandID                     string
+		Command                       string
+		WorkingDir                    string
+		ExitCode                      *int
+		Outcome                       string
+		StdoutBytes                   int
+		StderrBytes                   int
+		ShellID                       string
+	}
+	key := traceEntryDedup{
+		RecordedAt:                    entry.RecordedAt,
+		StartedAt:                     entry.StartedAt,
+		FinishedAt:                    entry.FinishedAt,
+		DurationMs:                    entry.DurationMs,
+		ConversationSessionID:         entry.ConversationSessionID,
+		SessionID:                     entry.SessionID,
+		NodeID:                        entry.NodeID,
+		ParentID:                      entry.ParentID,
+		Depth:                         entry.Depth,
+		Profile:                       entry.Profile,
+		ProviderID:                    entry.ProviderID,
+		ProviderType:                  entry.ProviderType,
+		ModelID:                       entry.ModelID,
+		RequestID:                     entry.RequestID,
+		HTTPTraceID:                   entry.HTTPTraceID,
+		Kind:                          entry.Kind,
+		Status:                        entry.Status,
+		Success:                       entry.Success,
+		Goal:                          entry.Goal,
+		Scope:                         append([]string(nil), entry.Scope...),
+		Attempt:                       entry.Attempt,
+		StepNumber:                    entry.StepNumber,
+		Input:                         entry.Input,
+		Output:                        entry.Output,
+		Error:                         entry.Error,
+		InputBytes:                    entry.InputBytes,
+		OutputBytes:                   entry.OutputBytes,
+		InputTokens:                   entry.InputTokens,
+		OutputTokens:                  entry.OutputTokens,
+		TotalTokens:                   entry.TotalTokens,
+		ReasoningTokens:               entry.ReasoningTokens,
+		CacheCreationTokens:           entry.CacheCreationTokens,
+		CacheReadTokens:               entry.CacheReadTokens,
+		EstimatedCostUSD:              entry.EstimatedCostUSD,
+		ContextMessageCount:           entry.ContextMessageCount,
+		ContextBytes:                  entry.ContextBytes,
+		PreflightEstimatedInputTokens: entry.PreflightEstimatedInputTokens,
+		ContextWindowTokens:           entry.ContextWindowTokens,
+		AutoSummarizeThresholdRatio:   entry.AutoSummarizeThresholdRatio,
+		AutoSummarizeThresholdTokens:  entry.AutoSummarizeThresholdTokens,
+		AutoSummarizeUsedTokens:       entry.AutoSummarizeUsedTokens,
+		AutoSummarizeTriggered:        entry.AutoSummarizeTriggered,
+		AttachmentCount:               entry.AttachmentCount,
+		FileCount:                     entry.FileCount,
+		ToolCount:                     entry.ToolCount,
+		ToolSchemaBytes:               entry.ToolSchemaBytes,
+		MaxOutputTokens:               entry.MaxOutputTokens,
+		FirstEventType:                entry.FirstEventType,
+		FirstEventLatencyMs:           entry.FirstEventLatencyMs,
+		FirstTextLatencyMs:            entry.FirstTextLatencyMs,
+		RetryDelayMs:                  entry.RetryDelayMs,
+		FinishReason:                  entry.FinishReason,
+		ToolName:                      entry.ToolName,
+		ToolCallID:                    entry.ToolCallID,
+		ToolInput:                     entry.ToolInput,
+		ToolOutput:                    entry.ToolOutput,
+		ToolInputBytes:                entry.ToolInputBytes,
+		ToolOutputBytes:               entry.ToolOutputBytes,
+		ToolIsError:                   entry.ToolIsError,
+		ToolStopTurn:                  entry.ToolStopTurn,
+		CommandID:                     entry.CommandID,
+		Command:                       entry.Command,
+		WorkingDir:                    entry.WorkingDir,
+		ExitCode:                      entry.ExitCode,
+		Outcome:                       entry.Outcome,
+		StdoutBytes:                   entry.StdoutBytes,
+		StderrBytes:                   entry.StderrBytes,
+		ShellID:                       entry.ShellID,
+	}
+	data, _ := json.Marshal(key)
+	return string(data)
 }

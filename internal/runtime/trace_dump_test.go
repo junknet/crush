@@ -26,7 +26,7 @@ func TestWriteTraceJSONLFile(t *testing.T) {
 			ConversationSessionID: "session-1",
 			SessionID:             "session-1",
 			NodeID:                "node-1",
-			ProviderID:            "waitai",
+			ProviderID:            "mock",
 			ProviderType:          "anthropic",
 			ModelID:               "claude-opus-4-7",
 			Kind:                  TraceKindTaskInput,
@@ -70,7 +70,7 @@ func TestWriteTraceJSONLFile(t *testing.T) {
 	require.Equal(t, float64(1), first["sequence"])
 	require.Equal(t, "task_input", first["kind"])
 	require.Equal(t, "prompt text", first["input"])
-	require.Equal(t, "waitai", first["provider_id"])
+	require.Equal(t, "mock", first["provider_id"])
 	require.Equal(t, "claude-opus-4-7", first["model_id"])
 	require.Equal(t, float64(1000), first["duration_ms"])
 	require.Equal(t, float64(len("prompt text")), first["input_bytes"])

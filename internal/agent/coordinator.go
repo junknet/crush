@@ -383,37 +383,34 @@ func (c *coordinator) watchBackgroundJobs(ctx context.Context) {
 				return
 			}
 			job := ev.Payload
-			if job.SessionID == "" {
-				continue
-			}
-			// Streaming output lines are high-frequency status noise. They do
-			// not wake the agent and must not be mirrored into eventbus, or
-			// the next model turn receives a stale pile of monitor_line
-			// notifications.
-			if job.Kind == shell.BackgroundKindMonitorLine {
-				continue
-			}
-
-			// Mirror terminal wake-ups onto the unified eventbus so
-			// PrepareStep can drain them as a <task-notification>
-			// system-reminder for the next turn, in addition to the c.Run
-			// continuation below.
-			publishBackgroundJobToEventBus(job)
-
-			prompt := buildBackgroundWakePrompt(job)
-			slog.DebugContext(ctx, "Background job finished — waking session",
-				"job", job.ID, "session_id", job.SessionID, "exit_code", job.ExitCode)
-			go func() {
-				// Mark as a system-initiated run so that if it gets queued and
-				// then canceled on ESC, it doesn't pollute the user's textarea.
-				systemCtx := WithSystemPrompt(ctx)
-				if _, err := c.Run(systemCtx, job.SessionID, prompt, false); err != nil {
-					slog.Error("Background job wake-up run failed",
-						"job", job.ID, "session_id", job.SessionID, "error", err)
-				}
-			}()
+			c.handleBackgroundJobEvent(ctx, job)
 		}
 	}
+}
+
+func (c *coordinator) handleBackgroundJobEvent(ctx context.Context, job shell.BackgroundJobEvent) {
+	if job.SessionID == "" {
+		return
+	}
+	// Streaming output lines are high-frequency status noise. They do not wake
+	// the agent and do not enter eventbus, or the next model turn receives a
+	// stale pile of monitor_line notifications.
+	if job.Kind == shell.BackgroundKindMonitorLine {
+		return
+	}
+
+	prompt := buildBackgroundWakePrompt(job)
+	slog.DebugContext(ctx, "Background job finished — waking session",
+		"job", job.ID, "session_id", job.SessionID, "exit_code", job.ExitCode)
+	go func() {
+		// Mark as a system-initiated run so that if it gets queued and then
+		// canceled on ESC, it doesn't pollute the user's textarea.
+		systemCtx := WithSystemPrompt(ctx)
+		if _, err := c.Run(systemCtx, job.SessionID, prompt, false); err != nil {
+			slog.Error("Background job wake-up run failed",
+				"job", job.ID, "session_id", job.SessionID, "error", err)
+		}
+	}()
 }
 
 // buildBackgroundWakePrompt renders the system-style message handed to the
@@ -453,40 +450,6 @@ func buildBackgroundWakePrompt(job shell.BackgroundJobEvent) string {
 			"A background job you previously started has now completed.\nJob ID: %s\nCommand: %s\nResult: it %s.\n\nOutput (tail):\n%s%s",
 			job.ID, job.Command, status, output, tail)
 	}
-}
-
-// publishBackgroundJobToEventBus mirrors a background-job event onto the
-// unified eventbus. Kept side-by-side with the c.Run wake-up path so existing
-// behaviour is preserved while PrepareStep also sees the event as a
-// task-notification.
-func publishBackgroundJobToEventBus(job shell.BackgroundJobEvent) {
-	kind := "bash_done"
-	priority := eventbus.PriorityNext
-	switch job.Kind {
-	case shell.BackgroundKindMonitorHit:
-		kind = "monitor_match"
-		priority = eventbus.PriorityNow
-	case shell.BackgroundKindMonitorEOF:
-		kind = "monitor_eof"
-	case shell.BackgroundKindMonitorTimeout:
-		kind = "monitor_timeout"
-	}
-	payload := map[string]any{
-		"shell_id":     job.ID,
-		"command":      job.Command,
-		"exit_code":    job.ExitCode,
-		"interrupted":  job.Interrupted,
-		"output_bytes": len(job.OutputTail),
-		"output_tail":  job.OutputTail,
-		"pattern":      job.Pattern,
-		"match_line":   job.MatchLine,
-	}
-	eventbus.Default.Publish(eventbus.Event{
-		Kind:      kind,
-		SessionID: job.SessionID,
-		Payload:   eventbus.MarshalJSONPayload(payload),
-		Priority:  priority,
-	})
 }
 
 // Run implements Coordinator.
@@ -1235,22 +1198,14 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	)
 
-	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).
-	if false { // Temporarily disabled by user request
-		allTools = append(allTools,
-			tools.NewDiagnosticsTool(c.lspManager),
-			tools.NewReferencesTool(c.lspManager),
-			tools.NewNimRestartTool(c.lspManager),
-			tools.NewNimMacroExpandTool(c.lspManager),
-			tools.NewNimSafeToDeleteTool(c.lspManager),
-			tools.NewNimProjectMapsTool(c.lspManager),
-			tools.NewNimDefinitionTool(c.lspManager),
-			tools.NewNimHoverTool(c.lspManager),
-			tools.NewNimDocumentSymbolsTool(c.lspManager),
-			tools.NewNimWorkspaceSymbolsTool(c.lspManager),
-			tools.NewNimCheckFileTool(c.lspManager),
-			tools.NewNimCallHierarchyTool(c.lspManager),
-		)
+	if slices.Contains(agent.AllowedTools, tools.CodeTriageToolName) || slices.Contains(agent.AllowedTools, tools.BugTriageToolName) {
+		codeTriage := tools.NewCodeTriageTool(c.permissions, c.cfg.WorkingDir())
+		if slices.Contains(agent.AllowedTools, tools.CodeTriageToolName) {
+			allTools = append(allTools, codeTriage)
+		}
+		if slices.Contains(agent.AllowedTools, tools.BugTriageToolName) {
+			allTools = append(allTools, &aliasTool{AgentTool: codeTriage, name: tools.BugTriageToolName})
+		}
 	}
 
 	if len(c.cfg.Config().MCP) > 0 {

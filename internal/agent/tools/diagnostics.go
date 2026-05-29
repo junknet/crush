@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,34 +10,14 @@ import (
 	"sync"
 	"time"
 
-	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
-type DiagnosticsParams struct {
-	FilePath string `json:"file_path,omitempty" description:"The path to the file to get diagnostics for (leave empty for project diagnostics)"`
-}
-
-const DiagnosticsToolName = "nim_diagnostics"
-
-//go:embed diagnostics.md
-var diagnosticsDescription string
-
-func NewDiagnosticsTool(lspManager *lsp.Manager) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
-		DiagnosticsToolName,
-		diagnosticsDescription,
-		func(ctx context.Context, params DiagnosticsParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			if lspManager.Clients().Len() == 0 {
-				return fantasy.NewTextErrorResponse("no LSP clients available"), nil
-			}
-			notifyLSPs(ctx, lspManager, params.FilePath)
-			output := getDiagnostics(params.FilePath, lspManager)
-			return fantasy.NewTextResponse(output), nil
-		},
-	)
-}
+const (
+	lspViewBudget   = 1500 * time.Millisecond
+	lspChangeBudget = 5 * time.Second
+)
 
 // openInLSPs ensures LSP servers are running and aware of the file, but does
 // not notify changes or wait for fresh diagnostics. Use this for read-only
@@ -52,13 +31,16 @@ func openInLSPs(
 		return
 	}
 
-	manager.Start(ctx, filepath)
+	lspCtx, cancel := context.WithTimeout(ctx, lspViewBudget)
+	defer cancel()
+
+	manager.Start(lspCtx, filepath)
 
 	for client := range manager.Clients().Seq() {
 		if !client.HandlesFile(filepath) {
 			continue
 		}
-		_ = client.OpenFileOnDemand(ctx, filepath)
+		_ = client.OpenFileOnDemand(lspCtx, filepath)
 	}
 }
 
@@ -75,13 +57,16 @@ func waitForLSPDiagnostics(
 		return
 	}
 
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	var wg sync.WaitGroup
 	for client := range manager.Clients().Seq() {
 		if !client.HandlesFile(filepath) {
 			continue
 		}
 		wg.Go(func() {
-			client.WaitForDiagnostics(ctx, timeout)
+			client.WaitForDiagnostics(waitCtx, timeout)
 		})
 	}
 	wg.Wait()
@@ -99,33 +84,36 @@ func notifyLSPs(
 	if manager == nil {
 		return
 	}
+	lspCtx, cancel := context.WithTimeout(ctx, lspChangeBudget)
+	defer cancel()
+
 	if filepath == "" {
 		// No specific file — refresh all open files for all clients.
 		var wg sync.WaitGroup
 		for client := range manager.Clients().Seq() {
 			wg.Go(func() {
-				client.RefreshOpenFiles(ctx)
-				if err := client.NotifyWorkspaceChange(ctx); err != nil {
+				client.RefreshOpenFiles(lspCtx)
+				if err := client.NotifyWorkspaceChange(lspCtx); err != nil {
 					slog.WarnContext(ctx, "Failed to notify workspace change", "error", err)
 				}
-				client.WaitForDiagnostics(ctx, 5*time.Second)
+				client.WaitForDiagnostics(lspCtx, lspChangeBudget)
 			})
 		}
 		wg.Wait()
 		return
 	}
 
-	manager.Start(ctx, filepath)
+	manager.Start(lspCtx, filepath)
 
 	var wg sync.WaitGroup
 	for client := range manager.Clients().Seq() {
 		if !client.HandlesFile(filepath) {
 			continue
 		}
-		_ = client.OpenFileOnDemand(ctx, filepath)
-		_ = client.NotifyChange(ctx, filepath)
+		_ = client.OpenFileOnDemand(lspCtx, filepath)
+		_ = client.NotifyChange(lspCtx, filepath)
 		wg.Go(func() {
-			client.WaitForDiagnostics(ctx, 5*time.Second)
+			client.WaitForDiagnostics(lspCtx, lspChangeBudget)
 		})
 	}
 	wg.Wait()
@@ -193,6 +181,26 @@ func writeDiagnostics(output *strings.Builder, tag string, in []string) {
 		output.WriteString(strings.Join(in, "\n"))
 	}
 	output.WriteString("\n</" + tag + ">\n")
+}
+
+func collectFileDiagnostics(absPath string, manager *lsp.Manager) []string {
+	var out []string
+	for lspName, client := range manager.Clients().Seq2() {
+		for location, diags := range client.GetDiagnostics() {
+			path, err := location.Path()
+			if err != nil {
+				slog.Error("Failed to convert diagnostic location URI to path", "uri", location, "error", err)
+				continue
+			}
+			if path != absPath {
+				continue
+			}
+			for _, diag := range diags {
+				out = append(out, formatDiagnostic(path, diag, lspName))
+			}
+		}
+	}
+	return out
 }
 
 func sortDiagnostics(in []string) []string {
