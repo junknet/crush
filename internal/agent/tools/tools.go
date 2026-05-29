@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/iodriver"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 )
 
@@ -23,6 +24,7 @@ type (
 	providerIDContextKey   string
 	providerTypeContextKey string
 	modelIDContextKey      string
+	backendContextKey      string
 )
 
 const (
@@ -48,6 +50,9 @@ const (
 	ProviderTypeContextKey providerTypeContextKey = "provider_type"
 	// ModelIDContextKey is the key for the configured model ID.
 	ModelIDContextKey modelIDContextKey = "model_id"
+	// BackendContextKey is the key for the active IO backend (local or remote).
+	// When absent, file/exec helpers fall back to direct local os.* behavior.
+	BackendContextKey backendContextKey = "io_backend"
 )
 
 // getContextValue is a generic helper that retrieves a typed value from context.
@@ -81,6 +86,19 @@ func GetSupportsImagesFromContext(ctx context.Context) bool {
 // GetModelNameFromContext retrieves the model name from the context.
 func GetModelNameFromContext(ctx context.Context) string {
 	return getContextValue(ctx, ModelNameContextKey, "")
+}
+
+// WithBackend attaches an active IO backend to the context so file/exec helpers
+// route through it. When a session has no backend attached, callers omit this
+// and the helpers fall back to direct local os.* behavior.
+func WithBackend(ctx context.Context, backend iodriver.Backend) context.Context {
+	return context.WithValue(ctx, BackendContextKey, backend)
+}
+
+// GetBackendFromContext returns the active IO backend, or nil when none is
+// attached (the local-default path).
+func GetBackendFromContext(ctx context.Context) iodriver.Backend {
+	return getContextValue[iodriver.Backend](ctx, BackendContextKey, nil)
 }
 
 // WithTraceContext attaches runtime trace metadata to tool calls.

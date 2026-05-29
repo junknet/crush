@@ -58,6 +58,7 @@ func init() {
 		loginCmd,
 		statsCmd,
 		sessionCmd,
+		remoteServeCmd,
 	)
 }
 

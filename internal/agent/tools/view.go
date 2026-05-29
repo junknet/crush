@@ -272,7 +272,7 @@ func NewViewTool(
 					dir := filepath.Dir(filePath)
 					base := filepath.Base(filePath)
 
-					dirEntries, dirErr := os.ReadDir(dir)
+					dirEntries, dirErr := CtxReadDir(ctx, dir)
 					if dirErr == nil {
 						var suggestions []string
 						for _, entry := range dirEntries {
