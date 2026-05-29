@@ -1,5 +1,18 @@
 # Crush Development Guide
 
+## Verification Hard Rule
+
+- Do not treat unit tests as proof that a task is complete.
+- Do not propose, rely on, or present unit-test-only verification for code changes.
+- Do not run unit tests as the primary validation path unless the user explicitly asks for them.
+- Every code change must be verified through a real end-to-end path that exercises the changed behavior as a user would use it.
+- Prefer real CLI/TUI/app flows, real commands, real files, real provider/tool protocol paths, and real trace/log artifacts.
+- When working on Crush, use `crush-dev` or the actual built CLI/TUI for verification. Capture concrete evidence such as visible TUI output, trace JSONL events, HTTP dump artifacts, process output, or an exit code from the real scenario.
+- If an e2e case cannot run, state the blocker and the closest real scenario attempted. Do not replace it with unit tests as equivalent evidence.
+- Do not use mock providers, mock data, fake keys, synthetic servers, or toy fixtures as verification unless the user explicitly asks for mock-mode testing.
+- Use the user's real configured providers, real API keys, real repositories, real files, and real business workflows for Crush validation.
+- Optimize for private single-developer production throughput: remove obsolete compatibility paths when they slow real work, keep changes direct, and validate with real production-like execution.
+
 ## Project Overview
 
 Crush is a terminal-based AI coding assistant built in Go by
@@ -132,30 +145,6 @@ internal/
   - This is enforced by `task lint:log` which runs as part of `task lint`.
 - **Comments**: End comments in periods unless comments are at the end of the
   line.
-
-## Testing with Mock Providers
-
-When writing tests that involve provider configurations, use the mock
-providers to avoid API calls:
-
-```go
-func TestYourFunction(t *testing.T) {
-    // Enable mock providers for testing
-    originalUseMock := config.UseMockProviders
-    config.UseMockProviders = true
-    defer func() {
-        config.UseMockProviders = originalUseMock
-        config.ResetProviders()
-    }()
-
-    // Reset providers to ensure fresh mock data
-    config.ResetProviders()
-
-    // Your test code here - providers will now return mock data
-    providers := config.Providers()
-    // ... test logic
-}
-```
 
 ## Formatting
 
