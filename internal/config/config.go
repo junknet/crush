@@ -26,7 +26,14 @@ const (
 )
 
 var defaultContextPaths = []string{
+	"AGENTS.md",
+	"AGENTS.local.md",
 	"CLAUDE.md",
+	"CLAUDE.local.md",
+	"CRUSH.md",
+	"CRUSH.local.md",
+	"GEMINI.md",
+	"GEMINI.local.md",
 }
 
 type SelectedModelType string

@@ -44,5 +44,35 @@ func TestClaudeGlobalPromptDiscovery(t *testing.T) {
 	data, err := p.promptData(context.Background(), "provider", "model", store)
 	require.NoError(t, err)
 
-	require.Equal(t, promptContent, data.ClaudeGlobalPrompt)
+	require.Contains(t, data.ClaudeGlobalPrompt, promptContent)
+	require.Contains(t, data.ClaudeGlobalPrompt, "global_prompt.md")
+}
+
+func TestClaudeGlobalPromptLoadsPersonalConstitution(t *testing.T) {
+	mockHome, err := os.MkdirTemp("", "crush-test-home-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(mockHome)
+
+	home.SetDir(mockHome)
+	defer home.ResetDir()
+
+	claudeDir := filepath.Join(mockHome, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "CLAUDE.md"), []byte("Personal Constitution"), 0o644))
+
+	p, err := NewPrompt("test", "template")
+	require.NoError(t, err)
+
+	tmpDir, err := os.MkdirTemp("", "crush-test-wd-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	store, err := config.Init(tmpDir, "", false)
+	require.NoError(t, err)
+
+	data, err := p.promptData(context.Background(), "provider", "model", store)
+	require.NoError(t, err)
+
+	require.Contains(t, data.ClaudeGlobalPrompt, "Personal Constitution")
+	require.Contains(t, data.ClaudeGlobalPrompt, "CLAUDE.md")
 }

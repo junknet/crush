@@ -155,26 +155,22 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	workingDir := cmp.Or(p.workingDir, store.WorkingDir())
 	platform := cmp.Or(p.platform, runtime.GOOS)
 
-	// Thin agents skip workspace-wide scaffolding (context files, skills
-	// XML, MEMORY.md index) the parent brain already injected — saving
-	// 3-8K tokens per sub-agent turn. worker is included because its task
-	// brief is always specific enough that global skill discovery is dead
-	// weight; brain is the only role that materialises the full surface.
+	// Thin agents skip workspace-wide scaffolding that is expensive and
+	// discoverable on demand. Context files still load for every role because
+	// they carry project constitution and verification rules.
 	isThinAgent := p.name == "explore" || p.name == "plan" || p.name == "agentic_fetch" || p.name == "speculation" || p.name == "worker"
 
 	files := map[string][]ContextFile{}
 
 	cfg := store.Config()
-	if !isThinAgent {
-		for _, pth := range cfg.Options.ContextPaths {
-			expanded := expandPath(pth, store)
-			pathKey := strings.ToLower(expanded)
-			if _, ok := files[pathKey]; ok {
-				continue
-			}
-			content := processContextPath(expanded, store)
-			files[pathKey] = content
+	for _, pth := range cfg.Options.ContextPaths {
+		expanded := expandPath(pth, store)
+		pathKey := strings.ToLower(expanded)
+		if _, ok := files[pathKey]; ok {
+			continue
 		}
+		content := processContextPath(expanded, store)
+		files[pathKey] = content
 	}
 
 	// Discover and load skills metadata.
@@ -238,16 +234,41 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		MemoryIndex:   memoryIndex,
 	}
 
-	// Discover Claude's global prompt
-	claudeGlobalPromptPath := filepath.Join(home.Dir(), ".claude", "global_prompt.md")
-	if content, err := os.ReadFile(claudeGlobalPromptPath); err == nil {
-		data.ClaudeGlobalPrompt = string(content)
-	}
+	data.ClaudeGlobalPrompt = loadClaudeGlobalPrompt()
 
 	for _, contextFiles := range files {
 		data.ContextFiles = append(data.ContextFiles, contextFiles...)
 	}
 	return data, nil
+}
+
+func loadClaudeGlobalPrompt() string {
+	claudeDir := filepath.Join(home.Dir(), ".claude")
+	paths := []string{
+		filepath.Join(claudeDir, "global_prompt.md"),
+		filepath.Join(claudeDir, "CLAUDE.md"),
+	}
+	blocks := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		abs, err := filepath.Abs(path)
+		if err == nil {
+			if _, ok := seen[abs]; ok {
+				continue
+			}
+			seen[abs] = struct{}{}
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		text := strings.TrimSpace(string(content))
+		if text == "" {
+			continue
+		}
+		blocks = append(blocks, fmt.Sprintf("<file path=%q>\n%s\n</file>", filepath.ToSlash(path), text))
+	}
+	return strings.Join(blocks, "\n\n")
 }
 
 // DynamicNow is the time source used by DynamicPrefix; tests may replace it.

@@ -2327,17 +2327,15 @@ func TestConfig_configureProviders_UnsetAzureEndpointSkipsProvider(t *testing.T)
 	require.False(t, exists)
 }
 
-func TestContextPathsExist_OnlyClaudeMd(t *testing.T) {
-	t.Run("ignores legacy agent files", func(t *testing.T) {
+func TestContextPathsExist_DefaultAgentFiles(t *testing.T) {
+	t.Run("accepts agent instruction files", func(t *testing.T) {
 		dir := t.TempDir()
 
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(""), 0o644))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "GEMINI.md"), []byte(""), 0o644))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "CLAUDE.local.md"), []byte(""), 0o644))
 
 		exists, err := contextPathsExist(dir)
 		require.NoError(t, err)
-		require.False(t, exists)
+		require.True(t, exists)
 	})
 
 	t.Run("accepts claude md", func(t *testing.T) {

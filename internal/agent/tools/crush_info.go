@@ -435,6 +435,7 @@ func writeOptions(b *strings.Builder, cfg *config.ConfigStore) {
 	opts = append(opts, kv{"env_home", os.Getenv("HOME")})
 	opts = append(opts, kv{"data_directory", c.Options.DataDirectory})
 	opts = append(opts, kv{"debug", fmt.Sprintf("%v", c.Options.Debug)})
+	opts = append(opts, kv{"context_paths", strings.Join(c.Options.ContextPaths, ", ")})
 	autoLSP := c.Options.AutoLSP == nil || *c.Options.AutoLSP
 	opts = append(opts, kv{"auto_lsp", fmt.Sprintf("%v", autoLSP)})
 	autoSummarize := !c.Options.DisableAutoSummarize
@@ -509,16 +510,27 @@ func writeHooks(b *strings.Builder, cfg *config.ConfigStore) {
 }
 
 func writeGlobalPrompt(b *strings.Builder) {
-	path := filepath.Join(home.Dir(), ".claude", "global_prompt.md")
-	content, err := os.ReadFile(path)
-	if err != nil {
-		fmt.Fprintf(b, "[claude_global_prompt]\nerror reading %s: %v\n\n", path, err)
-		return
+	claudeDir := filepath.Join(home.Dir(), ".claude")
+	paths := []string{
+		filepath.Join(claudeDir, "global_prompt.md"),
+		filepath.Join(claudeDir, "CLAUDE.md"),
 	}
-	b.WriteString("[claude_global_prompt]\n")
-	b.WriteString(string(content))
-	if !strings.HasSuffix(string(content), "\n") {
-		b.WriteString("\n")
+	b.WriteString("[user_constitution]\n")
+	wrote := false
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		text := strings.TrimSpace(string(content))
+		if text == "" {
+			continue
+		}
+		fmt.Fprintf(b, "<file path=%q>\n%s\n</file>\n", filepath.ToSlash(path), text)
+		wrote = true
+	}
+	if !wrote {
+		fmt.Fprintf(b, "no user constitution found under %s\n", claudeDir)
 	}
 	b.WriteString("\n")
 }
