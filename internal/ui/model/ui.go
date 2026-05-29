@@ -307,7 +307,7 @@ type UI struct {
 	// by user toggle or auto-switch based on window size)
 	isCompact bool
 
-	// detailsOpen tracks whether the details panel is open (in compact mode)
+	// detailsOpen tracks whether the runtime activity panel is open.
 	detailsOpen bool
 
 	// pills state
@@ -2056,10 +2056,12 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 			return true
-		case key.Matches(msg, m.keyMap.Chat.Details) && m.isCompact:
-			m.detailsOpen = !m.detailsOpen
-			m.updateLayoutAndSize()
-			return true
+		case key.Matches(msg, m.keyMap.Chat.Details):
+			if m.state == uiChat && m.hasSession() {
+				m.detailsOpen = !m.detailsOpen
+				m.updateLayoutAndSize()
+				return true
+			}
 		case key.Matches(msg, m.keyMap.Chat.TogglePills):
 			if m.state == uiChat && m.hasSession() {
 				if cmd := m.togglePillsExpanded(); cmd != nil {
@@ -2591,6 +2593,8 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	case uiChat:
 		if m.isCompact {
 			m.drawHeader(scr, layout.header)
+		} else if m.detailsOpen {
+			m.drawDagActivity(scr, layout.sidebar)
 		} else {
 			m.drawSidebar(scr, layout.sidebar)
 		}
@@ -2607,9 +2611,9 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		editor := uv.NewStyledString(m.renderEditorView(editorWidth))
 		editor.Draw(scr, layout.editor)
 
-		// Draw details overlay in compact mode when open
+		// Draw activity overlay in compact mode when open.
 		if m.isCompact && m.detailsOpen {
-			m.drawSessionDetails(scr, layout.sessionDetails)
+			m.drawDagActivity(scr, layout.sessionDetails)
 		}
 	}
 
@@ -3081,6 +3085,12 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 	editorHeight := m.textarea.Height() + editorHeightMargin
 	// The sidebar width
 	sidebarWidth := 30
+	if m.state == uiChat && !m.isCompact && m.detailsOpen {
+		sidebarWidth = min(56, max(36, area.Dx()/3))
+		if area.Dx()-sidebarWidth < 64 {
+			sidebarWidth = max(30, area.Dx()-64)
+		}
+	}
 	// The header height
 	const landingHeaderHeight = 4
 

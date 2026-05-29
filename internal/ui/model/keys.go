@@ -186,7 +186,7 @@ func DefaultKeyMap() KeyMap {
 	)
 	km.Chat.Details = key.NewBinding(
 		key.WithKeys("ctrl+d"),
-		key.WithHelp("ctrl+d", "toggle details"),
+		key.WithHelp("ctrl+d", "activity"),
 	)
 	km.Chat.TogglePills = key.NewBinding(
 		key.WithKeys("ctrl+t", "ctrl+space"),
