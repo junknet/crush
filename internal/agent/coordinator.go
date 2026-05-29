@@ -26,6 +26,7 @@ import (
 	agentprompt "github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/remoteregistry"
 	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/agentsdk"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/eventbus"
@@ -1455,20 +1456,10 @@ func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map
 }
 
 func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
-	opts := []openai.Option{
-		openai.WithAPIKey(apiKey),
-		openai.WithUseResponsesAPI(),
-	}
-	if httpClient := log.NewProviderHTTPClient("openai", c.cfg.Config().Options.Debug); httpClient != nil {
-		opts = append(opts, openai.WithHTTPClient(httpClient))
-	}
 	if len(headers) > 0 {
-		opts = append(opts, openai.WithHeaders(headers))
+		slog.Warn("Agent SDK OpenAI provider ignores extra_headers", "headers", headers)
 	}
-	if baseURL != "" {
-		opts = append(opts, openai.WithBaseURL(baseURL))
-	}
-	return openai.New(opts...)
+	return agentsdk.NewCodexProvider(baseURL, apiKey)
 }
 
 func (c *coordinator) buildOpenrouterProvider(_, apiKey string, headers map[string]string) (fantasy.Provider, error) {

@@ -82,6 +82,7 @@ require (
 	git.sr.ht/~jackmordaunt/go-toast v1.1.2 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.17.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.10.0 // indirect
+	github.com/agent-sdk v0.0.0
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.41.7 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.10 // indirect
@@ -200,3 +201,5 @@ require (
 )
 
 replace charm.land/fantasy => /home/junknet/Desktop/_cli_bases/fantasy-patched
+
+replace github.com/agent-sdk => /home/junknet/Desktop/agent-all-sdk-go
