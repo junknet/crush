@@ -904,7 +904,7 @@ func getProviderOptions(sessionID string, model Model, providerCfg config.Provid
 				options[openai.Name] = parsed
 			}
 		}
-	case anthropic.Name, bedrock.Name:
+	case anthropic.Name, anthropicoauth.Name, bedrock.Name:
 		// Anthropic Messages API has no `effort` field; the only thinking knob
 		// is `thinking.budget_tokens` (integer hard cap). To keep crush.json
 		// portable across providers we map OpenAI-style effort strings onto

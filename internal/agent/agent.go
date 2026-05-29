@@ -90,6 +90,7 @@ var summaryPrompt []byte
 var (
 	thinkTagRegex       = regexp.MustCompile(`(?s)<think>.*?</think>`)
 	orphanThinkTagRegex = regexp.MustCompile(`</?think>`)
+	errEmptyModelOutput = errors.New("model ended turn without visible text or tool call")
 )
 
 // agentCtxKey is an unexported key type for values stored in agent contexts.
@@ -792,9 +793,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 							}
 						}
 					}
+					var emptyOutputErr error
+					assistantVisibleText := strings.TrimSpace(currentAssistant.Content().Text)
+					assistantToolCalls := len(currentAssistant.ToolCalls())
 					if finishReason == message.FinishReasonMaxTokens &&
-						stepResult.Content.Text() == "" &&
-						len(stepResult.Content.ToolCalls()) == 0 {
+						assistantVisibleText == "" &&
+						assistantToolCalls == 0 {
 						currentAssistant.AddFinish(
 							message.FinishReasonError,
 							"Response truncated before any output",
@@ -804,6 +808,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 						// so auto-summarize fires the same way the HTTP-level
 						// context_length_exceeded path does (agent.go:972-980).
 						shouldSummarize = true
+					} else if finishReason == message.FinishReasonEndTurn &&
+						assistantVisibleText == "" &&
+						assistantToolCalls == 0 {
+						emptyOutputErr = errEmptyModelOutput
+						currentAssistant.AddFinish(
+							message.FinishReasonError,
+							"Empty model output",
+							"The model ended the turn without visible text or a tool call. Crush will retry or surface this as a provider failure instead of treating an empty answer as success.",
+						)
 					} else {
 						currentAssistant.AddFinish(finishReason, "", "")
 					}
@@ -835,7 +848,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 					if a.hookRunner != nil && (finishReason == message.FinishReasonEndTurn || finishReason == message.FinishReasonMaxTokens) {
 						a.fireStopHook(genCtx, call.SessionID, finishReason, stepResult)
 					}
-					return nil
+					return emptyOutputErr
 				},
 				StopWhen: a.buildStopConditions(func(_ []fantasy.StepResult) bool {
 					if a.shouldAutoSummarize(currentModel, currentSession) {
@@ -854,6 +867,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 				if cause := context.Cause(streamCtx); cause != nil && !errors.Is(cause, context.Canceled) {
 					lastErr = cause
 				}
+			}
+			if lastErr == nil && currentAssistant != nil &&
+				strings.TrimSpace(currentAssistant.Content().Text) == "" &&
+				len(currentAssistant.ToolCalls()) == 0 {
+				lastErr = errEmptyModelOutput
 			}
 			if lastErr != nil {
 				observer.fail(lastErr)
@@ -2979,6 +2997,7 @@ func isDefinitiveUpstreamFailure(err error, providerID string) bool {
 		strings.Contains(msg, "not implemented") ||
 		strings.Contains(msg, "insufficient permissions") ||
 		strings.Contains(msg, "missing scopes") ||
+		strings.Contains(msg, "without visible text or tool call") ||
 		strings.Contains(msg, "quota exceeded")
 }
 

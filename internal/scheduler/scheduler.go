@@ -215,6 +215,7 @@ func isNonRetryableTaskError(err error) bool {
 		strings.Contains(msg, "insufficient permissions") ||
 		strings.Contains(msg, "missing scopes") ||
 		strings.Contains(msg, "invalid_request_error") ||
+		strings.Contains(msg, "without visible text or tool call") ||
 		strings.Contains(msg, "unsupported")
 }
 

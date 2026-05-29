@@ -725,6 +725,7 @@ func normalizeSelectedModel(c *Config, selected SelectedModel, fallback Selected
 		resolved.ReasoningEffort = model.DefaultReasoningEffort
 	}
 	resolved.Think = selected.Think
+	resolved.ThinkingBudget = selected.ThinkingBudget
 	resolved.Temperature = selected.Temperature
 	resolved.TopP = selected.TopP
 	resolved.TopK = selected.TopK
