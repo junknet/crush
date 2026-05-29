@@ -27,6 +27,7 @@ const (
 	methodRemove    rpcMethod = "remove"
 	methodRename    rpcMethod = "rename"
 	methodReadDir   rpcMethod = "read_dir"
+	methodExec      rpcMethod = "exec"
 )
 
 // errKind lets the client reconstruct the sentinel a caller checks for, since
@@ -51,6 +52,10 @@ type rpcRequest struct {
 	Data []byte `json:"data,omitempty"`
 	// Mode is the perm bits for write_file / mkdir.
 	Mode uint32 `json:"mode,omitempty"`
+	// Command/Cwd/Env carry an exec request (run-to-completion).
+	Command string   `json:"command,omitempty"`
+	Cwd     string   `json:"cwd,omitempty"`
+	Env     []string `json:"env,omitempty"`
 }
 
 type rpcResponse struct {
@@ -60,6 +65,10 @@ type rpcResponse struct {
 	Data    []byte       `json:"data,omitempty"`    // read_file payload
 	Info    *wireInfo    `json:"info,omitempty"`    // stat result
 	Entries []wireDirEnt `json:"entries,omitempty"` // read_dir result
+	// exec results
+	Stdout   []byte `json:"stdout,omitempty"`
+	Stderr   []byte `json:"stderr,omitempty"`
+	ExitCode int    `json:"exit_code,omitempty"`
 }
 
 // wireInfo is the serializable projection of fs.FileInfo.
@@ -88,11 +97,11 @@ type staticFileInfo struct {
 }
 
 func (i staticFileInfo) Name() string       { return i.name }
-func (i staticFileInfo) Size() int64         { return i.size }
-func (i staticFileInfo) Mode() fs.FileMode   { return i.mode }
-func (i staticFileInfo) ModTime() time.Time  { return i.modTime }
-func (i staticFileInfo) IsDir() bool         { return i.isDir }
-func (i staticFileInfo) Sys() any            { return nil }
+func (i staticFileInfo) Size() int64        { return i.size }
+func (i staticFileInfo) Mode() fs.FileMode  { return i.mode }
+func (i staticFileInfo) ModTime() time.Time { return i.modTime }
+func (i staticFileInfo) IsDir() bool        { return i.isDir }
+func (i staticFileInfo) Sys() any           { return nil }
 
 func (w *wireInfo) toFileInfo() staticFileInfo {
 	return staticFileInfo{
@@ -122,6 +131,6 @@ type staticDirEntry struct {
 }
 
 func (e staticDirEntry) Name() string               { return e.name }
-func (e staticDirEntry) IsDir() bool                 { return e.isDir }
-func (e staticDirEntry) Type() fs.FileMode           { return e.typ }
-func (e staticDirEntry) Info() (fs.FileInfo, error)  { return nil, fs.ErrInvalid }
+func (e staticDirEntry) IsDir() bool                { return e.isDir }
+func (e staticDirEntry) Type() fs.FileMode          { return e.typ }
+func (e staticDirEntry) Info() (fs.FileInfo, error) { return nil, fs.ErrInvalid }

@@ -304,6 +304,17 @@ func IsInterrupt(err error) bool {
 		errors.Is(err, context.DeadlineExceeded)
 }
 
+// SyntheticExitError builds an error carrying the given exit code, recognized
+// by ExitCode/deriveCommandSemantics. Used by callers (e.g. the remote exec
+// path) that already have a numeric exit code but need it to flow through the
+// shared output-formatting helpers. Returns nil for code 0.
+func SyntheticExitError(code int) error {
+	if code == 0 {
+		return nil
+	}
+	return interp.ExitStatus(uint8(code))
+}
+
 // ExitCode extracts the exit code from an error
 func ExitCode(err error) int {
 	if err == nil {

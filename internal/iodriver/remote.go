@@ -11,7 +11,7 @@ import (
 
 // RemoteBackend is the client face of the IO protocol. It satisfies FileSystem
 // (and, in a later stage, the exec face) by issuing RPCs over a transport to a
-// daemon running `crush __remote-serve` on the target host. The transport is
+// daemon (crush-remote) running on the target host. The transport is
 // any reader/writer pair — an SSH stdio channel, a local subprocess pipe, or an
 // in-process pipe in tests — so the same client works across all of them.
 //
@@ -163,4 +163,18 @@ func (b *RemoteBackend) ReadDir(_ context.Context, path string) ([]fs.DirEntry, 
 		out = append(out, staticDirEntry{name: e.Name, isDir: e.IsDir, typ: e.Type})
 	}
 	return out, nil
+}
+
+// Exec runs a command to completion on the remote host. RemoteBackend is the
+// only Execer; the bash/rg tools type-assert for it and fall back to the local
+// shell when absent.
+func (b *RemoteBackend) Exec(_ context.Context, req ExecRequest) (ExecResult, error) {
+	resp, err := b.call(rpcRequest{Method: methodExec, Command: req.Command, Cwd: req.Cwd, Env: req.Env})
+	if err != nil {
+		return ExecResult{}, err
+	}
+	if resp.ErrKind != errKindNone {
+		return ExecResult{}, fmt.Errorf("exec: %s", resp.ErrMsg)
+	}
+	return ExecResult{Stdout: resp.Stdout, Stderr: resp.Stderr, ExitCode: resp.ExitCode}, nil
 }

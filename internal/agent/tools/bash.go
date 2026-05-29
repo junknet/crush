@@ -18,6 +18,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
+	"github.com/charmbracelet/crush/internal/iodriver"
 	"github.com/charmbracelet/crush/internal/permission"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -314,6 +315,15 @@ func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShel
 				}
 			}
 
+			// When a remote backend is attached to this session, run the command
+			// on the remote host (run-to-completion) instead of the local shell.
+			// Only RemoteBackend implements Execer; the local path is unchanged.
+			if backend := GetBackendFromContext(ctx); backend != nil {
+				if ex, ok := backend.(iodriver.Execer); ok {
+					return runRemoteBash(ctx, ex, backend, params, call, dataDir, sessionID)
+				}
+			}
+
 			// If explicitly requested as background, start immediately with detached context
 			if params.RunInBackground {
 				startTime := time.Now()
@@ -493,6 +503,55 @@ func NewBashTool(permissions permission.Service, bgManager *shell.BackgroundShel
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 		},
 	)
+}
+
+// runRemoteBash executes the command on the attached remote host (run to
+// completion) and formats the result identically to the local synchronous
+// path, so the model sees the same shape whether local or remote. Background /
+// auto-background and the monitor/job_* lifecycle are local-only for now; a
+// remote command always runs to completion here.
+func runRemoteBash(ctx context.Context, ex iodriver.Execer, backend iodriver.Backend, params BashParams, call fantasy.ToolCall, dataDir, sessionID string) (fantasy.ToolResponse, error) {
+	startTime := time.Now()
+	remoteCwd := cmp.Or(params.WorkingDir, backend.Root())
+
+	res, err := ex.Exec(ctx, iodriver.ExecRequest{Command: params.Command, Cwd: remoteCwd})
+	if err != nil {
+		return fantasy.ToolResponse{}, fmt.Errorf("remote exec on %s: %w", backend.Kind(), err)
+	}
+
+	stdout := string(res.Stdout)
+	stderr := string(res.Stderr)
+	execErr := shell.SyntheticExitError(res.ExitCode)
+	semantics := deriveCommandSemantics(params.Command, stdout, execErr)
+	stdoutBytes := len(stdout)
+	stderrBytes := len(stderr)
+	spillPath, spillBytes := maybeSpillOutput(dataDir, sessionID, call.ID, stdout, stderr)
+	formatted := formatOutput(stdout, stderr, execErr)
+	if spillPath != "" {
+		formatted += fmt.Sprintf("\n<output_spill bytes=\"%d\" path=\"%s\">Full transcript written to disk; use the view tool on this path for the complete output.</output_spill>", spillBytes, spillPath)
+	}
+	endTime := time.Now()
+
+	metadata := BashResponseMetadata{
+		StartTime:        startTime.UnixMilli(),
+		EndTime:          endTime.UnixMilli(),
+		DurationMs:       endTime.Sub(startTime).Milliseconds(),
+		Output:           formatted,
+		Description:      params.Description,
+		WorkingDirectory: remoteCwd,
+		ExitCode:         semantics.ExitCode,
+		Outcome:          string(semantics.Outcome),
+		StdoutBytes:      stdoutBytes,
+		StderrBytes:      stderrBytes,
+		SpillPath:        spillPath,
+		SpillBytes:       spillBytes,
+	}
+	appendBashCommandTrace(ctx, call.ID, params, metadata, formatted)
+	if formatted == "" {
+		return fantasy.WithResponseMetadata(fantasy.NewTextResponse(BashNoOutput), metadata), nil
+	}
+	formatted += fmt.Sprintf("\n\n<cwd>%s</cwd>", normalizeWorkingDir(remoteCwd))
+	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(formatted), metadata), nil
 }
 
 // formatOutput formats the output of a completed command with error handling

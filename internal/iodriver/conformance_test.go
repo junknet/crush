@@ -119,6 +119,38 @@ func TestRemoteMatchesLocal(t *testing.T) {
 	}
 }
 
+// TestRemoteExec exercises the run-to-completion exec face: stdout/stderr
+// separation, exit codes, and cwd honoring.
+func TestRemoteExec(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	rb := newPipedRemote(t, root)
+
+	res, err := rb.Exec(ctx, ExecRequest{Command: "printf out; printf err 1>&2; exit 3", Cwd: root})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if string(res.Stdout) != "out" {
+		t.Fatalf("stdout = %q, want %q", res.Stdout, "out")
+	}
+	if string(res.Stderr) != "err" {
+		t.Fatalf("stderr = %q, want %q", res.Stderr, "err")
+	}
+	if res.ExitCode != 3 {
+		t.Fatalf("exit = %d, want 3", res.ExitCode)
+	}
+
+	// cwd is honored.
+	res, err = rb.Exec(ctx, ExecRequest{Command: "pwd", Cwd: root})
+	if err != nil {
+		t.Fatalf("exec pwd: %v", err)
+	}
+	// macOS /tmp symlinks to /private/tmp; compare suffix to stay portable.
+	if got := string(bytes.TrimSpace(res.Stdout)); got != root && !bytes.HasSuffix([]byte(got), []byte(root)) {
+		t.Fatalf("pwd = %q, want %q", got, root)
+	}
+}
+
 // TestRemoteConcurrent ensures the request/response serialization holds under
 // concurrent callers (tools may issue parallel file ops).
 func TestRemoteConcurrent(t *testing.T) {

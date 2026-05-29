@@ -1,19 +1,22 @@
 package iodriver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
+	"syscall"
 )
 
 // Serve runs the daemon side of the IO protocol: it decodes requests from r,
 // executes them against the local filesystem (the daemon runs ON the target
 // host, so "local" there means the remote machine), and encodes responses to w.
 // It returns when r reaches EOF or a transport error occurs. This is what
-// `crush __remote-serve` invokes over stdin/stdout.
+// the crush-remote daemon runs over stdin/stdout.
 func Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	dec := json.NewDecoder(r)
 	enc := json.NewEncoder(w)
@@ -79,9 +82,45 @@ func handleRequest(_ context.Context, req rpcRequest) rpcResponse {
 				Type:  e.Type(),
 			})
 		}
+	case methodExec:
+		return handleExec(req, resp)
 	default:
 		resp.ErrKind = errKindOther
 		resp.ErrMsg = "iodriver: unknown method " + string(req.Method)
+	}
+	return resp
+}
+
+// handleExec runs one command to completion in a fresh shell on the daemon
+// host, capturing stdout and stderr separately and reporting the exit code.
+func handleExec(req rpcRequest, resp rpcResponse) rpcResponse {
+	cmd := exec.Command("/bin/sh", "-c", req.Command)
+	if req.Cwd != "" {
+		cmd.Dir = req.Cwd
+	}
+	if len(req.Env) > 0 {
+		cmd.Env = append(os.Environ(), req.Env...)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	// Own process group so a future cancel/signal can take down the whole
+	// subtree rather than leaking children on the remote host.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	err := cmd.Run()
+	resp.Stdout = stdout.Bytes()
+	resp.Stderr = stderr.Bytes()
+	switch e := err.(type) {
+	case nil:
+		resp.ExitCode = 0
+	case *exec.ExitError:
+		resp.ExitCode = e.ExitCode()
+	default:
+		// Command could not start (not found, bad cwd, ...).
+		resp.ExitCode = -1
+		resp.ErrKind = errKindOther
+		resp.ErrMsg = err.Error()
 	}
 	return resp
 }

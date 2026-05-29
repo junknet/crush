@@ -790,6 +790,8 @@ func allToolNames() []string {
 		"todos",
 		"view",
 		"write",
+		"remote_attach",
+		"remote_detach",
 		"list_mcp_resources",
 		"read_mcp_resource",
 	}

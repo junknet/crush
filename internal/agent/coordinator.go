@@ -28,12 +28,14 @@ import (
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agentsdk"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/eventbus"
 	"github.com/charmbracelet/crush/internal/filetracker"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/crush/internal/hooks"
+	"github.com/charmbracelet/crush/internal/iodriver"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/memdir"
@@ -170,6 +172,12 @@ type coordinator struct {
 
 	activeMu      sync.Mutex
 	activeCancels map[string]context.CancelCauseFunc
+
+	// activeBackends holds the per-session remote IO backend attached via
+	// remote_attach. When a session has an entry, its tools (bash/edit/view/
+	// write/rg) transparently operate on that remote host; absent an entry
+	// they run locally. Keyed by session ID.
+	activeBackends *csync.Map[string, iodriver.Backend]
 }
 
 func NewCoordinator(
@@ -210,6 +218,7 @@ func NewCoordinator(
 		remoteRegistry: remoteRegistry,
 		runtime:        agentruntime.NewSession(cfg.WorkingDir(), nil),
 		activeCancels:  make(map[string]context.CancelCauseFunc),
+		activeBackends: csync.NewMap[string, iodriver.Backend](),
 	}
 
 	agentName := config.AgentBrain
@@ -1089,6 +1098,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *agentprompt.Prompt
 			}
 			return mergeCallOptions(sessionID, m, providerCfg, boost)
 		},
+		Backends: c.activeBackends,
 	})
 
 	systemPrompt, err := prompt.Build(ctx, primary.Model.Provider(), primary.Model.Model(), c.cfg)
@@ -1184,6 +1194,8 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewSSHSessionListTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
 		tools.NewSSHUploadTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()),
 		tools.NewSSHDownloadTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()),
+		tools.NewRemoteAttachTool(c.activeBackends, c.cfg.Config().Options.DataDirectory),
+		tools.NewRemoteDetachTool(c.activeBackends),
 		tools.NewEvidenceBatchTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
 		tools.NewEvidenceGraphTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
 		tools.NewDagRunTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
@@ -1730,6 +1742,16 @@ func (c *coordinator) CancelAll() {
 }
 
 func (c *coordinator) UnmountAllRemotes(ctx context.Context) int {
+	// Close every attached remote IO backend so its daemon/SSH channel does not
+	// outlive the process, then tear down any legacy sshfs mounts.
+	if c.activeBackends != nil {
+		for sessionID, backend := range c.activeBackends.Seq2() {
+			if backend != nil {
+				_ = backend.Close()
+			}
+			c.activeBackends.Del(sessionID)
+		}
+	}
 	return tools.UnmountAll(ctx, c.remoteRegistry)
 }
 

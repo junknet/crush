@@ -84,7 +84,14 @@ func wrapToolsWithTimeout(tools []fantasy.AgentTool, timeout time.Duration) []fa
 	out := make([]fantasy.AgentTool, len(tools))
 	for i, tool := range tools {
 		name := tool.Info().Name
-		if name == AgentToolName || name == "agentic_fetch" || name == "agent_tool" || name == "agentic_fetch_tool" {
+		// remote_attach deploys the daemon (an ~80MB scp on first use) and
+		// opens an SSH channel; that legitimately exceeds the quick-tool
+		// timeout, so it (and its cheap sibling detach) run unwrapped, like the
+		// delegation tools. The ctx still cancels on session cancel.
+		// "remote_attach"/"remote_detach" are tools.RemoteAttach/DetachToolName;
+		// the literal is used because the `tools` param shadows the package here.
+		if name == AgentToolName || name == "agentic_fetch" || name == "agent_tool" || name == "agentic_fetch_tool" ||
+			name == "remote_attach" || name == "remote_detach" {
 			out[i] = tool
 		} else {
 			out[i] = newTimeoutTool(tool, timeout)

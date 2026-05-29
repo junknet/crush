@@ -50,6 +50,7 @@ import (
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/eventbus"
 	"github.com/charmbracelet/crush/internal/hooks"
+	"github.com/charmbracelet/crush/internal/iodriver"
 	crushlog "github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/memdir"
 	"github.com/charmbracelet/crush/internal/message"
@@ -212,6 +213,12 @@ type sessionAgent struct {
 	// not "stop this turn, then keep going with whatever was queued".
 	cancelGen    *csync.Map[string, uint64]
 	retryBackoff func(attempt int) time.Duration
+
+	// backends maps session ID → attached remote IO backend (nil map or
+	// missing entry → local). Shared with the coordinator and the
+	// remote_attach/detach tools so an attach in one tool call transparently
+	// redirects every subsequent file/exec tool in the same session.
+	backends *csync.Map[string, iodriver.Backend]
 }
 
 type SessionAgentOptions struct {
@@ -238,6 +245,8 @@ type SessionAgentOptions struct {
 	HookRunner       *hooks.Runner
 	MergeCallOptions func(sessionID string, model Model, boost bool) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64)
 	RetryBackoff     func(attempt int) time.Duration
+	// Backends is the shared per-session remote IO backend registry.
+	Backends *csync.Map[string, iodriver.Backend]
 }
 
 func NewSessionAgent(
@@ -271,6 +280,7 @@ func NewSessionAgent(
 		activeRequests:       csync.NewMap[string, context.CancelCauseFunc](),
 		cancelGen:            csync.NewMap[string, uint64](),
 		retryBackoff:         backoff,
+		backends:             opts.Backends,
 	}
 }
 
@@ -381,6 +391,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Add the session to the context.
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
 	ctx = tools.WithTraceContext(ctx, call.TraceRuntime, call.TaskNodeID, call.TaskParentID, call.TaskProfile, call.ProviderID, call.ProviderType, call.ModelID)
+	// Redirect every file/exec tool in this turn to the session's attached
+	// remote backend, if any. Absent an attachment the helpers fall back to
+	// local os.*/shell, so the default path is unchanged.
+	if a.backends != nil {
+		if backend, ok := a.backends.Get(call.SessionID); ok && backend != nil {
+			ctx = tools.WithBackend(ctx, backend)
+		}
+	}
 
 	// Establish a turn-level trace id that threads through every observability
 	// surface (slog, provider HTTP dumps, IPC dumps). session_id is the join

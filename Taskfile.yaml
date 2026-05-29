@@ -53,6 +53,7 @@ tasks:
     vars:
       PROD_LDFLAGS: '-ldflags="-s -w{{if .VERSION}} -X github.com/charmbracelet/crush/internal/version.Version={{.VERSION}}{{end}}"'
     cmds:
+      - ./scripts/build_remote_daemon.sh
       - mkdir -p "{{.LOCAL_BIN_DIR}}"
       - mkdir -p "{{.CACHE_DIR}}/crush-prod"
       - rm -f "{{.CRUSH_BIN}}.tmp"
