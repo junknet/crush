@@ -1224,18 +1224,11 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		}
 	}
 
-	// Add _tool aliases for allowed standard tools to support clients/mocks using _tool suffixes (e.g. bash_tool).
-	var aliasTools []fantasy.AgentTool
-	for _, tool := range filteredTools {
-		name := tool.Info().Name
-		if !strings.HasSuffix(name, "_tool") {
-			aliasTools = append(aliasTools, &aliasTool{
-				AgentTool: tool,
-				name:      name + "_tool",
-			})
-		}
-	}
-	filteredTools = append(filteredTools, aliasTools...)
+	// No `_tool` suffix aliases are advertised: doing so duplicated every
+	// native tool's full JSON schema in the tool list for zero benefit. No
+	// provider or mock invokes tools by the `_tool` name (mocks emit bare
+	// names; fantasy dispatch is exact-match). Defensive `_tool` handling in
+	// timeout_tool.go / ui normalizeToolName stays as harmless belt-and-suspenders.
 
 	// MCP tools are *deferred*: the model sees a stub list (name +
 	// description only) and must call tool_search to load JSON schemas

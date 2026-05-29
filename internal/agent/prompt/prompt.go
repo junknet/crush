@@ -234,7 +234,14 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		MemoryIndex:   memoryIndex,
 	}
 
-	data.UserConstitution = loadUserConstitution()
+	// explore is a read-only fact-retrieval agent: it never writes code or
+	// designs structure, and its parent (brain) already enforces the
+	// constitution. Injecting the full ~17KB constitution would dwarf its
+	// own ~2KB prompt for no behavioral gain. plan/worker/auditor still get
+	// it because they produce or judge code.
+	if p.name != "explore" {
+		data.UserConstitution = loadUserConstitution()
+	}
 
 	for _, contextFiles := range files {
 		data.ContextFiles = append(data.ContextFiles, contextFiles...)
