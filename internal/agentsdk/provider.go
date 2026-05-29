@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"strings"
 
 	"charm.land/fantasy"
 	agentsdkauth "github.com/agent-sdk/auth"
@@ -251,6 +252,15 @@ func toSDKContent(parts []fantasy.MessagePart) []agentsdkschema.ContentPart {
 			})
 		case fantasy.ToolResultPart:
 			content = append(content, agentsdkschema.ContentPart{Kind: agentsdkschema.ContentKindText, Text: toolResultText(p.Output)})
+			if media, ok := p.Output.(fantasy.ToolResultOutputContentMedia); ok && strings.HasPrefix(media.MediaType, "image/") {
+				content = append(content, agentsdkschema.ContentPart{
+					Kind: agentsdkschema.ContentKindImage,
+					Image: &agentsdkschema.Image{
+						Data:     media.Data,
+						MimeType: media.MediaType,
+					},
+				})
+			}
 		}
 	}
 	return content
@@ -307,7 +317,7 @@ func toFantasyResponse(resp *agentsdkschema.ChatResponse) *fantasy.Response {
 
 	return &fantasy.Response{
 		Content:      content,
-		FinishReason: fantasy.FinishReasonStop,
+		FinishReason: finishReasonFromSDK(resp),
 		Usage:        toFantasyUsage(resp.Usage),
 	}
 }
@@ -342,9 +352,16 @@ func sdkResponseStream(resp *agentsdkschema.ChatResponse) fantasy.StreamResponse
 			Type:         fantasy.StreamPartTypeFinish,
 			ID:           resp.ID,
 			Usage:        toFantasyUsage(resp.Usage),
-			FinishReason: fantasy.FinishReasonStop,
+			FinishReason: finishReasonFromSDK(resp),
 		})
 	}
+}
+
+func finishReasonFromSDK(resp *agentsdkschema.ChatResponse) fantasy.FinishReason {
+	if len(resp.Message.ToolCalls) > 0 {
+		return fantasy.FinishReasonToolCalls
+	}
+	return fantasy.FinishReasonStop
 }
 
 func toFantasyUsage(usage agentsdkschema.Usage) fantasy.Usage {
@@ -379,8 +396,7 @@ func toolResultText(output fantasy.ToolResultOutputContent) string {
 		if o.Text != "" {
 			return o.Text
 		}
-		b, _ := json.Marshal(o)
-		return string(b)
+		return fmt.Sprintf("The tool returned %s media content; see the attached media part.", o.MediaType)
 	default:
 		b, _ := json.Marshal(o)
 		return string(b)

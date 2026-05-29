@@ -321,11 +321,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 		systemPrompt += "\n\n<mcp-instructions>\n" + s + "\n</mcp-instructions>"
 	}
 
-	if len(agentTools) > 0 {
-		// Add Anthropic caching to the last tool.
-		agentTools[len(agentTools)-1].SetProviderOptions(a.getCacheControlOptions())
-	}
-
 	if strings.Contains(call.SessionID, "-mem-extract-") {
 		memoryDir := filepath.Join(a.dataDir, "projects", memdir.WorkspaceSlug(a.workingDir), "memory")
 		wrapped := make([]fantasy.AgentTool, len(agentTools))
@@ -2980,6 +2975,8 @@ func isDefinitiveUpstreamFailure(err error, providerID string) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "rate limit") ||
 		strings.Contains(msg, "first-token timeout") ||
+		strings.Contains(msg, "convert_request_failed") ||
+		strings.Contains(msg, "not implemented") ||
 		strings.Contains(msg, "quota exceeded")
 }
 

@@ -217,6 +217,8 @@ func NewToolMessageItem(
 		item = NewJobKillToolMessageItem(sty, toolCall, result, canceled)
 	case tools.MonitorToolName:
 		item = NewMonitorToolMessageItem(sty, toolCall, result, canceled)
+	case tools.RunToolName:
+		item = NewRunToolMessageItem(sty, toolCall, result, canceled)
 	case tools.ViewToolName:
 		item = NewViewToolMessageItem(sty, toolCall, result, canceled)
 	case tools.WriteToolName:
@@ -1687,6 +1689,8 @@ func prettifyToolName(name string) string {
 		return tools.JobOutputToolName
 	case tools.JobKillToolName:
 		return tools.JobKillToolName
+	case tools.RunToolName:
+		return tools.RunToolName
 	case tools.DownloadToolName:
 		return tools.DownloadToolName
 	case tools.EditToolName:

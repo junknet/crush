@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -179,7 +180,7 @@ func (s *AgentScheduler) dispatchNode(ctx context.Context, node *TaskNode, worke
 			s.publishFinished(node, true, "", node.LastOutput)
 			return nil
 		}
-		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isNonRetryableTaskError(err) {
 			break
 		}
 		if attempt >= maxAttempts {
@@ -202,6 +203,17 @@ func (s *AgentScheduler) dispatchNode(ctx context.Context, node *TaskNode, worke
 	}
 	s.publishFailed(node, err)
 	return err
+}
+
+func isNonRetryableTaskError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "convert_request_failed") ||
+		strings.Contains(msg, "not implemented") ||
+		strings.Contains(msg, "invalid_request_error") ||
+		strings.Contains(msg, "unsupported")
 }
 
 // retryBackoff returns the wait duration before the (attempt+1)-th retry.

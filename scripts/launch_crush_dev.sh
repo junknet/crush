@@ -30,7 +30,7 @@ go_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/crush-go-build"
 
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/crush-dev"
 mkdir -p "$state_dir" "$cache_dir" "$go_tmp_dir" "$go_cache_dir"
-ts=$(date +%Y%m%d-%H%M%S)
+ts=$(date +%Y%m%d-%H%M%S-%N)-$$
 trace_file="$state_dir/trace-$ts.jsonl"
 http_dump_dir="$state_dir/http-$ts"
 
