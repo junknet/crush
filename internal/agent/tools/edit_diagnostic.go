@@ -66,10 +66,54 @@ func notFoundDiagnostic(content, oldString, pathHint string) string {
 	if pathHint != "" {
 		hint = " in " + pathHint
 	}
+
+	// Precise leading-indentation callout: when the matched file line has the
+	// SAME content but DIFFERENT leading whitespace (the tab-vs-space class that
+	// real-trace analysis found dominating edit misses), name both indents
+	// explicitly rather than leaving the model to spot it in the visualization.
+	specific := ""
+	fileLine := lines[lineNumber-1]
+	if fi, si := leadingWhitespace(fileLine), leadingWhitespace(firstLine); fi != si && strings.TrimSpace(fileLine) == trimmed {
+		specific = fmt.Sprintf(
+			"\nMost likely cause: the line content matches but the LEADING INDENTATION differs — the file uses %s, your old_string uses %s. Copy the file's exact leading whitespace.\n",
+			describeIndent(fi), describeIndent(si),
+		)
+	}
+
 	return fmt.Sprintf(
-		"%s\n\nDiagnostic: a similar line exists%s near line %d. Common causes: indentation/whitespace mismatch, tab vs space, or trailing whitespace. File excerpt (· = space, → = tab, ¶ = end of line):\n\n%s\nCopy the exact bytes between · markers from the file (or re-read with `view`) before retrying.",
-		baseMsg, hint, lineNumber, excerpt.String(),
+		"%s\n\nDiagnostic: a similar line exists%s near line %d. Common causes: indentation/whitespace mismatch, tab vs space, or trailing whitespace.%s File excerpt (· = space, → = tab, ¶ = end of line):\n\n%s\nCopy the exact bytes between · markers from the file (or re-read with `view`) before retrying.",
+		baseMsg, hint, lineNumber, specific, excerpt.String(),
 	)
+}
+
+// leadingWhitespace returns the run of spaces/tabs at the start of s.
+func leadingWhitespace(s string) string {
+	return s[:len(s)-len(strings.TrimLeft(s, " \t"))]
+}
+
+// describeIndent renders a leading-whitespace run as a human count, e.g.
+// "1 tab", "4 spaces", "1 tab + 2 spaces", "no indentation".
+func describeIndent(ws string) string {
+	if ws == "" {
+		return "no indentation"
+	}
+	tabs := strings.Count(ws, "\t")
+	spaces := strings.Count(ws, " ")
+	var parts []string
+	if tabs > 0 {
+		parts = append(parts, fmt.Sprintf("%d tab%s", tabs, plural(tabs)))
+	}
+	if spaces > 0 {
+		parts = append(parts, fmt.Sprintf("%d space%s", spaces, plural(spaces)))
+	}
+	return strings.Join(parts, " + ")
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // multipleMatchesDiagnostic explains how to disambiguate an ambiguous

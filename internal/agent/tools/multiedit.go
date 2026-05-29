@@ -282,10 +282,19 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 
 	// Check if content actually changed
 	if oldContent == currentContent {
-		// If we have failed edits, report them
+		// If we have failed edits, report them WITH each edit's diagnostic so
+		// the retry is targeted. Real-trace analysis found "all N edit(s)
+		// failed" was the top multiedit failure (234×) but the per-edit fuzzy
+		// near-match diagnostics were buried in metadata the model never reads,
+		// forcing a blind re-do of the whole batch. Surface them inline.
 		if len(failedEdits) > 0 {
+			var b strings.Builder
+			fmt.Fprintf(&b, "no changes made — all %d edit(s) failed:\n", len(failedEdits))
+			for _, fe := range failedEdits {
+				fmt.Fprintf(&b, "\n[edit %d] %s\n", fe.Index, fe.Error)
+			}
 			return fantasy.WithResponseMetadata(
-				fantasy.NewTextErrorResponse(fmt.Sprintf("no changes made - all %d edit(s) failed", len(failedEdits))),
+				fantasy.NewTextErrorResponse(b.String()),
 				MultiEditResponseMetadata{
 					EditsApplied: 0,
 					EditsFailed:  failedEdits,

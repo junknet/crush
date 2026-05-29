@@ -56,3 +56,18 @@ func TestVisualizeWhitespace_OnlyLeadingMarkers(t *testing.T) {
 		t.Errorf("unexpected visualisation: %q", got)
 	}
 }
+
+// TestNotFoundDiagnostic_LeadingIndentCallout asserts the precise tab-vs-space
+// indentation callout fires when content matches but leading indentation
+// differs — the dominant real-trace edit-miss class.
+func TestNotFoundDiagnostic_LeadingIndentCallout(t *testing.T) {
+	content := "func x() {\n\treturn 42\n}\n" // file uses a TAB
+	oldString := "    return 42"              // model used 4 SPACES
+	msg := notFoundDiagnostic(content, oldString, "x.go")
+	if !strings.Contains(msg, "LEADING INDENTATION differs") {
+		t.Fatalf("expected leading-indent callout, got:\n%s", msg)
+	}
+	if !strings.Contains(msg, "1 tab") || !strings.Contains(msg, "4 spaces") {
+		t.Fatalf("expected 'file uses 1 tab' + 'old_string uses 4 spaces', got:\n%s", msg)
+	}
+}
