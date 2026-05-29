@@ -5,8 +5,7 @@
 # approach printed its own source on mvdan due to literal `\n` mishandling).
 #
 # Goals:
-#   1. Compose the env crush needs (mock keys, disable-defaults flags) without
-#      polluting the parent shell.
+#   1. Compose the env crush needs without polluting the parent shell.
 #   2. Drive the cached prod binary at $XDG_CACHE_HOME/crush-prod/crush so the
 #      launcher and `task build` stay in sync.
 #   3. Smart auto-rebuild: if any source under $CRUSH_DEV_REPO is newer than
@@ -36,14 +35,6 @@ cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/crush-prod"
 binary_path="$cache_dir/crush"
 go_tmp_dir="${XDG_CACHE_HOME:-$HOME/.cache}/crush-go-tmp"
 go_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/crush-go-build"
-
-mock_base="${CRUSH_MOCK_LLM_BASE:-${CRUSH_MOCK_BASE:-http://127.0.0.1:43917}}"
-mock_key="${CRUSH_MOCK_API_KEY:-${CRUSH_MOCK_KEY:-}}"
-
-if [ -z "$mock_key" ]; then
-  echo "Missing CRUSH_MOCK_API_KEY or CRUSH_MOCK_KEY." >&2
-  exit 1
-fi
 
 # Smart auto-rebuild: only when a tracked source is newer than the cached
 # binary. rg --files honours .gitignore so we do not chase generated
@@ -100,10 +91,6 @@ exec env \
   CRUSH_DISABLE_METRICS=1 \
   CRUSH_LAUNCHER_NAME=crush \
   CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 \
-  CRUSH_DISABLE_DEFAULT_PROVIDERS=1 \
-  CRUSH_MOCK_LLM_BASE="$mock_base" \
-  CRUSH_MOCK_API_KEY="$mock_key" \
-  CRUSH_MOCK_KEY="$mock_key" \
   WECODE_API_KEY="$wecode_key" \
   CRUSH_RELAY_NATS_URL="$relay_nats_url" \
   CRUSH_RELAY_TOKEN="$relay_token" \

@@ -21,13 +21,6 @@ zsh -lic '
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/crush-test"
   binary_path="$cache_dir/crush"
 
-  mock_base="${CRUSH_MOCK_LLM_BASE:-${CRUSH_MOCK_BASE:-http://127.0.0.1:43917}}"
-  mock_key="${CRUSH_MOCK_API_KEY:-${CRUSH_MOCK_KEY:-}}"
-
-  if [[ -z "$mock_key" ]]; then
-    echo "Missing CRUSH_MOCK_API_KEY or CRUSH_MOCK_KEY." >&2
-    exit 1
-  fi
   if [[ ! -d "$repo_root" ]]; then
     echo "Missing Crush repo: $repo_root. Set CRUSH_TEST_REPO." >&2
     exit 1
@@ -50,10 +43,6 @@ zsh -lic '
   exec env \
     CRUSH_DISABLE_METRICS=1 \
     CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1 \
-    CRUSH_DISABLE_DEFAULT_PROVIDERS=1 \
-    CRUSH_MOCK_LLM_BASE="$mock_base" \
-    CRUSH_MOCK_API_KEY="$mock_key" \
-    CRUSH_MOCK_KEY="$mock_key" \
     WECODE_API_KEY="$wecode_key" \
     CRUSH_RELAY_NATS_URL="$relay_nats_url" \
     CRUSH_RELAY_TOKEN="$relay_token" \
