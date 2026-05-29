@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/iodriver"
 	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 )
@@ -88,17 +89,34 @@ func GetModelNameFromContext(ctx context.Context) string {
 	return getContextValue(ctx, ModelNameContextKey, "")
 }
 
-// WithBackend attaches an active IO backend to the context so file/exec helpers
-// route through it. When a session has no backend attached, callers omit this
-// and the helpers fall back to direct local os.* behavior.
-func WithBackend(ctx context.Context, backend iodriver.Backend) context.Context {
-	return context.WithValue(ctx, BackendContextKey, backend)
+// WithBackendRegistry attaches the shared session→backend registry to the
+// context. The registry REFERENCE is stable for the turn, but its CONTENTS are
+// live: this is what lets remote_attach take effect on the very next tool call
+// within the same turn. Injecting a resolved backend instead would snapshot
+// "not attached" at turn start and silently run later tools locally even after
+// an in-turn attach.
+func WithBackendRegistry(ctx context.Context, registry *csync.Map[string, iodriver.Backend]) context.Context {
+	return context.WithValue(ctx, BackendContextKey, registry)
 }
 
-// GetBackendFromContext returns the active IO backend, or nil when none is
-// attached (the local-default path).
+// GetBackendFromContext resolves the active IO backend for the current session
+// live from the registry, or nil when none is attached (the local-default
+// path). It reads the registry per call (not a turn snapshot) so an attach/
+// detach earlier in the same turn is honored by subsequent file/exec tools.
 func GetBackendFromContext(ctx context.Context) iodriver.Backend {
-	return getContextValue[iodriver.Backend](ctx, BackendContextKey, nil)
+	registry := getContextValue[*csync.Map[string, iodriver.Backend]](ctx, BackendContextKey, nil)
+	if registry == nil {
+		return nil
+	}
+	sessionID := GetSessionFromContext(ctx)
+	if sessionID == "" {
+		return nil
+	}
+	backend, ok := registry.Get(sessionID)
+	if !ok {
+		return nil
+	}
+	return backend
 }
 
 // WithTraceContext attaches runtime trace metadata to tool calls.

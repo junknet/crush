@@ -7,9 +7,16 @@ import "context"
 // does not persist to the next request — matching how the local bash tool runs
 // each invocation in its working dir.
 type ExecRequest struct {
+	// Command runs through `sh -c` (shell features: pipes, redirection). Used
+	// by the bash tool.
 	Command string
-	Cwd     string
-	Env     []string
+	// Argv, when non-empty, runs the program directly WITHOUT a shell. Used by
+	// structured tools (grep/find) so a pattern with shell metacharacters needs
+	// no quoting and cannot be reinterpreted by the shell. Takes precedence
+	// over Command.
+	Argv []string
+	Cwd  string
+	Env  []string
 }
 
 // ExecResult is the outcome of a finished remote command.

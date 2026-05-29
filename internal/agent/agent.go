@@ -391,13 +391,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 	// Add the session to the context.
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, call.SessionID)
 	ctx = tools.WithTraceContext(ctx, call.TraceRuntime, call.TaskNodeID, call.TaskParentID, call.TaskProfile, call.ProviderID, call.ProviderType, call.ModelID)
-	// Redirect every file/exec tool in this turn to the session's attached
-	// remote backend, if any. Absent an attachment the helpers fall back to
-	// local os.*/shell, so the default path is unchanged.
+	// Expose the shared session→backend registry so file/exec tools resolve the
+	// attached remote backend live, per call. The registry (not a resolved
+	// backend) is injected so a remote_attach EARLIER IN THIS SAME TURN takes
+	// effect for subsequent grep/bash/edit calls; a turn-start snapshot would
+	// run them locally despite the attach.
 	if a.backends != nil {
-		if backend, ok := a.backends.Get(call.SessionID); ok && backend != nil {
-			ctx = tools.WithBackend(ctx, backend)
-		}
+		ctx = tools.WithBackendRegistry(ctx, a.backends)
 	}
 
 	// Establish a turn-level trace id that threads through every observability

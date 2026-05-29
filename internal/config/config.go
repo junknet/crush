@@ -770,7 +770,8 @@ func allToolNames() []string {
 		"multiedit",
 		"fetch",
 		"agentic_fetch",
-		"rg",
+		"grep",
+		"find",
 		"ls",
 		"run",
 		"monitor",
@@ -811,7 +812,7 @@ func resolveExploreTools(tools []string) []string {
 	// constrains it to read-only inspection commands. Direct mutators
 	// (edit/multiedit/write/download/todos) are excluded.
 	exploreTools := []string{
-		"bash", "rg", "ls", "sourcegraph", "view", "code_triage", "bug_triage", "evidence_batch", "evidence_graph",
+		"bash", "grep", "find", "ls", "sourcegraph", "view", "code_triage", "bug_triage", "evidence_batch", "evidence_graph",
 		"list_mcp_resources", "read_mcp_resource",
 	}
 	return filterSlice(tools, exploreTools, true)
@@ -860,7 +861,7 @@ func (c *Config) SetupAgents() {
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: allowedTools,
 			ParallelTools: []string{
-				"rg", "view", "ls", "bash", "nu", "sourcegraph",
+				"grep", "find", "view", "ls", "bash", "nu", "sourcegraph",
 				"code_triage", "bug_triage", "evidence_batch", "evidence_graph",
 				"agent",
 			},
@@ -878,7 +879,7 @@ func (c *Config) SetupAgents() {
 			// a half-finished "going to look at X" line that looked like a
 			// truncated return to the parent.
 			MaxTurns:      16,
-			ParallelTools: []string{"rg", "view", "ls", "bash", "sourcegraph", "code_triage", "bug_triage", "evidence_batch", "evidence_graph"},
+			ParallelTools: []string{"grep", "find", "view", "ls", "bash", "sourcegraph", "code_triage", "bug_triage", "evidence_batch", "evidence_graph"},
 		},
 		AgentAuditor: {
 			ID:           AgentAuditor,

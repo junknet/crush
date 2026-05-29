@@ -52,8 +52,10 @@ type rpcRequest struct {
 	Data []byte `json:"data,omitempty"`
 	// Mode is the perm bits for write_file / mkdir.
 	Mode uint32 `json:"mode,omitempty"`
-	// Command/Cwd/Env carry an exec request (run-to-completion).
+	// Command/Argv/Cwd/Env carry an exec request (run-to-completion). Argv, when
+	// set, runs without a shell and takes precedence over Command.
 	Command string   `json:"command,omitempty"`
+	Argv    []string `json:"argv,omitempty"`
 	Cwd     string   `json:"cwd,omitempty"`
 	Env     []string `json:"env,omitempty"`
 }

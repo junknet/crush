@@ -169,7 +169,7 @@ func (b *RemoteBackend) ReadDir(_ context.Context, path string) ([]fs.DirEntry, 
 // only Execer; the bash/rg tools type-assert for it and fall back to the local
 // shell when absent.
 func (b *RemoteBackend) Exec(_ context.Context, req ExecRequest) (ExecResult, error) {
-	resp, err := b.call(rpcRequest{Method: methodExec, Command: req.Command, Cwd: req.Cwd, Env: req.Env})
+	resp, err := b.call(rpcRequest{Method: methodExec, Command: req.Command, Argv: req.Argv, Cwd: req.Cwd, Env: req.Env})
 	if err != nil {
 		return ExecResult{}, err
 	}

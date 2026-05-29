@@ -94,7 +94,14 @@ func handleRequest(_ context.Context, req rpcRequest) rpcResponse {
 // handleExec runs one command to completion in a fresh shell on the daemon
 // host, capturing stdout and stderr separately and reporting the exit code.
 func handleExec(req rpcRequest, resp rpcResponse) rpcResponse {
-	cmd := exec.Command("/bin/sh", "-c", req.Command)
+	var cmd *exec.Cmd
+	if len(req.Argv) > 0 {
+		// Direct exec, no shell: structured tools (grep/find) pass argv so a
+		// pattern with shell metacharacters is never reinterpreted.
+		cmd = exec.Command(req.Argv[0], req.Argv[1:]...)
+	} else {
+		cmd = exec.Command("/bin/sh", "-c", req.Command)
+	}
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
