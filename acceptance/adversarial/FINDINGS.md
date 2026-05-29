@@ -47,3 +47,38 @@
 - fixture 拷贝必须排除 `mobile/`(9.2G)/`build`/`node_modules`/`*.so`（撞 tmpfs ENOSPC）。
 - **远程场景不能用 worktree subagent 测**：subagent 沙箱/并发连接风暴会触发 ECS 限流，假阴性。远程必须直接上下文跑。
 - analyzer 顶层并发指标看不到 evidence_batch/code_triage 的内部并发——批量工具的真并行被低估。
+
+---
+
+# 真实语料分析 (997 crush-dev traces, 05-21→05-29, 37G)
+
+> 用 aggregate_corpus.py 单遍流式扫描 crush 自身迭代期积累的全息 trace。
+> **这是比合成场景更权威的真实行为分布**——并直接纠正了上面合成测试的一个错误结论。
+
+## 🔴 重大纠正：explore fan-out 是 work 的
+
+合成 S3/S3'/S3'' 全 0 spawn，让我倾向"explore 委派休眠/死路"。**真实语料推翻**：
+- `AGENT_SUBAGENT_SPAWNS_TOTAL: 88`（22,110 工具调用中），22 个 session 用子代理。
+- `global_max_concurrent_tools: 13`（真达到 13 路并发），37 个 session >1 并发。
+- **结论：explore fan-out + 并发在真实使用中正常触发**。我那 3 个合成测试是**假阴性**（brief 形态/单次模型行为不代表真实分布）。
+- **方法论教训**：合成 eval 会假阴性；观测真实 trace 语料才是 ground truth。差点据此"修"一个没坏的东西。
+
+## 真实效率痛点（合成场景没暴露的）
+
+| 现象 | 数据 | 性质 |
+|------|------|------|
+| edit/multiedit 首试不中 | edit 23%、multiedit 19% "old_string not found" | **重试税非失败**：29 个失败 session **28 个恢复**、0 硬失败。crush 模糊诊断支撑恢复。浪费~20% edit 尝试=多花 turn/token |
+| 60s 工具超时 | bash 166×、job_output 140×、view 51×、multiedit 40× | timeout 偏紧 / 长任务没转后台。job_output 阻塞到超时是 UX 疮——应返回当前 buffer + "仍运行"而非阻塞 60s 报错 |
+| agentic_fetch 失败 | 43% (18/41) | web 抓取真不稳 |
+| 上下文失控 | 3 session 达 240-338MB | 尾案；auto-summarize(63 次触发)兜底但偏晚 |
+
+## 真实可靠的（别动）
+
+bash 2% / view 2% / rg_tool 1% / evidence_batch 4% 失败——主线工具扎实。配合 5 个合成 PASS，核心面稳。
+
+## 修正后的自愈优先级
+
+1. ~~explore fan-out~~ —— **无需修，已证 work**（纠正前结论）。
+2. **job_output 阻塞超时** → 改为返回当前输出+运行态，不阻塞 60s。真实高频(140×)、有界、可修。
+3. **edit 重试税** → 低 ROI（已恢复），可选：更强 old_string 归一化降首试 miss。
+4. **agentic_fetch 43% 失败** → 查根因。
