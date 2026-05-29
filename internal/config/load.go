@@ -351,7 +351,8 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 		}
 		isAntigravity := providerConfig.Type == antigravity.Name
 		isAnthropicOAuth := providerConfig.Type == anthropicoauth.Name
-		noAuthRequired := isAntigravity || isAnthropicOAuth
+		isLocalCodexOAuth := providerConfig.Type == catwalk.TypeOpenAI && providerConfig.APIKey == "" && providerConfig.BaseURL == "" && hasLocalCodexAuth()
+		noAuthRequired := isAntigravity || isAnthropicOAuth || isLocalCodexOAuth
 		if !slices.Contains(catwalk.KnownProviderTypes(), providerConfig.Type) && providerConfig.Type != hyper.Name && !noAuthRequired {
 			slog.Warn("Skipping custom provider due to unsupported provider type", "provider", id)
 			c.Providers.Del(id)
@@ -363,8 +364,8 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 			c.Providers.Del(id)
 			continue
 		}
-		// Antigravity uses local OAuth credentials (keyring + ~/.gemini/oauth_creds.json),
-		// so it neither needs an API key nor a base URL.
+		// Antigravity, Anthropic OAuth, and Codex local OAuth use credentials
+		// managed by their official CLIs, so they do not need API keys here.
 		if !noAuthRequired {
 			if providerConfig.APIKey == "" {
 				slog.Warn("Provider is missing API key, this might be OK for local providers", "provider", id)
@@ -810,6 +811,23 @@ func normalizeLoadedConfig(config *Config) {
 		providers[id] = provider
 	}
 	config.Providers.Reset(providers)
+}
+
+func hasLocalCodexAuth() bool {
+	data, err := os.ReadFile(filepath.Join(home.Dir(), ".codex", "auth.json"))
+	if err != nil {
+		return false
+	}
+	var auth struct {
+		OpenAIAPIKey string `json:"OPENAI_API_KEY"`
+		Tokens       *struct {
+			AccessToken string `json:"access_token"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(data, &auth); err != nil {
+		return false
+	}
+	return auth.OpenAIAPIKey != "" || (auth.Tokens != nil && auth.Tokens.AccessToken != "")
 }
 
 func deduplicateProviderModels(models []catwalk.Model) []catwalk.Model {
