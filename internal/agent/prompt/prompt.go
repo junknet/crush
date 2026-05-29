@@ -41,8 +41,8 @@ type PromptDat struct {
 	// MemoryIndex is the rendered <auto_memory>...</auto_memory> block
 	// from the per-workspace MEMORY.md index. Empty when no index exists
 	// or the index was emptied to its header comment.
-	MemoryIndex        string
-	ClaudeGlobalPrompt string
+	MemoryIndex      string
+	UserConstitution string
 }
 
 type ContextFile struct {
@@ -234,7 +234,7 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		MemoryIndex:   memoryIndex,
 	}
 
-	data.ClaudeGlobalPrompt = loadClaudeGlobalPrompt()
+	data.UserConstitution = loadUserConstitution()
 
 	for _, contextFiles := range files {
 		data.ContextFiles = append(data.ContextFiles, contextFiles...)
@@ -242,33 +242,17 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	return data, nil
 }
 
-func loadClaudeGlobalPrompt() string {
-	claudeDir := filepath.Join(home.Dir(), ".claude")
-	paths := []string{
-		filepath.Join(claudeDir, "global_prompt.md"),
-		filepath.Join(claudeDir, "CLAUDE.md"),
+func loadUserConstitution() string {
+	path := filepath.Join(home.Dir(), ".claude", "CLAUDE.md")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return ""
 	}
-	blocks := make([]string, 0, len(paths))
-	seen := make(map[string]struct{}, len(paths))
-	for _, path := range paths {
-		abs, err := filepath.Abs(path)
-		if err == nil {
-			if _, ok := seen[abs]; ok {
-				continue
-			}
-			seen[abs] = struct{}{}
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		text := strings.TrimSpace(string(content))
-		if text == "" {
-			continue
-		}
-		blocks = append(blocks, fmt.Sprintf("<file path=%q>\n%s\n</file>", filepath.ToSlash(path), text))
+	text := strings.TrimSpace(string(content))
+	if text == "" {
+		return ""
 	}
-	return strings.Join(blocks, "\n\n")
+	return fmt.Sprintf("<file path=%q>\n%s\n</file>", filepath.ToSlash(path), text)
 }
 
 // DynamicNow is the time source used by DynamicPrefix; tests may replace it.

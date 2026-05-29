@@ -11,29 +11,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestClaudeGlobalPromptDiscovery(t *testing.T) {
-	// Create a mock home directory
+func TestUserConstitutionIgnoresLegacyGlobalPrompt(t *testing.T) {
 	mockHome, err := os.MkdirTemp("", "crush-test-home-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(mockHome)
 
-	// Override home.Dir()
 	home.SetDir(mockHome)
 	defer home.ResetDir()
 
-	// Create .claude/global_prompt.md
 	claudeDir := filepath.Join(mockHome, ".claude")
 	err = os.MkdirAll(claudeDir, 0755)
 	require.NoError(t, err)
 
-	promptContent := "Custom Global Prompt for Testing"
-	err = os.WriteFile(filepath.Join(claudeDir, "global_prompt.md"), []byte(promptContent), 0644)
+	err = os.WriteFile(filepath.Join(claudeDir, "global_prompt.md"), []byte("Legacy Global Prompt"), 0644)
 	require.NoError(t, err)
 
 	p, err := NewPrompt("test", "template")
 	require.NoError(t, err)
 
-	// Mock ConfigStore
 	tmpDir, err := os.MkdirTemp("", "crush-test-wd-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
@@ -44,11 +39,10 @@ func TestClaudeGlobalPromptDiscovery(t *testing.T) {
 	data, err := p.promptData(context.Background(), "provider", "model", store)
 	require.NoError(t, err)
 
-	require.Contains(t, data.ClaudeGlobalPrompt, promptContent)
-	require.Contains(t, data.ClaudeGlobalPrompt, "global_prompt.md")
+	require.Empty(t, data.UserConstitution)
 }
 
-func TestClaudeGlobalPromptLoadsPersonalConstitution(t *testing.T) {
+func TestUserConstitutionLoadsPersonalConstitution(t *testing.T) {
 	mockHome, err := os.MkdirTemp("", "crush-test-home-*")
 	require.NoError(t, err)
 	defer os.RemoveAll(mockHome)
@@ -73,6 +67,6 @@ func TestClaudeGlobalPromptLoadsPersonalConstitution(t *testing.T) {
 	data, err := p.promptData(context.Background(), "provider", "model", store)
 	require.NoError(t, err)
 
-	require.Contains(t, data.ClaudeGlobalPrompt, "Personal Constitution")
-	require.Contains(t, data.ClaudeGlobalPrompt, "CLAUDE.md")
+	require.Contains(t, data.UserConstitution, "Personal Constitution")
+	require.Contains(t, data.UserConstitution, "CLAUDE.md")
 }

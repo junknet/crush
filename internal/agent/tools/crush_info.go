@@ -510,28 +510,21 @@ func writeHooks(b *strings.Builder, cfg *config.ConfigStore) {
 }
 
 func writeGlobalPrompt(b *strings.Builder) {
-	claudeDir := filepath.Join(home.Dir(), ".claude")
-	paths := []string{
-		filepath.Join(claudeDir, "global_prompt.md"),
-		filepath.Join(claudeDir, "CLAUDE.md"),
-	}
+	path := filepath.Join(home.Dir(), ".claude", "CLAUDE.md")
 	b.WriteString("[user_constitution]\n")
-	wrote := false
-	for _, path := range paths {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		text := strings.TrimSpace(string(content))
-		if text == "" {
-			continue
-		}
-		fmt.Fprintf(b, "<file path=%q>\n%s\n</file>\n", filepath.ToSlash(path), text)
-		wrote = true
+	content, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(b, "no user constitution found at %s\n", path)
+		b.WriteString("\n")
+		return
 	}
-	if !wrote {
-		fmt.Fprintf(b, "no user constitution found under %s\n", claudeDir)
+	text := strings.TrimSpace(string(content))
+	if text == "" {
+		fmt.Fprintf(b, "empty user constitution at %s\n", path)
+		b.WriteString("\n")
+		return
 	}
+	fmt.Fprintf(b, "<file path=%q>\n%s\n</file>\n", filepath.ToSlash(path), text)
 	b.WriteString("\n")
 }
 
