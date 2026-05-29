@@ -1425,34 +1425,15 @@ func (c *coordinator) buildModelForType(ctx context.Context, modelType config.Se
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
-	var opts []anthropic.Option
-
 	switch {
 	case strings.HasPrefix(apiKey, "Bearer "):
-		// NOTE: Prevent the SDK from picking up the API key from env.
-		os.Setenv("ANTHROPIC_API_KEY", "")
 		headers["Authorization"] = apiKey
+		apiKey = ""
 	case providerID == string(catwalk.InferenceProviderMiniMax) || providerID == string(catwalk.InferenceProviderMiniMaxChina):
-		// NOTE: Prevent the SDK from picking up the API key from env.
-		os.Setenv("ANTHROPIC_API_KEY", "")
 		headers["Authorization"] = "Bearer " + apiKey
-	case apiKey != "":
-		// X-Api-Key header
-		opts = append(opts, anthropic.WithAPIKey(apiKey))
+		apiKey = ""
 	}
-
-	if len(headers) > 0 {
-		opts = append(opts, anthropic.WithHeaders(headers))
-	}
-
-	if baseURL != "" {
-		opts = append(opts, anthropic.WithBaseURL(baseURL))
-	}
-
-	if httpClient := log.NewProviderHTTPClient("anthropic", c.cfg.Config().Options.Debug); httpClient != nil {
-		opts = append(opts, anthropic.WithHTTPClient(httpClient))
-	}
-	return anthropic.New(opts...)
+	return agentsdk.NewClaudeProvider(baseURL, apiKey, headers)
 }
 
 func (c *coordinator) buildOpenaiProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {

@@ -8,15 +8,107 @@ import (
 
 	"charm.land/fantasy"
 	agentsdkauth "github.com/agent-sdk/auth"
+	agentsdkclaude "github.com/agent-sdk/provider/claude"
 	agentsdkcodex "github.com/agent-sdk/provider/codex"
 	agentsdkschema "github.com/agent-sdk/schema"
 )
 
 const codexProviderName = "openai"
+const claudeProviderName = "anthropic"
 
 type CodexProvider struct {
 	baseURL string
 	cred    agentsdkauth.Credential
+}
+
+type ClaudeProvider struct {
+	baseURL string
+	apiKey  string
+	headers map[string]string
+}
+
+func NewClaudeProvider(baseURL, apiKey string, headers map[string]string) (*ClaudeProvider, error) {
+	headerCopy := make(map[string]string, len(headers))
+	for k, v := range headers {
+		headerCopy[k] = v
+	}
+	return &ClaudeProvider{
+		baseURL: baseURL,
+		apiKey:  apiKey,
+		headers: headerCopy,
+	}, nil
+}
+
+func (p *ClaudeProvider) Name() string {
+	return claudeProviderName
+}
+
+func (p *ClaudeProvider) LanguageModel(_ context.Context, modelID string) (fantasy.LanguageModel, error) {
+	return &ClaudeLanguageModel{
+		modelID: modelID,
+		baseURL: p.baseURL,
+		apiKey:  p.apiKey,
+		headers: p.headers,
+	}, nil
+}
+
+type ClaudeLanguageModel struct {
+	modelID string
+	baseURL string
+	apiKey  string
+	headers map[string]string
+}
+
+func (m *ClaudeLanguageModel) Provider() string {
+	return claudeProviderName
+}
+
+func (m *ClaudeLanguageModel) Model() string {
+	return m.modelID
+}
+
+func (m *ClaudeLanguageModel) Generate(ctx context.Context, call fantasy.Call) (*fantasy.Response, error) {
+	resp, err := agentsdkclaude.NewWithHeaders(&agentsdkauth.APIKeyCredential{Key: m.apiKey}, m.baseURL, m.headers).CreateMessage(ctx, m.toChatRequest(call))
+	if err != nil {
+		return nil, err
+	}
+
+	return toFantasyResponse(resp), nil
+}
+
+func (m *ClaudeLanguageModel) Stream(ctx context.Context, call fantasy.Call) (fantasy.StreamResponse, error) {
+	ch, err := agentsdkclaude.NewWithHeaders(&agentsdkauth.APIKeyCredential{Key: m.apiKey}, m.baseURL, m.headers).StreamMessage(ctx, m.toChatRequest(call))
+	if err != nil {
+		return nil, err
+	}
+
+	resp, ok := <-ch
+	if !ok {
+		return nil, fmt.Errorf("agent-all-sdk claude stream closed without a response")
+	}
+
+	return sdkResponseStream(resp), nil
+}
+
+func (m *ClaudeLanguageModel) GenerateObject(context.Context, fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
+	return nil, fmt.Errorf("agent-all-sdk claude adapter does not support object generation yet")
+}
+
+func (m *ClaudeLanguageModel) StreamObject(context.Context, fantasy.ObjectCall) (fantasy.ObjectStreamResponse, error) {
+	return iter.Seq[fantasy.ObjectStreamPart](func(func(fantasy.ObjectStreamPart) bool) {}), fmt.Errorf("agent-all-sdk claude adapter does not support object streaming yet")
+}
+
+func (m *ClaudeLanguageModel) toChatRequest(call fantasy.Call) *agentsdkschema.ChatRequest {
+	req := &agentsdkschema.ChatRequest{
+		Model:       m.modelID,
+		Messages:    toSDKMessages(call.Prompt),
+		Tools:       toSDKTools(call.Tools),
+		Temperature: call.Temperature,
+	}
+	if call.MaxOutputTokens != nil {
+		req.MaxTokens = int(*call.MaxOutputTokens)
+	}
+	return req
 }
 
 func NewCodexProvider(baseURL, apiKey string) (*CodexProvider, error) {
@@ -72,38 +164,7 @@ func (m *CodexLanguageModel) Stream(ctx context.Context, call fantasy.Call) (fan
 		return nil, err
 	}
 
-	return func(yield func(fantasy.StreamPart) bool) {
-		text := textFromSDK(resp.Message.Content)
-		if text != "" {
-			if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: resp.ID}) {
-				return
-			}
-			if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: resp.ID, Delta: text}) {
-				return
-			}
-			if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: resp.ID}) {
-				return
-			}
-		}
-
-		for _, call := range resp.Message.ToolCalls {
-			if !yield(fantasy.StreamPart{
-				Type:          fantasy.StreamPartTypeToolCall,
-				ID:            call.ID,
-				ToolCallName:  call.Name,
-				ToolCallInput: call.Arguments,
-			}) {
-				return
-			}
-		}
-
-		yield(fantasy.StreamPart{
-			Type:         fantasy.StreamPartTypeFinish,
-			ID:           resp.ID,
-			Usage:        toFantasyUsage(resp.Usage),
-			FinishReason: fantasy.FinishReasonStop,
-		})
-	}, nil
+	return sdkResponseStream(resp), nil
 }
 
 func (m *CodexLanguageModel) GenerateObject(context.Context, fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
@@ -248,6 +309,41 @@ func toFantasyResponse(resp *agentsdkschema.ChatResponse) *fantasy.Response {
 		Content:      content,
 		FinishReason: fantasy.FinishReasonStop,
 		Usage:        toFantasyUsage(resp.Usage),
+	}
+}
+
+func sdkResponseStream(resp *agentsdkschema.ChatResponse) fantasy.StreamResponse {
+	return func(yield func(fantasy.StreamPart) bool) {
+		text := textFromSDK(resp.Message.Content)
+		if text != "" {
+			if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextStart, ID: resp.ID}) {
+				return
+			}
+			if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, ID: resp.ID, Delta: text}) {
+				return
+			}
+			if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextEnd, ID: resp.ID}) {
+				return
+			}
+		}
+
+		for _, call := range resp.Message.ToolCalls {
+			if !yield(fantasy.StreamPart{
+				Type:          fantasy.StreamPartTypeToolCall,
+				ID:            call.ID,
+				ToolCallName:  call.Name,
+				ToolCallInput: call.Arguments,
+			}) {
+				return
+			}
+		}
+
+		yield(fantasy.StreamPart{
+			Type:         fantasy.StreamPartTypeFinish,
+			ID:           resp.ID,
+			Usage:        toFantasyUsage(resp.Usage),
+			FinishReason: fantasy.FinishReasonStop,
+		})
 	}
 }
 
