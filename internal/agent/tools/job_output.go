@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/shell"
@@ -12,6 +13,12 @@ import (
 
 const (
 	JobOutputToolName = "job_output"
+	// jobOutputWaitBudget bounds wait=true below the 60s tool-execution timeout
+	// so the call returns the current output + running status gracefully instead
+	// of blocking until the timeout wrapper kills it and discards the output —
+	// the single most frequent job_output failure in real traces (140 hard
+	// timeouts). For longer waits the model polls again or uses monitor.
+	jobOutputWaitBudget = 50 * time.Second
 )
 
 //go:embed job_output.md
@@ -45,7 +52,12 @@ func NewJobOutputTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool
 			}
 
 			if params.Wait {
-				bgShell.WaitContext(ctx)
+				// Bounded wait: return gracefully with partial output if the job
+				// outlives the budget, rather than blocking until the tool
+				// timeout fires and the output is lost.
+				waitCtx, cancel := context.WithTimeout(ctx, jobOutputWaitBudget)
+				bgShell.WaitContext(waitCtx)
+				cancel()
 			}
 
 			stdout, stderr, done, err := bgShell.GetOutput()
@@ -90,6 +102,11 @@ func NewJobOutputTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool
 			}
 
 			result := fmt.Sprintf("Status: %s\n\n%s", status, output)
+			if !done && params.Wait {
+				// The job outlived the wait budget. Tell the model how to proceed
+				// instead of leaving it to re-block (and time out) on another wait.
+				result += fmt.Sprintf("\n\n[job %s still running after %s — call job_output again to poll, or use the monitor tool to wake on a completion/error pattern instead of blocking.]", params.ShellID, jobOutputWaitBudget)
+			}
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(result), metadata), nil
 		},
 	)
