@@ -852,6 +852,11 @@ func (c *Config) SetupAgents() {
 			Model:        SelectedModelTypeWorker,
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: allowedTools,
+			ParallelTools: []string{
+				"rg", "view", "ls", "bash", "nu", "sourcegraph",
+				"code_triage", "bug_triage", "evidence_batch", "evidence_graph",
+				"agent",
+			},
 		},
 		AgentExplore: {
 			ID:           AgentExplore,
@@ -866,7 +871,7 @@ func (c *Config) SetupAgents() {
 			// a half-finished "going to look at X" line that looked like a
 			// truncated return to the parent.
 			MaxTurns:      16,
-			ParallelTools: []string{"rg", "view", "ls", "bash", "nu"},
+			ParallelTools: []string{"rg", "view", "ls", "bash", "nu", "sourcegraph", "code_triage", "bug_triage", "evidence_batch", "evidence_graph"},
 		},
 		AgentAuditor: {
 			ID:           AgentAuditor,

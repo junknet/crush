@@ -35,51 +35,46 @@ def load_cases(path: Path) -> list[dict]:
 
 
 def state_yaml(case: dict) -> str:
+    role = str(case.get("role") or "brain")
     effort = str(case.get("reasoning_effort") or "").strip()
     max_tokens = int(case.get("max_tokens") or 8192)
-    lines = [
-        "models:",
-        "  brain:",
-        f"    provider: {case['provider']}",
-        f"    model: {case['model']}",
-        f"    max_tokens: {max_tokens}",
-    ]
-    if effort:
-        lines.append(f"    reasoning_effort: {effort}")
-    if case.get("think"):
-        lines.append("    think: true")
-    if case.get("thinking_budget"):
-        lines.append(f"    thinking_budget: {int(case['thinking_budget'])}")
-    lines.extend(
-        [
-            "  explore:",
-            "    provider: antigravity",
-            "    model: gemini-3.5-flash-extra-low",
-            "    max_tokens: 8192",
-            "  worker:",
-            f"    provider: {case['provider']}",
-            f"    model: {case['model']}",
-            f"    max_tokens: {max_tokens}",
-            "  plan:",
-            f"    provider: {case['provider']}",
-            f"    model: {case['model']}",
-            f"    max_tokens: {max_tokens}",
-            "  auditor:",
-            f"    provider: {case['provider']}",
-            f"    model: {case['model']}",
-            f"    max_tokens: {max_tokens}",
-        ]
-    )
-    if effort:
+    defaults = {
+        "brain": {"provider": "antigravity", "model": "gemini-3-flash-agent", "max_tokens": 12000},
+        "explore": {"provider": "antigravity", "model": "gemini-3.5-flash-low", "max_tokens": 8192},
+        "worker": {"provider": "antigravity", "model": "gemini-3-flash-agent", "max_tokens": 8192},
+        "plan": {"provider": "official-openai", "model": "gpt-5.5", "max_tokens": 16384, "reasoning_effort": "xhigh"},
+        "auditor": {"provider": "official-openai", "model": "gpt-5.5", "max_tokens": 16384, "reasoning_effort": "xhigh"},
+    }
+    if role in defaults:
+        defaults[role] = {
+            "provider": case["provider"],
+            "model": case["model"],
+            "max_tokens": max_tokens,
+        }
+        if effort:
+            defaults[role]["reasoning_effort"] = effort
+        if case.get("think"):
+            defaults[role]["think"] = True
+        if case.get("thinking_budget"):
+            defaults[role]["thinking_budget"] = int(case["thinking_budget"])
+
+    lines = ["models:"]
+    for name in ("brain", "explore", "worker", "plan", "auditor"):
+        cfg = defaults[name]
         lines.extend(
             [
-                f"    reasoning_effort: {effort}",
+                f"  {name}:",
+                f"    provider: {cfg['provider']}",
+                f"    model: {cfg['model']}",
+                f"    max_tokens: {int(cfg['max_tokens'])}",
             ]
         )
-    if case.get("think"):
-        lines.append("    think: true")
-    if case.get("thinking_budget"):
-        lines.append(f"    thinking_budget: {int(case['thinking_budget'])}")
+        if cfg.get("reasoning_effort"):
+            lines.append(f"    reasoning_effort: {cfg['reasoning_effort']}")
+        if cfg.get("think"):
+            lines.append("    think: true")
+        if cfg.get("thinking_budget"):
+            lines.append(f"    thinking_budget: {int(cfg['thinking_budget'])}")
     return "\n".join(lines) + "\n"
 
 
@@ -101,6 +96,7 @@ def parse_trace(trace_path: Path | None) -> dict:
         "tool_started": 0,
         "tool_finished": 0,
         "tool_failed": 0,
+        "evidence_nodes": 0,
         "llm_requests": 0,
         "finish_reason": "",
         "error": "",
@@ -116,6 +112,7 @@ def parse_trace(trace_path: Path | None) -> dict:
         is_root = ev.get("parent_id") == ""
         if kind == "tool_started":
             metrics["tool_started"] += 1
+            metrics["evidence_nodes"] += evidence_node_count(ev)
         elif kind == "tool_finished":
             metrics["tool_finished"] += 1
         elif kind == "tool_failed":
@@ -155,6 +152,23 @@ def parse_trace(trace_path: Path | None) -> dict:
         if ev.get("error"):
             metrics["error"] = str(ev.get("error"))[:500]
     return metrics
+
+
+def evidence_node_count(ev: dict) -> int:
+    tool_name = str(ev.get("tool_name") or "")
+    if not tool_name.startswith("evidence_"):
+        return 0
+    raw = ev.get("tool_input")
+    if not raw:
+        return 0
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return 0
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return 0
+    return len(nodes)
 
 
 def find_trace(text: str) -> Path | None:
@@ -206,7 +220,18 @@ def run_case(case: dict, out_root: Path, timeout_s: int) -> dict:
     metrics = parse_trace(trace)
     output_for_check = proc.stdout + "\n" + raw
     expected = case.get("expect") or []
+    min_expect_hits = int(case.get("min_expect_hits") or len(expected))
     hits = [term for term in expected if term.lower() in output_for_check.lower()]
+    forbidden = case.get("forbid") or []
+    forbidden_hits = [term for term in forbidden if term.lower() in output_for_check.lower()]
+    min_tools = int(case.get("min_tools") or 0)
+    min_evidence_nodes = int(case.get("min_evidence_nodes") or 0)
+    max_tool_failed = case.get("max_tool_failed")
+    tool_requirement_met = metrics["tool_started"] >= min_tools
+    if min_evidence_nodes:
+        tool_requirement_met = tool_requirement_met and metrics["evidence_nodes"] >= min_evidence_nodes
+    if max_tool_failed is not None:
+        tool_requirement_met = tool_requirement_met and metrics["tool_failed"] <= int(max_tool_failed)
     result = {
         "id": case["id"],
         "role": case["role"],
@@ -219,7 +244,17 @@ def run_case(case: dict, out_root: Path, timeout_s: int) -> dict:
         "raw": str(raw_path),
         "expected_hits": hits,
         "expected_total": len(expected),
-        "passed_expectations": len(hits) == len(expected),
+        "min_expect_hits": min_expect_hits,
+        "forbidden_hits": forbidden_hits,
+        "min_tools": min_tools,
+        "min_evidence_nodes": min_evidence_nodes,
+        "max_tool_failed": max_tool_failed,
+        "tool_requirement_met": tool_requirement_met,
+        "passed_expectations": (
+            len(hits) >= min_expect_hits
+            and not forbidden_hits
+            and tool_requirement_met
+        ),
         **metrics,
         "provider": case["provider"],
         "model": case["model"],
@@ -233,14 +268,22 @@ def write_report(results: list[dict], out_root: Path) -> None:
         "",
         f"Run directory: `{out_root}`",
         "",
-        "| case | provider/model | exit | trace success | tools | first token | duration | expectations | trace |",
+        "| case | provider/model | exit | trace success | tools | first token | duration | score | trace |",
         "|---|---|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in results:
         tools = f"{r['tool_finished']}/{r['tool_started']} failed={r['tool_failed']}"
+        if r.get("evidence_nodes"):
+            tools += f" nodes={r['evidence_nodes']}"
         first = f"{r['first_event_latency_ms']}ms" if r["first_event_latency_ms"] else "-"
         dur = f"{r['duration_ms']}ms" if r["duration_ms"] else f"{r['wall_ms']}ms"
-        exp = f"{len(r['expected_hits'])}/{r['expected_total']}"
+        exp = f"{len(r['expected_hits'])}/{r['expected_total']} req>={r['min_expect_hits']}"
+        if r["min_tools"]:
+            exp += f", tools>={r['min_tools']}"
+        if r["min_evidence_nodes"]:
+            exp += f", nodes>={r['min_evidence_nodes']}"
+        if r["forbidden_hits"]:
+            exp += f", forbid={len(r['forbidden_hits'])}"
         trace = r.get("trace") or ""
         lines.append(
             f"| `{r['id']}` | `{r['provider']}/{r['model']}` | {r['exit_code']} | "

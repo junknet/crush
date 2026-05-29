@@ -127,6 +127,18 @@ Each node uses kind, not tool. Supported kind values:
 - check_file: path
 - run_short_command: script or command, optional language shell/node/python
 
+Common native aliases are accepted and normalized:
+ls/list/tree -> list_tree, view/cat/read -> read_file,
+rg/grep/search -> search_text, glob/find/files -> search_files,
+bash/shell/run -> run_short_command.
+
+Example:
+{"nodes":[
+  {"id":"tree","kind":"list_tree","path":".","depth":2},
+  {"id":"pit","kind":"search_text","query":"PIT|known_time|leakage"},
+  {"id":"status","kind":"read_file","path":"docs/STATUS.md","limit":120}
+]}
+
 Prefer evidence_batch when nodes are independent. Use evidence_graph only when
 one node must depend on another node's output.`
 }
@@ -203,38 +215,6 @@ func validateDagRunNodes(nodes []DagRunNode) error {
 			return fmt.Errorf("duplicate evidence node id: %s", node.ID)
 		}
 		seen[node.ID] = struct{}{}
-		switch node.Kind {
-		case "search_text", "search_files", "search_structure":
-			if node.Query == "" {
-				return fmt.Errorf("node %s: query is required for %s", node.ID, node.Kind)
-			}
-		case "read_file":
-			if node.Path == "" {
-				return fmt.Errorf("node %s: path is required for read_file", node.ID)
-			}
-		case "check_file":
-			if node.Path == "" {
-				return fmt.Errorf("node %s: path is required for check_file", node.ID)
-			}
-		case "web_search":
-			if node.Query == "" {
-				return fmt.Errorf("node %s: query is required for web_search", node.ID)
-			}
-		case "web_fetch":
-			if node.Path == "" {
-				return fmt.Errorf("node %s: path (url) is required for web_fetch", node.ID)
-			}
-		case "list_tree":
-		case "run_short_command":
-			if strings.TrimSpace(dagRunCommand(node)) == "" {
-				return fmt.Errorf("node %s: script or command is required for run_short_command", node.ID)
-			}
-			if message, blocked := blockForegroundSleep(dagRunCommand(node)); blocked {
-				return fmt.Errorf("%s", message)
-			}
-		default:
-			return fmt.Errorf("node %s: unsupported kind %q; use search_text, search_files, search_structure, list_tree, read_file, check_file, run_short_command, web_search, or web_fetch", node.ID, node.Kind)
-		}
 		if node.OnFailure != "" && node.OnFailure != "continue" && node.OnFailure != "skip_dependents" && node.OnFailure != "stop_graph" {
 			return fmt.Errorf("node %s: unsupported on_failure %q", node.ID, node.OnFailure)
 		}
@@ -261,6 +241,7 @@ func normalizeDagRunNodes(nodes []DagRunNode) []DagRunNode {
 		if node.Kind == "" {
 			node.Kind = legacyDagRunKind(node)
 		}
+		node.Kind = normalizeDagRunKind(node.Kind, node.FilesOnly)
 		if node.Query == "" {
 			node.Query = node.Pattern
 		}
@@ -273,6 +254,26 @@ func normalizeDagRunNodes(nodes []DagRunNode) []DagRunNode {
 		normalized[i] = node
 	}
 	return normalized
+}
+
+func normalizeDagRunKind(kind string, filesOnly bool) string {
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case "ls", "list", "tree", "directory", "dir":
+		return "list_tree"
+	case "view", "cat", "read":
+		return "read_file"
+	case "rg", "grep", "search":
+		if filesOnly {
+			return "search_files"
+		}
+		return "search_text"
+	case "glob", "find", "file_search", "files":
+		return "search_files"
+	case "run", "shell", "bash", "command":
+		return "run_short_command"
+	default:
+		return kind
+	}
 }
 
 func legacyDagRunKind(node DagRunNode) string {
@@ -499,6 +500,9 @@ func executeDagRunNodeOutput(ctx context.Context, lspManager *lsp.Manager, worki
 		}
 		return out.String(), nil
 	case "search_text":
+		if node.Query == "" {
+			return "", fmt.Errorf("query is required for search_text")
+		}
 		searchPattern := node.Query
 		if node.LiteralText {
 			searchPattern = escapeRegexPattern(searchPattern)
@@ -510,6 +514,9 @@ func executeDagRunNodeOutput(ctx context.Context, lspManager *lsp.Manager, worki
 		}
 		return formatDagRunRgMatches(matches, truncated), nil
 	case "search_files":
+		if node.Query == "" {
+			return "", fmt.Errorf("query is required for search_files")
+		}
 		searchPath := filepathext.SmartJoin(workingDir, node.Path)
 		matches, _, err := RgSearchFiles(ctx, node.Query, searchPath, node.Include, dagRunLimit(node.Limit, 100))
 		if err != nil {
@@ -524,6 +531,9 @@ func executeDagRunNodeOutput(ctx context.Context, lspManager *lsp.Manager, worki
 		}
 		return strings.TrimRight(out.String(), "\n"), nil
 	case "search_structure":
+		if node.Query == "" {
+			return "", fmt.Errorf("query is required for search_structure")
+		}
 		searchPath := filepathext.SmartJoin(workingDir, node.Path)
 		resp, err := runAstGrepScan(ctx, AstGrepParams{
 			Pattern: node.Query,
@@ -566,6 +576,12 @@ func executeDagRunNodeOutput(ctx context.Context, lspManager *lsp.Manager, worki
 		}
 		return content, nil
 	case "run_short_command":
+		if strings.TrimSpace(dagRunCommand(node)) == "" {
+			return "", fmt.Errorf("script or command is required for run_short_command")
+		}
+		if message, blocked := blockForegroundSleep(dagRunCommand(node)); blocked {
+			return "", fmt.Errorf("%s", message)
+		}
 		language := strings.ToLower(strings.TrimSpace(node.Language))
 		if language == "" {
 			language = "shell"
