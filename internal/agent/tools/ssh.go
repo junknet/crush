@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -387,17 +388,36 @@ func NewSSHMountTool(permissions permission.Service, dataDir string, registry *r
 			}
 
 			target := params.Host + ":" + params.RemotePath
-			cmd := exec.CommandContext(ctx, sshfsPath,
-				"-o", "BatchMode=yes",
-				"-o", "StrictHostKeyChecking=accept-new",
-				"-o", defaultSSHConnectTimeout,
-				target,
-				absMountPath,
-			)
 			var out bytes.Buffer
-			cmd.Stdout = &out
-			cmd.Stderr = &out
-			err = cmd.Run()
+			runMount := func() error {
+				out.Reset()
+				cmd := exec.CommandContext(ctx, sshfsPath,
+					"-o", "BatchMode=yes",
+					"-o", "StrictHostKeyChecking=accept-new",
+					"-o", defaultSSHConnectTimeout,
+					target,
+					absMountPath,
+				)
+				cmd.Stdout = &out
+				cmd.Stderr = &out
+				return cmd.Run()
+			}
+			err = runMount()
+			// fusermount occasionally fails the first mountpoint access with a
+			// transient "Permission denied" even though the mountpoint is a
+			// fresh dir we own and an immediate retry succeeds (observed once
+			// in a real run; a manual rerun of the identical command worked).
+			// Retry exactly once after re-ensuring the dir; the failure is at
+			// the access-mountpoint stage, before any mount lands, so a retry
+			// cannot double-mount.
+			if err != nil && strings.Contains(out.String(), "Permission denied") {
+				_ = os.MkdirAll(absMountPath, 0o755)
+				select {
+				case <-ctx.Done():
+				case <-time.After(300 * time.Millisecond):
+				}
+				err = runMount()
+			}
 			exitCode := commandExitCode(err)
 			metadata := SSHResponseMetadata{
 				Host:       params.Host,
@@ -894,6 +914,31 @@ func unmountCommand(mountPath string) (string, []string) {
 		return path, []string{mountPath}
 	}
 	return "", nil
+}
+
+// UnmountAll is the shutdown safety net for sshfs mounts the model created via
+// ssh_mount but never released via ssh_unmount. The registry tracks every
+// mount, but nothing tears them down on process exit, so a forgotten unmount
+// leaks the fuse mount past the session. This unmounts each registered mount
+// and drops its record. Returns the number successfully unmounted.
+func UnmountAll(ctx context.Context, registry *remoteregistry.Registry) int {
+	if registry == nil {
+		return 0
+	}
+	unmounted := 0
+	for _, m := range registry.ListMounts() {
+		cmdName, args := unmountCommand(m.LocalPath)
+		if cmdName == "" {
+			continue
+		}
+		if err := exec.CommandContext(ctx, cmdName, args...).Run(); err != nil {
+			slog.Warn("Shutdown unmount failed", "path", m.LocalPath, "error", err)
+			continue
+		}
+		_ = registry.RemoveMount(m.Host, m.RemotePath)
+		unmounted++
+	}
+	return unmounted
 }
 
 func validateSSHTarget(host string) error {

@@ -642,6 +642,17 @@ func (app *App) Shutdown() {
 		app.LSPManager.KillAll(shutdownCtx)
 	})
 
+	// Unmount any sshfs mounts the agent left registered. The model is meant
+	// to call ssh_unmount, but if it forgets the mount would leak past process
+	// exit — the registry tracks it yet nothing else tears it down.
+	if app.AgentCoordinator != nil {
+		wg.Go(func() {
+			if n := app.AgentCoordinator.UnmountAllRemotes(shutdownCtx); n > 0 {
+				slog.Debug("Unmounted leftover remote mounts on shutdown", "count", n)
+			}
+		})
+	}
+
 	// Call all cleanup functions.
 	for _, cleanup := range app.cleanupFuncs {
 		if cleanup != nil {

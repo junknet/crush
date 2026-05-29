@@ -136,6 +136,9 @@ type Coordinator interface {
 	Summarize(context.Context, string) error
 	Model() Model
 	UpdateModels(ctx context.Context) error
+	// UnmountAllRemotes tears down every sshfs mount the agent left registered.
+	// Called on graceful shutdown so a forgotten ssh_unmount does not leak.
+	UnmountAllRemotes(ctx context.Context) int
 }
 
 type coordinator struct {
@@ -1724,6 +1727,10 @@ func (c *coordinator) CancelAll() {
 	}
 	c.activeCancels = make(map[string]context.CancelCauseFunc)
 	c.activeMu.Unlock()
+}
+
+func (c *coordinator) UnmountAllRemotes(ctx context.Context) int {
+	return tools.UnmountAll(ctx, c.remoteRegistry)
 }
 
 func (c *coordinator) ClearQueue(sessionID string) {
