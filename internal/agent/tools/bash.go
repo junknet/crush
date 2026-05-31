@@ -827,7 +827,7 @@ waitLoop:
 		ShellID:          bgShell.ID,
 		Outcome:          "background_started",
 	}
-	response := fmt.Sprintf("Command is taking longer than expected and has been moved to background.\n\nBackground shell ID: %s\n\nIt will keep running; you'll be automatically notified to continue when it finishes. You can also use job_output to check on it or job_kill to terminate.", bgShell.ID)
+	response := fmt.Sprintf("Command is taking longer than expected and has been moved to background.\n\nBackground shell ID: <shell_id>%s</shell_id>\n\nIt will keep running; you'll be automatically notified to continue when it finishes. You can also use job_output to check on it or job_kill to terminate.", bgShell.ID)
 	appendBashCommandTrace(ctx, call.ID, params, metadata, response)
 	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 }
@@ -907,7 +907,7 @@ waitLoop:
 			StdoutBytes:      len(snapshot.Stdout),
 			StderrBytes:      len(snapshot.Stderr),
 		}
-		response := fmt.Sprintf("Command is still running after %s and has been moved to background.\n\nBackground shell ID: %s\n\nIt will keep running on %s. Use job_output to check output, job_kill to terminate it, or monitor to wake on a matching output line.", waitBudget, snapshot.ID, backend.Kind())
+		response := fmt.Sprintf("Command is still running after %s and has been moved to background.\n\nBackground shell ID: <shell_id>%s</shell_id>\n\nIt will keep running on %s. Use job_output to check output, job_kill to terminate it, or monitor to wake on a matching output line.", waitBudget, snapshot.ID, backend.Kind())
 		appendBashCommandTrace(ctx, call.ID, params, metadata, response)
 		return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 	}

@@ -180,6 +180,9 @@ func parseGrep(args []string) (string, map[string]any, bool) {
 	if len(paths) > 0 {
 		path = paths[0]
 	}
+	if hasGlob(path) {
+		return "", nil, false
+	}
 
 	params := map[string]any{
 		"mode":        "content",
@@ -234,6 +237,10 @@ func parseFind(args []string) (string, map[string]any, bool) {
 				return "", nil, false
 			}
 		}
+	}
+
+	if hasGlob(path) {
+		return "", nil, false
 	}
 
 	params := map[string]any{
@@ -299,6 +306,10 @@ func parseLs(args []string) (string, map[string]any, bool) {
 				}
 			}
 		}
+	}
+
+	if hasGlob(path) {
+		return "", nil, false
 	}
 
 	params := map[string]any{
@@ -370,6 +381,10 @@ func parseCat(args []string) (string, map[string]any, bool) {
 		return "", nil, false
 	}
 
+	if hasGlob(filePath) {
+		return "", nil, false
+	}
+
 	params := map[string]any{
 		"file_path": filePath,
 		"fold":      false,
@@ -420,5 +435,9 @@ func ParseCommandLine(cmdStr string) ([]string, bool) {
 		args = append(args, val)
 	}
 	return args, true
+}
+
+func hasGlob(s string) bool {
+	return strings.ContainsAny(s, "*?[]")
 }
 
