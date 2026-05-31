@@ -103,7 +103,7 @@ func wrapToolsWithTimeout(tools []fantasy.AgentTool, timeout time.Duration) []fa
 			name == "RemoteAttach" || name == "RemoteDetach" ||
 			name == "Bash" ||
 			name == "JobOutput" || name == "JobKill" || name == "Monitor" ||
-			name == "Search" || name == "Grep" || name == "Find" || name == "Batch" {
+			name == "Search" || name == "Batch" {
 			out[i] = tool
 		} else {
 			out[i] = newTimeoutTool(tool, timeout)

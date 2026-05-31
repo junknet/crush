@@ -781,8 +781,6 @@ func allToolNames() []string {
 		"Fetch",
 		"websearch-agent",
 		"Search",
-		"Grep",
-		"Find",
 		"ReadDir",
 		"Monitor",
 		"ScheduleWakeup",
@@ -810,7 +808,7 @@ func resolveExploreTools(tools []string) []string {
 	// constrains it to read-only inspection commands. Direct mutators
 	// (edit/multiedit/write/download/todos) are excluded.
 	exploreTools := []string{
-		"Bash", "Search", "Grep", "Find", "ReadDir", "Read", "CodeTriage", "Batch",
+		"Bash", "Search", "ReadDir", "Read", "CodeTriage", "Batch",
 		"ListMCPResources", "ReadMCPResource",
 	}
 	return filterSlice(tools, exploreTools, true)
