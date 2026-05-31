@@ -464,9 +464,26 @@ func (b *BashTool) SetRegistry(registry map[string]fantasy.AgentTool) {
 }
 
 func (b *BashTool) Info() fantasy.ToolInfo {
+	// A concrete parameter schema is required: OpenAI rejects a function whose
+	// parameters is null ("None is not of type 'object'") — only Gemini
+	// tolerated the missing schema, so this stayed hidden until a gpt-5.* agent
+	// (e.g. the auditor) tried to use Bash. Kept flat (all primitives, no nested
+	// objects or per-item required arrays) so both OpenAI and Gemini accept it.
 	return fantasy.ToolInfo{
 		Name:        BashToolName,
 		Description: string(bashDescription(b.attribution, b.modelID)),
+		// Info().Parameters is the JSON-Schema PROPERTIES map (not a full schema):
+		// fantasy wraps it as {"type":"object","properties":<this>,"required":<Required>}.
+		// Passing a full schema here double-nests it and breaks strict OpenAI
+		// validation. Flat primitives only.
+		Parameters: map[string]any{
+			"command":               map[string]any{"type": "string", "description": "The command to execute."},
+			"description":           map[string]any{"type": "string", "description": "A brief description of what the command does (under ~30 chars)."},
+			"working_dir":           map[string]any{"type": "string", "description": "Working directory to run in (defaults to the current directory)."},
+			"run_in_background":     map[string]any{"type": "boolean", "description": "Run in the background and return a shell id; read later with job_output."},
+			"auto_background_after": map[string]any{"type": "integer", "description": "Seconds to wait before auto-moving the command to a background job (default 5)."},
+		},
+		Required: []string{"command"},
 	}
 }
 

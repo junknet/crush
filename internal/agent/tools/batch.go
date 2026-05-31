@@ -114,6 +114,16 @@ func (b *EvidenceBatchTool) Info() fantasy.ToolInfo {
 			"{\"tool\":\"ReadDir\",\"input\":{\"path\":\"internal\"}}; " +
 			"{\"tool\":\"Bash\",\"input\":{\"command\":\"go build ./...\"}}. " +
 			"Use it to fan out independent reads, searches, directory listings, or short commands in a single turn.",
+		// Info().Parameters is the PROPERTIES map (fantasy wraps it into the full
+		// object schema with Required). Declared flat — nodes is a plain array
+		// with no per-item schema — so OpenAI's strict validator accepts it and
+		// Gemini's stricter nested-schema validation isn't tripped. The exact
+		// node shape {tool,input} is carried by the Description above.
+		Parameters: map[string]any{
+			"max_parallel": map[string]any{"type": "integer", "description": "Maximum nodes to run concurrently (default 4, capped at 16)."},
+			"nodes":        map[string]any{"type": "array", "description": "Tool calls to run in parallel; each item is {\"tool\":\"<name>\",\"input\":{...},\"id\":\"<label>\"}."},
+		},
+		Required: []string{"nodes"},
 	}
 }
 

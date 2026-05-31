@@ -270,12 +270,15 @@ func TestReadOnlyBatchPolicy(t *testing.T) {
 	assert.Equal(t, "Batch run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
+	// A node running a mutating tool (Bash) is blocked on a read-only turn.
+	// The policy now keys off the same readOnlyBlockedTools set as standalone
+	// calls (one source of truth), so the node tool must be the real name.
 	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
 		Name:  tools.EvidenceBatchToolName,
-		Input: `{"nodes":[{"id":"shell","tool":"shell","command":"date"}]}`,
+		Input: `{"nodes":[{"id":"shell","tool":"Bash","input":{"command":"date"}}]}`,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, resp.Content, "only allow evidence read nodes")
+	assert.Contains(t, resp.Content, "blocked on a read-only turn")
 	assert.True(t, resp.StopTurn)
 }
 
