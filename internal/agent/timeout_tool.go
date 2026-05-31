@@ -3,26 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os"
-	"strconv"
 	"time"
 
 	"charm.land/fantasy"
 )
-
-const defaultForegroundAgentToolTimeout = 2 * time.Minute
-
-func foregroundAgentToolTimeout() time.Duration {
-	value := os.Getenv("CRUSH_AGENT_FOREGROUND_TIMEOUT_SECONDS")
-	if value == "" {
-		return defaultForegroundAgentToolTimeout
-	}
-	seconds, err := strconv.Atoi(value)
-	if err != nil || seconds <= 0 {
-		return defaultForegroundAgentToolTimeout
-	}
-	return time.Duration(seconds) * time.Second
-}
 
 // timeoutTool wraps a fantasy.AgentTool to enforce a maximum execution duration.
 type timeoutTool struct {
@@ -104,19 +88,22 @@ func wrapToolsWithTimeout(tools []fantasy.AgentTool, timeout time.Duration) []fa
 	out := make([]fantasy.AgentTool, len(tools))
 	for i, tool := range tools {
 		name := tool.Info().Name
-		// RemoteAttach deploys the daemon (an ~80MB scp on first use) and
-		// opens an SSH channel; that legitimately exceeds the quick-tool
-		// timeout, so it (and its cheap sibling detach) run unwrapped, like the
-		// delegation tools. The ctx still cancels on session cancel.
-		// "RemoteAttach"/"RemoteDetach" are tools.RemoteAttach/DetachToolName;
-		// the literal is used because the `tools` param shadows the package here.
-		if name == AgentToolName {
-			out[i] = newTimeoutTool(tool, foregroundAgentToolTimeout())
-		} else if name == "websearch-agent" ||
+		// Unwrapped tools. Agent (and its websearch sibling) is a full
+		// event-driven agent loop, NOT a quick tool: brain dispatches it and
+		// either awaits natural completion (foreground) or detaches and drives
+		// it via its handle — agent_job_id + Monitor/JobOutput/JobKill
+		// (wait/read/cancel). It must never be killed by a wall-clock tool
+		// timeout; its own per-turn model-stream timeouts and session-cancel
+		// provide liveness. Bash is unwrapped because it self-backgrounds a hung
+		// command after a few seconds rather than being hard-killed here.
+		// RemoteAttach deploys the daemon (an ~80MB scp on first use); that
+		// legitimately exceeds the quick-tool timeout. The literals are used
+		// because the `tools` param shadows the package here.
+		if name == AgentToolName || name == "websearch-agent" ||
 			name == "RemoteAttach" || name == "RemoteDetach" ||
 			name == "Bash" ||
 			name == "JobOutput" || name == "JobKill" || name == "Monitor" ||
-			name == "Search" || name == "Batch" {
+			name == "Search" || name == "Grep" || name == "Find" || name == "Batch" {
 			out[i] = tool
 		} else {
 			out[i] = newTimeoutTool(tool, timeout)

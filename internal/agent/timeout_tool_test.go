@@ -83,27 +83,23 @@ func TestTimeoutTool(t *testing.T) {
 	})
 }
 
-func TestWrapToolsWithTimeoutWrapsForegroundAgent(t *testing.T) {
+// Agent is an event-driven agent loop, not a quick tool: it must NOT be wrapped
+// with a wall-clock timeout. It runs to natural completion (foreground) or is
+// driven via its handle — agent_job_id + Monitor/JobOutput/JobKill (background).
+// A hard 2-minute kill was the wrong model. Genuine quick tools stay wrapped.
+func TestWrapToolsWithTimeoutLeavesAgentUnwrapped(t *testing.T) {
 	t.Parallel()
 
 	wrapped := wrapToolsWithTimeout([]fantasy.AgentTool{
 		&sleepTool{name: AgentToolName},
+		&sleepTool{name: "Edit"},
 	}, 50*time.Millisecond)
 
-	agentTool, ok := wrapped[0].(*timeoutTool)
-	if !ok {
-		t.Fatalf("expected Agent tool to be timeout-wrapped, got %T", wrapped[0])
+	if _, isTimeout := wrapped[0].(*timeoutTool); isTimeout {
+		t.Fatalf("Agent must NOT be timeout-wrapped — it is an event-driven agent loop, not a quick tool")
 	}
-	if agentTool.timeout != defaultForegroundAgentToolTimeout {
-		t.Fatalf("expected foreground agent timeout %s, got %s", defaultForegroundAgentToolTimeout, agentTool.timeout)
-	}
-}
-
-func TestForegroundAgentToolTimeoutEnvOverride(t *testing.T) {
-	t.Setenv("CRUSH_AGENT_FOREGROUND_TIMEOUT_SECONDS", "7")
-
-	if got := foregroundAgentToolTimeout(); got != 7*time.Second {
-		t.Fatalf("expected 7s, got %s", got)
+	if _, isTimeout := wrapped[1].(*timeoutTool); !isTimeout {
+		t.Fatalf("expected quick tool Edit to be timeout-wrapped, got %T", wrapped[1])
 	}
 }
 

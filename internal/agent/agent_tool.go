@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -110,6 +111,21 @@ func (c *coordinator) runSubAgentBackground(
 	dataDir := c.cfg.Config().Options.DataDirectory
 
 	go func() {
+		// A panic in the sub-agent must still become a terminal event — without
+		// this recover the goroutine dies silently, Complete is never called, no
+		// done event fires, and the brain waits forever (there is no timeout
+		// fallback; sub-agent wake-up is purely event-driven). Convert the crash
+		// into a failed completion so the brain is woken and can re-dispatch.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Background sub-agent panicked", "job", jobID, "role", role, "panic", r, "stack", string(debug.Stack()))
+				crash := fmt.Errorf("sub-agent crashed unexpectedly: %v", r)
+				out := fmt.Sprintf("error: %v", crash)
+				_ = tools.PersistAgentJobResult(dataDir, sessionID, jobID, "failed", out, 2)
+				bgShell.Complete(out, crash)
+			}
+		}()
+
 		result, err := c.runSubAgent(runCtx, subAgentParams{
 			Agent:          agent,
 			SessionID:      sessionID,
