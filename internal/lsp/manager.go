@@ -173,13 +173,18 @@ func (s *Manager) startServer(ctx context.Context, name, filepath string, server
 			return
 		}
 		if _, err := exec.LookPath(server.Command); err != nil {
-			slog.Debug("LSP server not installed, skipping", "name", name, "command", server.Command)
+			// Silent: these are auto-loaded default servers (powernap ships
+			// ~344 language definitions); almost all are uninstalled on any
+			// given machine. A per-server "not installed" line floods every
+			// session start (~344 lines) and pollutes both the log and any LLM
+			// that later analyzes it. Missing USER-configured servers are still
+			// surfaced by their start/connection failure. Just back off quietly.
 			s.markUnavailable(name)
 			return
 		}
 		s.clearUnavailable(name)
 		if skipAutoStartCommands[server.Command] {
-			slog.Debug("LSP command too generic for auto-start, skipping", "name", name, "command", server.Command)
+			// Silent for the same reason: generic-command defaults are expected.
 			return
 		}
 	}
@@ -322,12 +327,12 @@ func handlesFiletype(sname string, fileTypes []string, filePath string) bool {
 			suffix = "." + suffix
 		}
 		if strings.HasSuffix(name, suffix) || filetype == string(kind) {
-			slog.Debug("Handles file", "name", sname, "file", name, "filetype", filetype, "kind", kind)
 			return true
 		}
 	}
-
-	slog.Debug("Doesn't handle file", "name", sname, "file", name)
+	// No per-(file,server) routing log here: handles() is on the hot path
+	// (every file open × every server), and a line per call floods the log
+	// with non-actionable routing decisions.
 	return false
 }
 

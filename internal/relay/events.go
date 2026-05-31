@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	agentruntime "github.com/charmbracelet/crush/internal/runtime"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -144,6 +145,14 @@ func wrapEvent(ev any) *pubsub.Payload {
 				SubAgentError:      e.Payload.SubAgentError,
 			},
 		})
+	case pubsub.Event[agentruntime.TaskTrace]:
+		// Task trace events are high-frequency, host-local diagnostics (the
+		// trace JSONL file + the TUI DAG panel). They are intentionally not
+		// mirrored to the phone — the phone already gets task/sub-agent
+		// lifecycle via AgentEvent (notify.Notification) above. Skip silently
+		// instead of falling to the default WARN, which otherwise spams the
+		// log hundreds of times per session.
+		return nil
 	default:
 		slog.Warn("Unrecognized event type for SSE wrapping", "type", fmt.Sprintf("%T", ev))
 		return nil
