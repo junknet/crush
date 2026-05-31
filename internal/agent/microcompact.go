@@ -98,18 +98,31 @@ func (a *sessionAgent) rewriteToolResults(sessionID string, msg *message.Message
 		if !ok {
 			continue
 		}
-		if len(tr.Content) <= microCompactToolResultMax {
+		// Count both the text Content and the binary Data (e.g. a base64
+		// image): an image result carries its payload in Data with only a
+		// short Content, so a Content-only check would let large stale
+		// screenshots balloon the context unchecked.
+		size := len(tr.Content) + len(tr.Data)
+		if size <= microCompactToolResultMax {
 			continue
 		}
-		// Spill to disk under the same tool-results tree bash uses so all
-		// per-session evidence sits together.
-		path, n, err := writeMicroCompactSpill(a.dataDir, sessionID, tr.ToolCallID, tr.Content, now)
+		// Spill the recoverable text to disk under the same tool-results tree
+		// bash uses so all per-session evidence sits together. Binary/image
+		// Data is dropped (not spilled): a stale base64 blob is not usefully
+		// re-viewable and spilling megabytes per old screenshot wastes disk.
+		spillContent := tr.Content
+		if tr.Data != "" {
+			spillContent += fmt.Sprintf("\n[+ %d bytes of %s binary/image data dropped by microCompact]", len(tr.Data), tr.MIMEType)
+		}
+		path, _, err := writeMicroCompactSpill(a.dataDir, sessionID, tr.ToolCallID, spillContent, now)
 		if err != nil {
 			slog.Warn("MicroCompact: spill write failed", "session", sessionID, "tool_call", tr.ToolCallID, "error", err)
 			continue
 		}
-		cleared += n
-		tr.Content = fmt.Sprintf("[Tool result cleared by microCompact — original %d bytes, spill at %s. Use the view tool on that path to recover the original content.]", n, path)
+		cleared += size
+		tr.Content = fmt.Sprintf("[Tool result cleared by microCompact — original %d bytes (incl %d image/binary), spill at %s. Use the view tool on that path to recover the text.]", size, len(tr.Data), path)
+		tr.Data = ""
+		tr.MIMEType = ""
 		msg.Parts[i] = tr
 		changed = true
 	}
