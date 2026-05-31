@@ -148,3 +148,21 @@ func TestBatchToolBlocksRecursion(t *testing.T) {
 	require.Equal(t, 1, batchResp.Summary.Failed)
 	require.Contains(t, batchResp.Nodes[0].Error, "nested tool Batch is blocked")
 }
+
+// The model sometimes jams a node label into the "tool" field instead of "id"
+// (observed in production: tool="ReadDir业务层入口及后端适配层目录树"). resolveTool
+// must extract the leading identifier and still resolve it.
+func TestBatchResolvesPollutedToolName(t *testing.T) {
+	vt := NewViewTool(nil, &mockBashPermissionService{}, mockFileTracker{}, nil, t.TempDir())
+	reg := map[string]fantasy.AgentTool{"ReadDir": vt, "Read": vt}
+
+	if name, tool := resolveTool(reg, "ReadDir业务层入口及后端适配层目录树"); name != "ReadDir" || tool == nil {
+		t.Fatalf("polluted tool name must resolve to ReadDir, got %q", name)
+	}
+	if name, tool := resolveTool(reg, "  read  "); name != "Read" || tool == nil {
+		t.Fatalf("trimmed/case-folded name must resolve to Read, got %q", name)
+	}
+	if name, _ := resolveTool(reg, "Nonexistent工具"); name != "" {
+		t.Fatalf("unknown tool must not match, got %q", name)
+	}
+}

@@ -107,6 +107,7 @@ func (b *EvidenceBatchTool) Info() fantasy.ToolInfo {
 		Description: "Run multiple tools in parallel (up to 16 concurrently). " +
 			"Input is {\"nodes\":[ ... ], optional \"max_parallel\":N}. " +
 			"Each node is one ordinary tool call: {\"tool\":\"<exact tool name>\",\"input\":{<that tool's normal input object>}} plus an optional \"id\" label. " +
+			"\"tool\" must be ONLY the tool name (e.g. \"ReadDir\") — never append a description to it; put any label in \"id\". " +
 			"The input is identical to a standalone call. " +
 			"Examples: {\"tool\":\"Read\",\"input\":{\"file_path\":\"main.go\"}}; " +
 			"{\"tool\":\"Search\",\"input\":{\"mode\":\"content\",\"pattern\":\"foo\"}}; " +
@@ -197,15 +198,36 @@ func resolveTool(registry map[string]fantasy.AgentTool, want string) (string, fa
 	if registry == nil {
 		return "", nil
 	}
-	if t, ok := registry[want]; ok {
-		return want, t
-	}
-	for name, t := range registry {
-		if strings.EqualFold(name, want) {
-			return name, t
+	for _, candidate := range []string{want, cleanToolName(want)} {
+		if candidate == "" {
+			continue
+		}
+		if t, ok := registry[candidate]; ok {
+			return candidate, t
+		}
+		for name, t := range registry {
+			if strings.EqualFold(name, candidate) {
+				return name, t
+			}
 		}
 	}
 	return "", nil
+}
+
+// cleanToolName extracts the leading tool-name identifier from a value the model
+// may have polluted with a trailing label/description — observed in production:
+// tool="ReadDir业务层入口及后端适配层目录树" (it jammed the node label into the
+// tool field instead of "id"). Tool names are ASCII identifiers, so keep the
+// leading run of [A-Za-z0-9_-] and drop the rest.
+func cleanToolName(s string) string {
+	s = strings.TrimSpace(s)
+	i := strings.IndexFunc(s, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-')
+	})
+	if i > 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func (b *EvidenceBatchTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
