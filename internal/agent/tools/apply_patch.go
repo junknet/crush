@@ -226,6 +226,9 @@ func describePlan(plan []plannedChange) string {
 func planPatch(ctx context.Context, patch parsedPatch, workingDir string) ([]plannedChange, error) {
 	plan := make([]plannedChange, 0, len(patch.ops))
 	for _, op := range patch.ops {
+		if strings.ContainsAny(op.path, "*?[") {
+			return nil, fmt.Errorf("apply_patch: file path %q contains wildcard characters (*, ?, [), which is strictly forbidden. Target a single, exact filename", op.path)
+		}
 		absPath := filepathext.SmartJoin(workingDir, op.path)
 		switch op.kind {
 		case opAdd:
@@ -1135,6 +1138,18 @@ func diagnoseMatchError(fileLines, pattern []string, path string, hunkNo int) er
 
 func validateFileStructure(path, content string) error {
 	ext := strings.ToLower(filepath.Ext(path))
+	
+	// Content sniffing for extensionless config files
+	if ext == "" {
+		trimmed := strings.TrimSpace(content)
+		if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+			ext = ".json"
+		} else if (strings.HasPrefix(trimmed, "---") || strings.Contains(trimmed, ": ")) && !strings.Contains(trimmed, "\n\t") {
+			// Basic YAML detection heuristic: start with --- or contains ': ' and does not mix with tabs (yaml forbidden tabs)
+			ext = ".yaml"
+		}
+	}
+
 	switch ext {
 	case ".json":
 		var js json.RawMessage

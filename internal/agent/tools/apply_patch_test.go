@@ -521,3 +521,32 @@ func TestApplyPatchDiagnostics(t *testing.T) {
 	require.Contains(t, err.Error(), "context not found. We found a very similar section around line 1")
 	require.Contains(t, err.Error(), "Mismatch reason: Content difference")
 }
+
+func TestApplyPatchWildcardForbidden(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	patch := "*** Begin Patch\n*** Add File: src/*.go\n+hello\n*** End Patch\n"
+	resp := runApplyPatch(t, dir, patch)
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "contains wildcard characters")
+}
+
+func TestApplyPatchSniffingBypass(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	
+	// Test sniffing: extensionless file containing JSON format should trigger AST check
+	jsonPatch := "*** Begin Patch\n*** Add File: config_no_ext\n+{\"name\": \"crush\",}\n*** End Patch\n"
+	resp := runApplyPatch(t, dir, jsonPatch)
+	require.True(t, resp.IsError)
+	require.Contains(t, resp.Content, "semantic AST guard") // triggers JSON verification due to sniff
+	
+	// Test bypass: custom unknown extension should safely bypass checking and write successfully
+	customPatch := "*** Begin Patch\n*** Add File: config.custom\n+some random config\n*** End Patch\n"
+	resp = runApplyPatch(t, dir, customPatch)
+	require.False(t, resp.IsError, resp.Content)
+	
+	got, err := os.ReadFile(filepath.Join(dir, "config.custom"))
+	require.NoError(t, err)
+	require.Equal(t, "some random config\n", string(got))
+}
