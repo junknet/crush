@@ -38,7 +38,7 @@ type JobOutputResponseMetadata struct {
 	WorkingDirectory string `json:"working_directory"`
 }
 
-func NewJobOutputTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool {
+func NewJobOutputTool(bgManager *shell.BackgroundShellManager, dataDir string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		JobOutputToolName,
 		jobOutputDescription,
@@ -53,7 +53,18 @@ func NewJobOutputTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool
 
 			bgShell, ok := bgManager.Get(params.ShellID)
 			if !ok {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("background shell not found: %s", params.ShellID)), nil
+				// The live job is gone. A background SUB-AGENT persists its
+				// terminal result, so recover it across a restart/reap; bash
+				// background jobs do not, hence the re-dispatch guidance.
+				sessionID := GetSessionFromContext(ctx)
+				if j, found := readPersistedAgentJob(dataDir, sessionID, params.ShellID); found {
+					out := j.Output
+					if out == "" {
+						out = BashNoOutput
+					}
+					return fantasy.NewTextResponse(fmt.Sprintf("Status: %s (recovered from a previous session — the job had already finished)\n\n%s", j.Status, out)), nil
+				}
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("background job %s is not active. Background jobs live only in the running process, so it either already completed and was reaped, or did not survive a Crush restart. Re-dispatch the task if you still need it.", params.ShellID)), nil
 			}
 
 			if params.Wait {

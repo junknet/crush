@@ -18,7 +18,13 @@ import (
 )
 
 const (
-	SearchToolName    = "Search"
+	SearchToolName = "Search"
+	// GrepToolName / FindToolName are habitual model vocabulary registered as
+	// thin Search aliases (see newSearchVariant). The model emits these names
+	// from a strong training prior no matter what the prompt says, so we accept
+	// them instead of letting the agent loop reject with "tool not found".
+	GrepToolName      = "Grep"
+	FindToolName      = "Find"
 	searchMatchLimit  = 100
 	searchToolTimeout = 10 * time.Second
 )
@@ -109,12 +115,36 @@ func localExecErr(err error) error {
 	return err
 }
 
+const grepDescription = `Search file contents (alias of Search mode="content"). Pattern is a regex (or literal with literal=true). Fast, .gitignore-aware, works locally and on attached remote hosts.`
+
+const findDescription = `Find files by name (alias of Search mode="files"). Pattern is a filename glob, e.g. "*.go" or "**/*.{ts,tsx}". Fast, .gitignore-aware, works locally and on attached remote hosts.`
+
 func NewSearchTool(workingDir string) fantasy.AgentTool {
+	return newSearchVariant(SearchToolName, searchDescription, workingDir, "")
+}
+
+// NewGrepTool / NewFindTool register the model's habitual tool names as thin
+// aliases of Search with the mode preset. The model emits "Grep"/"Find" from a
+// strong training prior regardless of the prompt; registering them turns a
+// "tool not found: Grep" dead turn into a working call. One Search
+// implementation underneath — only the entry name and forced mode differ.
+func NewGrepTool(workingDir string) fantasy.AgentTool {
+	return newSearchVariant(GrepToolName, grepDescription, workingDir, "content")
+}
+
+func NewFindTool(workingDir string) fantasy.AgentTool {
+	return newSearchVariant(FindToolName, findDescription, workingDir, "files")
+}
+
+func newSearchVariant(name, description, workingDir, forcedMode string) fantasy.AgentTool {
 	return fantasy.NewParallelAgentTool(
-		SearchToolName,
-		searchDescription,
+		name,
+		description,
 		func(ctx context.Context, params SearchParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			mode := strings.ToLower(strings.TrimSpace(params.Mode))
+			if forcedMode != "" {
+				mode = forcedMode // Grep/Find force their mode; any model-supplied mode is ignored
+			}
 			if mode != "content" && mode != "files" {
 				return fantasy.NewTextErrorResponse("search: mode must be either 'content' or 'files'"), nil
 			}

@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -106,6 +107,7 @@ func (c *coordinator) runSubAgentBackground(
 	// survive this tool returning) but cancelable via JobKill / session reaping.
 	runCtx, cancel := context.WithCancel(context.Background())
 	bgShell := c.bgManager.RegisterVirtualJob(jobID, description, sessionID, cancel)
+	dataDir := c.cfg.Config().Options.DataDirectory
 
 	go func() {
 		result, err := c.runSubAgent(runCtx, subAgentParams{
@@ -119,10 +121,20 @@ func (c *coordinator) runSubAgentBackground(
 		})
 
 		output := ""
+		status := "completed"
+		exitCode := 0
 		if err != nil {
 			output = fmt.Sprintf("error: %v", err)
+			exitCode = 1
 		} else {
 			output = result.Content
+		}
+		// Persist the terminal result BEFORE Complete so JobOutput can recover
+		// it even if the process restarts after the worker finishes but before
+		// the brain collects it (the resume case where the live manager is
+		// empty). Best-effort; failure must not block completion.
+		if perr := tools.PersistAgentJobResult(dataDir, sessionID, jobID, status, output, exitCode); perr != nil {
+			slog.Warn("Failed to persist agent job result", "job", jobID, "error", perr)
 		}
 		// Drives maybePublishDone → the same auto-wake the agent loop already
 		// listens for, and makes job_output(shell_id) return the result.
