@@ -1,0 +1,8 @@
+{"id":"gemini_high","provider":"antigravity","model":"gemini-3-flash-agent","note":"antigravity 高 thinking 档(id 编码,can_reason=false)"}
+{"id":"gemini_medium","provider":"antigravity","model":"gemini-3.5-flash-low","note":"antigravity 中 thinking 档(id 编码,can_reason=false)"}
+{"id":"sonnet46_high","provider":"anthropic-oauth","model":"claude-sonnet-4-6","think":true,"reasoning_effort":"high","note":"think+budget 16000"}
+{"id":"sonnet46_medium","provider":"anthropic-oauth","model":"claude-sonnet-4-6","think":true,"reasoning_effort":"medium","note":"think+budget 8000"}
+{"id":"opus48_high","provider":"anthropic-oauth","model":"claude-opus-4-8","think":true,"reasoning_effort":"high","note":"think+budget 16000"}
+{"id":"opus48_medium","provider":"anthropic-oauth","model":"claude-opus-4-8","think":true,"reasoning_effort":"medium","note":"think+budget 8000"}
+{"id":"gpt55_high","provider":"official-openai","model":"gpt-5.5","reasoning_effort":"high","note":"openai 原生 reasoning_effort"}
+{"id":"gpt55_medium","provider":"official-openai","model":"gpt-5.5","reasoning_effort":"medium","note":"openai 原生 reasoning_effort"}

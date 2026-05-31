@@ -25,6 +25,7 @@ const (
 // Reasoning represents a dialog for selecting reasoning effort.
 type Reasoning struct {
 	com   *common.Common
+	role  config.SelectedModelType
 	help  help.Model
 	list  *list.FilterableList
 	input textinput.Model
@@ -61,9 +62,13 @@ var (
 	_ ListItem = (*ReasoningItem)(nil)
 )
 
-// NewReasoning creates a new reasoning effort dialog.
-func NewReasoning(com *common.Common) (*Reasoning, error) {
-	r := &Reasoning{com: com}
+// NewReasoning creates a new reasoning effort dialog targeting the given agent
+// role. An empty role defaults to the brain role.
+func NewReasoning(com *common.Common, role config.SelectedModelType) (*Reasoning, error) {
+	if role == "" {
+		role = config.SelectedModelTypeBrain
+	}
+	r := &Reasoning{com: com, role: role}
 
 	help := help.New()
 	help.Styles = com.Styles.DialogHelpStyles()
@@ -142,7 +147,7 @@ func (r *Reasoning) HandleMsg(msg tea.Msg) Action {
 			if !ok {
 				break
 			}
-			return ActionSelectReasoningEffort{Effort: reasoningItem.effort}
+			return ActionSelectReasoningEffort{Effort: reasoningItem.effort, Role: r.role}
 		default:
 			var cmd tea.Cmd
 			r.input, cmd = r.input.Update(msg)
@@ -226,13 +231,9 @@ func (r *Reasoning) FullHelp() [][]key.Binding {
 
 func (r *Reasoning) setReasoningItems() error {
 	cfg := r.com.Config()
-	agentCfg, ok := cfg.Agents[config.AgentBrain]
-	if !ok {
-		return errors.New("agent configuration not found")
-	}
 
-	selectedModel := cfg.Models[agentCfg.Model]
-	model := cfg.GetModelByType(agentCfg.Model)
+	selectedModel := cfg.Models[r.role]
+	model := cfg.GetModelByType(r.role)
 	if model == nil {
 		return errors.New("model configuration not found")
 	}

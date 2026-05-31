@@ -53,3 +53,14 @@ SELECT *
 FROM messages
 WHERE role = 'user'
 ORDER BY created_at DESC;
+
+-- name: ListMessagesBySessionBefore :many
+-- Keyset page of messages strictly older than the (created_at, id) cursor, in
+-- descending order. (created_at, id) is a deterministic total order so paging
+-- never skips, and with client-side map dedupe never duplicates either.
+SELECT *
+FROM messages
+WHERE session_id = @session_id
+  AND (created_at < @before_created_at OR (created_at = @before_created_at AND id < @before_id))
+ORDER BY created_at DESC, id DESC
+LIMIT @row_limit;

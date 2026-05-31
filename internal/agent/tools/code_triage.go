@@ -112,8 +112,7 @@ type CodeTriageResponseMetadata struct {
 }
 
 const (
-	CodeTriageToolName = "code_triage"
-	BugTriageToolName  = "bug_triage"
+	CodeTriageToolName = "CodeTriage"
 )
 
 const (

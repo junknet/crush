@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/fantasy"
@@ -20,15 +21,18 @@ var agentToolDescription string
 
 type AgentParams struct {
 	Prompt          string `json:"prompt" description:"要执行的任务描述"`
-	Role            string `json:"role,omitempty" description:"agent 角色：explore（只读仓库检查）、plan（只读实现设计）、worker（实现/修复代码）、auditor（安全/数学对抗审查）。默认 explore。"`
-	RunInBackground bool   `json:"run_in_background,omitempty" description:"设为 true 时立即返回 agent_job_id，不阻塞 brain agent。用 monitor(shell_id=agent_job_id) 等待完成，用 job_output(shell_id=agent_job_id) 取结果。适合耗时长的 worker 任务。"`
+	Role            string `json:"role,omitempty" jsonschema:"description=agent role,enum=explore,enum=plan,enum=worker,enum=auditor" description:"agent 角色：explore（只读仓库检查）、plan（只读实现设计）、worker（实现/修复代码）、auditor（安全/数学对抗审查）。默认 explore。"`
+	RunInBackground bool   `json:"run_in_background,omitempty" description:"设为 true 时立即返回 agent_job_id，不阻塞 brain agent。用 Monitor(shell_id=agent_job_id) 等待完成，用 JobOutput(shell_id=agent_job_id) 取结果。适合耗时长的 worker 任务。"`
 }
 
 const (
-	AgentToolName = "agent"
+	AgentToolName = "Agent"
 )
 
-func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) {
+// agentTool builds the delegation tool. When allowedRoles is non-empty the tool
+// rejects any role outside that set — used to confine the read-only plan agent
+// to spawning explore sub-agents only, so it cannot fan out to mutating roles.
+func (c *coordinator) agentTool(ctx context.Context, allowedRoles ...string) (fantasy.AgentTool, error) {
 	return fantasy.NewParallelAgentTool(
 		AgentToolName,
 		agentToolDescription,
@@ -40,6 +44,10 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 			profile, role, err := resolveAgentToolRole(params.Role)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+
+			if len(allowedRoles) > 0 && !slices.Contains(allowedRoles, role) {
+				return fantasy.NewTextErrorResponse(fmt.Sprintf("Agent role %q is not permitted here; allowed roles: %s", role, strings.Join(allowedRoles, ", "))), nil
 			}
 
 			agent := c.agentForProfile(profile)

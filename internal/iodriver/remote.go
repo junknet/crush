@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 	"sync"
 )
 
@@ -177,4 +178,75 @@ func (b *RemoteBackend) Exec(_ context.Context, req ExecRequest) (ExecResult, er
 		return ExecResult{}, fmt.Errorf("exec: %s", resp.ErrMsg)
 	}
 	return ExecResult{Stdout: resp.Stdout, Stderr: resp.Stderr, ExitCode: resp.ExitCode}, nil
+}
+
+const remoteJobIDPrefix = "remote:"
+
+func RemoteJobID(raw string) string {
+	if strings.HasPrefix(raw, remoteJobIDPrefix) {
+		return raw
+	}
+	return remoteJobIDPrefix + raw
+}
+
+func IsRemoteJobID(id string) bool {
+	return strings.HasPrefix(id, remoteJobIDPrefix)
+}
+
+func remoteRawJobID(id string) string {
+	return strings.TrimPrefix(id, remoteJobIDPrefix)
+}
+
+func (b *RemoteBackend) StartJob(_ context.Context, req JobRequest) (JobSnapshot, error) {
+	resp, err := b.call(rpcRequest{
+		Method:      methodJobStart,
+		Command:     req.Command,
+		Argv:        req.Argv,
+		Cwd:         req.Cwd,
+		Env:         req.Env,
+		Description: req.Description,
+		SessionID:   req.SessionID,
+	})
+	if err != nil {
+		return JobSnapshot{}, err
+	}
+	if resp.ErrKind != errKindNone {
+		return JobSnapshot{}, fmt.Errorf("job_start: %s", resp.ErrMsg)
+	}
+	return jobSnapshotFromResponse(resp), nil
+}
+
+func (b *RemoteBackend) JobOutput(_ context.Context, id string) (JobSnapshot, error) {
+	resp, err := b.call(rpcRequest{Method: methodJobOutput, JobID: remoteRawJobID(id)})
+	if err != nil {
+		return JobSnapshot{}, err
+	}
+	if resp.ErrKind != errKindNone {
+		return JobSnapshot{}, fmt.Errorf("job_output: %s", resp.ErrMsg)
+	}
+	return jobSnapshotFromResponse(resp), nil
+}
+
+func (b *RemoteBackend) KillJob(_ context.Context, id string) error {
+	resp, err := b.call(rpcRequest{Method: methodJobKill, JobID: remoteRawJobID(id)})
+	if err != nil {
+		return err
+	}
+	if resp.ErrKind != errKindNone {
+		return fmt.Errorf("job_kill: %s", resp.ErrMsg)
+	}
+	return nil
+}
+
+func jobSnapshotFromResponse(resp rpcResponse) JobSnapshot {
+	return JobSnapshot{
+		ID:          RemoteJobID(resp.JobID),
+		Command:     resp.Command,
+		Description: resp.Description,
+		Cwd:         resp.Cwd,
+		Stdout:      resp.Stdout,
+		Stderr:      resp.Stderr,
+		Done:        resp.Done,
+		ExitCode:    resp.ExitCode,
+	}
 }

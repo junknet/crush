@@ -94,7 +94,7 @@ func ExpandValue(ctx context.Context, value string, env []string) (string, error
 				interp.Env(expand.ListEnviron(env...)),
 				interp.Dir(s.cwd),
 				interp.CallHandler(rewriteUnsupportedBuiltins),
-				interp.ExecHandlers(standardHandlers(s.blockFuncs)...),
+				interp.ExecHandlers(standardHandlers(s.blockFuncs, s.rewriteFuncs)...),
 			}
 			if strict {
 				// Match the outer NoUnset: an unset $VAR inside

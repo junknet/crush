@@ -414,16 +414,21 @@ func outputSessionJSON(w io.Writer, sess session.Session, msgs []*message.Messag
 	skills := extractSkillsFromMessages(msgs)
 	output := sessionShowOutput{
 		Meta: sessionShowMeta{
-			ID:               session.HashID(sess.ID),
-			UUID:             sess.ID,
-			Title:            sess.Title,
-			Created:          time.Unix(sess.CreatedAt, 0).Format(time.RFC3339),
-			Modified:         time.Unix(sess.UpdatedAt, 0).Format(time.RFC3339),
-			Cost:             sess.Cost,
-			PromptTokens:     sess.PromptTokens,
-			CompletionTokens: sess.CompletionTokens,
-			TotalTokens:      sess.PromptTokens + sess.CompletionTokens,
-			Skills:           skills,
+			ID:                        session.HashID(sess.ID),
+			UUID:                      sess.ID,
+			Title:                     sess.Title,
+			Created:                   time.Unix(sess.CreatedAt, 0).Format(time.RFC3339),
+			Modified:                  time.Unix(sess.UpdatedAt, 0).Format(time.RFC3339),
+			Cost:                      sess.Cost,
+			PromptTokens:              sess.PromptTokens,
+			CompletionTokens:          sess.CompletionTokens,
+			TotalTokens:               sess.PromptTokens + sess.CompletionTokens,
+			LastPromptTokens:          sess.LastPromptTokens,
+			LastCompletionTokens:      sess.LastCompletionTokens,
+			LastCacheCreationTokens:   sess.LastCacheCreationTokens,
+			LastCacheReadTokens:       sess.LastCacheReadTokens,
+			LastContextPressureTokens: sess.LastContextPressureTokens,
+			Skills:                    skills,
 		},
 		Messages: make([]sessionShowMessage, len(msgs)),
 	}
@@ -574,16 +579,21 @@ func sessionWriter(ctx context.Context, contentHeight int) (io.Writer, func(), b
 }
 
 type sessionShowMeta struct {
-	ID               string             `json:"id"`
-	UUID             string             `json:"uuid"`
-	Title            string             `json:"title"`
-	Created          string             `json:"created"`
-	Modified         string             `json:"modified"`
-	Cost             float64            `json:"cost"`
-	PromptTokens     int64              `json:"prompt_tokens"`
-	CompletionTokens int64              `json:"completion_tokens"`
-	TotalTokens      int64              `json:"total_tokens"`
-	Skills           []sessionShowSkill `json:"skills,omitempty"`
+	ID                        string             `json:"id"`
+	UUID                      string             `json:"uuid"`
+	Title                     string             `json:"title"`
+	Created                   string             `json:"created"`
+	Modified                  string             `json:"modified"`
+	Cost                      float64            `json:"cost"`
+	PromptTokens              int64              `json:"prompt_tokens"`
+	CompletionTokens          int64              `json:"completion_tokens"`
+	TotalTokens               int64              `json:"total_tokens"`
+	LastPromptTokens          int64              `json:"last_prompt_tokens"`
+	LastCompletionTokens      int64              `json:"last_completion_tokens"`
+	LastCacheCreationTokens   int64              `json:"last_cache_creation_tokens"`
+	LastCacheReadTokens       int64              `json:"last_cache_read_tokens"`
+	LastContextPressureTokens int64              `json:"last_context_pressure_tokens"`
+	Skills                    []sessionShowSkill `json:"skills,omitempty"`
 }
 
 type sessionShowSkill struct {

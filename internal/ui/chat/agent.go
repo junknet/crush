@@ -237,6 +237,9 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	if statusLine != "" {
 		parts = append(parts, statusLine)
 	}
+	if nestedView := r.renderNestedTools(sty, cappedWidth, opts); nestedView != "" {
+		parts = append(parts, nestedView)
+	}
 
 	result := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
@@ -247,6 +250,36 @@ func (r *AgentToolRenderContext) RenderTool(sty *styles.Styles, width int, opts 
 	}
 
 	return result
+}
+
+func (r *AgentToolRenderContext) renderNestedTools(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
+	toolUses := len(r.agent.nestedTools)
+	if toolUses == 0 {
+		return ""
+	}
+
+	plural := "uses"
+	if toolUses == 1 {
+		plural = "use"
+	}
+
+	if !opts.ExpandedContent {
+		prefix := sty.Tool.AgentPrompt.Render("   \u23BF  ")
+		text := fmt.Sprintf("+%d tool %s (ctrl+o to expand)", toolUses, plural)
+		return "   " + prefix + sty.Tool.AgentPrompt.Render(text)
+	}
+
+	childRoot := tree.Root("")
+	nestedWidth := max(20, width-toolBodyLeftPaddingTotal-6)
+	for _, nestedTool := range r.agent.nestedTools {
+		childRoot.Child(nestedTool.Render(nestedWidth))
+	}
+	rendered := childRoot.Enumerator(roundedEnumerator(2, 2)).String()
+	rendered = strings.TrimPrefix(rendered, "\n")
+	if rendered == "" {
+		return ""
+	}
+	return sty.Tool.Body.Render(rendered)
 }
 
 func getAgentRoleName(role string) string {

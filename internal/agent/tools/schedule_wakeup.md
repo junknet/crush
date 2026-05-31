@@ -13,6 +13,6 @@ Use `key` (or `task_key`) for wake-ups tied to a specific async task, such as `g
 
 The tool response metadata includes `task_id`, `key`, `replaced_count`, `next_fire_at`, and the schedule details. Use `task_id` for logging and `key` for semantic cancellation/replacement.
 
-Do NOT use this to wait on local background jobs — those already wake you on completion (just background the command), and use the `monitor` tool to watch their output streams. `schedule_wakeup` is specifically for "nothing here can tell me when it changes, so check again later."
+Do NOT use this to wait on local background jobs — those already wake you on completion (just background the command), and use the `Monitor` tool to watch their output streams. `ScheduleWakeup` is specifically for "nothing here can tell me when it changes, so check again later."
 
 Pick the schedule to match how fast the external state actually changes — short polls (30–120s) for an active CI run, longer (600s+) or a cron expression for slow queues. Keep `reason` concrete (e.g. "re-check GitHub Actions run 12345 status", not "check").

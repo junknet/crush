@@ -131,6 +131,10 @@ func Run(ctx context.Context, p *tea.Program, a *app.App, store *config.ConfigSt
 	go commandLoop(runCtx, p, a, sessionID, nc, runCancel)
 
 	subject := "crush.sess." + sessionID + ".events"
+	// liveSubject carries every streaming snapshot (ephemeral, core NATS,
+	// NOT bound to any JetStream stream) so an attached phone streams
+	// token-by-token without those frames ever being persisted.
+	liveSubject := "crush.sess." + sessionID + ".live"
 	// Backfill history into JetStream on startup so a phone connecting
 	// mid-session sees prior context without waiting for new output.
 	// Use Msg-Id for idempotent replay across relay restarts.
@@ -218,6 +222,35 @@ func Run(ctx context.Context, p *tea.Program, a *app.App, store *config.ConfigSt
 				}
 				continue
 			}
+			// Message events split live vs durable. The message service emits
+			// ~30 full-snapshot UpdatedEvents/sec during a streaming assistant
+			// turn (one per ~33ms debounce tick). Persisting every snapshot
+			// into JetStream made a phone cold-open replay the entire per-token
+			// history (measured 11k events / 78MB for one session). Mirror
+			// every snapshot live over the ephemeral .live subject so an
+			// attached phone still streams token-by-token, but only persist
+			// TERMINAL snapshots (finished assistant / complete user|tool /
+			// deletions) into JetStream so cold-open replays finished messages,
+			// not intermediate frames.
+			if msgEv, ok := ev.Payload.(pubsub.Event[message.Message]); ok {
+				if err := nc.Publish(liveSubject, data); err != nil {
+					slog.Debug("Relay live publish failed", "error", err)
+				}
+				if !shouldPersistMessage(msgEv) {
+					continue
+				}
+				if msgEv.Type == pubsub.DeletedEvent {
+					// A deletion must NOT be deduped against the create/finish
+					// that shares its message id, or a cold-open would
+					// resurrect the deleted message. Publish without a msg id.
+					if _, err := js.Publish(ctx, subject, data); err != nil {
+						slog.Debug("Relay delete publish failed", "error", err)
+					}
+				} else if _, err := js.Publish(ctx, subject, data, jetstream.WithMsgID(msgEv.Payload.ID)); err != nil {
+					slog.Debug("Relay persist message failed", "error", err)
+				}
+				continue
+			}
 			if _, err := js.Publish(ctx, subject, data); err != nil {
 				slog.Debug("Relay publish failed", "error", err)
 			}
@@ -228,6 +261,20 @@ func Run(ctx context.Context, p *tea.Program, a *app.App, store *config.ConfigSt
 func presenceLoop(ctx context.Context, a *app.App, store *config.ConfigStore, sessionID string, kv jetstream.KeyValue, trigger <-chan struct{}) {
 	tick := time.NewTicker(heartbeat)
 	defer tick.Stop()
+	// available_models is derived from enabled-provider config, which is
+	// effectively static for the process lifetime. Compute it once instead of
+	// rebuilding the full provider×model list on every 5s heartbeat tick.
+	var availableModels []config.SelectedModel
+	if cfg := a.Config(); cfg != nil {
+		for _, provider := range cfg.EnabledProviders() {
+			for _, model := range provider.Models {
+				availableModels = append(availableModels, config.SelectedModel{
+					Provider: provider.ID,
+					Model:    model.ID,
+				})
+			}
+		}
+	}
 	put := func() {
 		meta := SessionMeta{
 			SessionID: sessionID,
@@ -255,16 +302,7 @@ func presenceLoop(ctx context.Context, a *app.App, store *config.ConfigStore, se
 			for role, modelCfg := range cfg.Models {
 				meta.Models[string(role)] = modelCfg
 			}
-			var available []config.SelectedModel
-			for _, provider := range cfg.EnabledProviders() {
-				for _, model := range provider.Models {
-					available = append(available, config.SelectedModel{
-						Provider: provider.ID,
-						Model:    model.ID,
-					})
-				}
-			}
-			meta.AvailableModels = available
+			meta.AvailableModels = availableModels
 		}
 		if b, err := json.Marshal(meta); err == nil {
 			_, _ = kv.Put(ctx, sessionID, b)
@@ -420,32 +458,21 @@ func loadHistoryPage(ctx context.Context, a *app.App, sessionID string, cmd Comm
 	if a == nil || a.Messages == nil {
 		return HistoryPage{}, fmt.Errorf("loadHistoryPage: message service unavailable")
 	}
-	messages, err := a.Messages.List(ctx, sessionID)
-	if err != nil {
-		return HistoryPage{}, fmt.Errorf("loadHistoryPage: list session %q messages: %w", sessionID, err)
-	}
 	limit := cmd.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	end := len(messages)
-	for i, current := range messages {
-		if cmd.BeforeMessageID != "" && current.ID == cmd.BeforeMessageID {
-			end = i
-			break
-		}
-		if cmd.BeforeMessageID == "" && cmd.BeforeCreatedAt > 0 && current.CreatedAt >= cmd.BeforeCreatedAt {
-			end = i
-			break
-		}
-	}
-	start := end - limit
-	if start < 0 {
-		start = 0
+	// Keyset pagination on the authoritative local store: O(limit) instead of
+	// loading and deserializing the whole session per page. The phone sends its
+	// oldest message's (created_at, id) as the cursor; messagesToProto preserves
+	// the chronological order ListBefore returns.
+	messages, err := a.Messages.ListBefore(ctx, sessionID, cmd.BeforeCreatedAt, cmd.BeforeMessageID, limit)
+	if err != nil {
+		return HistoryPage{}, fmt.Errorf("loadHistoryPage: list session %q messages before (%d,%q): %w", sessionID, cmd.BeforeCreatedAt, cmd.BeforeMessageID, err)
 	}
 	return HistoryPage{
-		Messages:  messagesToProto(messages[start:end]),
-		Exhausted: start == 0,
+		Messages:  messagesToProto(messages),
+		Exhausted: len(messages) < limit,
 	}, nil
 }
 

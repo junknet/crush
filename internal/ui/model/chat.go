@@ -684,6 +684,33 @@ func (m *Chat) ToggleExpandedSelectedItem() {
 	}
 }
 
+// ToggleLatestNestedToolExpansion expands/collapses the most recent tool item
+// that owns nested tool calls. This lets the composer-level ctrl+o shortcut
+// open the visible "+N tool uses" block without first moving focus into the
+// chat list.
+func (m *Chat) ToggleLatestNestedToolExpansion() bool {
+	for i := m.list.Len() - 1; i >= 0; i-- {
+		item := m.list.ItemAt(i)
+		container, ok := item.(chat.NestedToolContainer)
+		if !ok || len(container.NestedTools()) == 0 {
+			continue
+		}
+		expandable, ok := item.(chat.Expandable)
+		if !ok {
+			continue
+		}
+		m.list.SetSelected(i)
+		if !expandable.ToggleExpanded() {
+			m.ScrollToIndex(i)
+		}
+		if m.AtBottom() {
+			m.ScrollToBottom()
+		}
+		return true
+	}
+	return false
+}
+
 // HandleKeyMsg handles key events for the chat component.
 func (m *Chat) HandleKeyMsg(key tea.KeyMsg) (bool, tea.Cmd) {
 	if m.list.Focused() {

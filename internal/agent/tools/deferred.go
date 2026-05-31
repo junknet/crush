@@ -212,7 +212,7 @@ func (p *proxyDeferredTool) Info() fantasy.ToolInfo {
 	if descr == "" {
 		descr = "(no description)"
 	}
-	descr = "[schema deferred — call tool_search to load before invoking] " + descr
+	descr = "[schema deferred — call ToolSearch to load before invoking] " + descr
 	return fantasy.ToolInfo{
 		Name:        p.info.Name,
 		Description: descr,
@@ -224,7 +224,7 @@ func (p *proxyDeferredTool) Info() fantasy.ToolInfo {
 
 func (p *proxyDeferredTool) Run(_ context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	msg := fmt.Sprintf(
-		"Tool %q schema is not loaded. Call tool_search with query \"select:%s\" to load the schema, then re-invoke the tool.",
+		"Tool %q schema is not loaded. Call ToolSearch with query \"select:%s\" to load the schema, then re-invoke the tool.",
 		p.info.Name, p.info.Name,
 	)
 	return fantasy.NewTextErrorResponse(msg), nil

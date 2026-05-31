@@ -28,6 +28,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/commands"
@@ -80,6 +81,17 @@ const (
 	compactModeWidthBreakpoint  = 120
 	compactModeHeightBreakpoint = 30
 )
+
+// dagRightPanelMinWidth is the terminal width at and above which the activity
+// panel can be shown as a right column instead of a compact overlay.
+const dagRightPanelMinWidth = 132
+
+// rightPanelShowsActivity reports whether the right pane (or the compact
+// overlay) is currently showing the DAG activity panel. Activity is opt-in:
+// ctrl+d opens it and another ctrl+d hides it.
+func (m *UI) rightPanelShowsActivity() bool {
+	return m.detailsOpen
+}
 
 const autoCompactContextPercent = 70
 
@@ -235,7 +247,8 @@ type UI struct {
 	progressBarEnabled bool
 
 	// caps hold different terminal capabilities that we query for.
-	caps common.Capabilities
+	caps            common.Capabilities
+	batchProgresses map[string]tools.BatchProgress
 
 	// Editor components
 	textarea textarea.Model
@@ -909,6 +922,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// redraw; runtimeStatusLine reads the current workspace counters.
 		if !m.shouldHandleBackgroundJobEvent(msg.Payload) {
 			break
+		}
+	case pubsub.Event[tools.BatchProgress]:
+		progress := msg.Payload
+		if m.session != nil && progress.SessionID == m.session.ID {
+			chat.UpdateBatchProgress(progress)
+			if m.batchProgresses == nil {
+				m.batchProgresses = make(map[string]tools.BatchProgress)
+			}
+			m.batchProgresses[progress.ToolCallID] = progress
 		}
 	case pubsub.Event[permission.PermissionRequest]:
 		if cmd := m.openPermissionsDialog(msg.Payload); cmd != nil {
@@ -1768,22 +1790,21 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			break
 		}
 
-		agentCfg, ok := cfg.Agents[config.AgentBrain]
-		if !ok {
-			cmds = append(cmds, util.ReportError(errors.New("agent configuration not found")))
-			break
+		role := msg.Role
+		if role == "" {
+			role = config.SelectedModelTypeBrain
 		}
 
-		currentModel := cfg.Models[agentCfg.Model]
+		currentModel := cfg.Models[role]
 		currentModel.ReasoningEffort = msg.Effort
-		if err := m.com.Workspace.UpdatePreferredModel(agentCfg.Model, currentModel); err != nil {
+		if err := m.com.Workspace.UpdatePreferredModel(role, currentModel); err != nil {
 			cmds = append(cmds, util.ReportError(err))
 			break
 		}
 
 		cmds = append(cmds, func() tea.Msg {
 			m.com.Workspace.UpdateAgentModel(context.TODO())
-			return util.NewInfoMsg("Reasoning effort set to " + msg.Effort)
+			return util.NewInfoMsg(fmt.Sprintf("%s reasoning effort set to %s", role, msg.Effort))
 		})
 		m.dialog.CloseDialog(dialog.ReasoningID)
 	case dialog.ActionPermissionResponse:
@@ -1996,6 +2017,18 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 		}
 	} else if m.com.IsHyper() {
 		cmds = append(cmds, m.fetchHyperCredits())
+	}
+
+	// The plan and auditor roles are reasoning-heavy: once their model is set,
+	// chain straight into the reasoning-effort picker (high/xhigh) for that
+	// role, but only when the chosen model actually supports reasoning.
+	if !isOnboarding &&
+		(msg.ModelType == config.SelectedModelTypePlan || msg.ModelType == config.SelectedModelTypeAuditor) {
+		if cm := cfg.GetModel(providerID, msg.Model.Model); cm != nil && cm.CanReason {
+			if cmd := m.openReasoningDialog(msg.ModelType); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 	}
 
 	return tea.Batch(cmds...)
@@ -2338,6 +2371,9 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					m.chat.SetSelected(m.chat.Len() - 1)
 				}
 			case key.Matches(msg, m.keyMap.Editor.OpenEditor):
+				if strings.TrimSpace(m.textarea.Value()) == "" && m.chat.ToggleLatestNestedToolExpansion() {
+					break
+				}
 				if m.isAgentBusy() {
 					cmds = append(cmds, util.ReportWarn("Agent is working, please wait..."))
 					break
@@ -2544,7 +2580,7 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 		m.session,
 		m.currentSessionMode(),
 		m.isCompact,
-		m.detailsOpen,
+		m.rightPanelShowsActivity(),
 		area.Dx(),
 		m.hyperCredits,
 		m.isAgentBusy(),
@@ -2593,10 +2629,15 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	case uiChat:
 		if m.isCompact {
 			m.drawHeader(scr, layout.header)
-		} else if m.detailsOpen {
-			m.drawDagActivity(scr, layout.sidebar)
-		} else {
-			m.drawSidebar(scr, layout.sidebar)
+			if layout.sidebar.Dx() > 0 && m.rightPanelShowsActivity() {
+				m.drawDagActivity(scr, layout.sidebar)
+			}
+		} else if layout.sidebar.Dx() > 0 {
+			if m.rightPanelShowsActivity() {
+				m.drawDagActivity(scr, layout.sidebar)
+			} else {
+				m.drawSidebar(scr, layout.sidebar)
+			}
 		}
 
 		m.chat.Draw(scr, layout.main)
@@ -2604,15 +2645,16 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 			uv.NewStyledString(m.pillsView).Draw(scr, layout.pills)
 		}
 
-		editorWidth := scr.Bounds().Dx()
-		if !m.isCompact {
-			editorWidth -= layout.sidebar.Dx()
-		}
-		editor := uv.NewStyledString(m.renderEditorView(editorWidth))
+		// Render the editor at exactly the width of its draw rectangle. The
+		// textarea is already sized to layout.editor.Dx() (updateSize), so any
+		// other width here desyncs the attachment chips from the input box and,
+		// with a right panel carved, lets content bleed under the panel column.
+		editor := uv.NewStyledString(m.renderEditorView(layout.editor.Dx()))
 		editor.Draw(scr, layout.editor)
 
-		// Draw activity overlay in compact mode when open.
-		if m.isCompact && m.detailsOpen {
+		// Draw activity overlay in compact mode when open, but only when the
+		// right column is not available.
+		if m.isCompact && m.detailsOpen && layout.sidebar.Dx() == 0 {
 			m.drawDagActivity(scr, layout.sessionDetails)
 		}
 	}
@@ -3083,10 +3125,11 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 	}
 	// The editor height: textarea height + margin for attachments and bottom spacing.
 	editorHeight := m.textarea.Height() + editorHeightMargin
-	// The sidebar width
+	// The sidebar width. The right pane is only carved when the user opens the
+	// activity/details panel.
 	sidebarWidth := 30
 	if m.state == uiChat && !m.isCompact && m.detailsOpen {
-		sidebarWidth = min(56, max(36, area.Dx()/3))
+		sidebarWidth = min(54, max(38, area.Dx()/4))
 		if area.Dx()-sidebarWidth < 64 {
 			sidebarWidth = max(30, area.Dx()-64)
 		}
@@ -3202,6 +3245,21 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 			uiLayout.sessionDetails.Min.Y += compactHeaderHeight // adjust for header
 			// Add one line gap between header and main content
 			mainRect.Min.Y += 1
+			// On wide screens, ctrl+d can show activity as a right column instead
+			// of an overlay.
+			if m.detailsOpen && area.Dx() >= dagRightPanelMinWidth {
+				panelWidth := min(54, max(38, area.Dx()/4))
+				if mainRect.Dx()-panelWidth >= 64 {
+					var leftRect, panelRect image.Rectangle
+					layout.Horizontal(
+						layout.Len(mainRect.Dx()-panelWidth),
+						layout.Fill(1),
+					).Split(mainRect).Assign(&leftRect, &panelRect)
+					panelRect.Min.X += 1 // padding between chat and panel
+					uiLayout.sidebar = panelRect
+					mainRect = leftRect
+				}
+			}
 			var editorRect image.Rectangle
 			layout.Vertical(
 				layout.Len(mainRect.Dy()-editorHeight),
@@ -3228,27 +3286,29 @@ func (m *UI) generateLayout(w, h int) uiLayout {
 		} else {
 			// Layout
 			//
-			// ------|---
-			// main  |
-			// ------| side
-			// editor|
+			// main
+			// ------
+			// editor
 			// ----------
 			// help
 
-			var mainRect, sideRect image.Rectangle
-			layout.Horizontal(
-				layout.Len(appRect.Dx()-sidebarWidth),
-				layout.Fill(1),
-			).Split(appRect).Assign(&mainRect, &sideRect)
-			// Add padding left
-			sideRect.Min.X += 1
+			mainRect := appRect
+			if m.detailsOpen {
+				var sideRect image.Rectangle
+				layout.Horizontal(
+					layout.Len(appRect.Dx()-sidebarWidth),
+					layout.Fill(1),
+				).Split(appRect).Assign(&mainRect, &sideRect)
+				// Add padding left
+				sideRect.Min.X += 1
+				uiLayout.sidebar = sideRect
+			}
 			var editorRect image.Rectangle
 			layout.Vertical(
 				layout.Len(mainRect.Dy()-editorHeight),
 				layout.Fill(1),
 			).Split(mainRect).Assign(&mainRect, &editorRect)
 			mainRect.Max.X -= 1 // Add padding right
-			uiLayout.sidebar = sideRect
 			pillsHeight := m.pillsAreaHeight()
 			if pillsHeight > 0 {
 				pillsHeight = min(pillsHeight, mainRect.Dy())
@@ -3584,6 +3644,21 @@ func (m *UI) runtimeStatusLine() string {
 	} else if m.isAgentBusy() {
 		parts = append(parts, "model running")
 	}
+	runningBatchCount := 0
+	totalSubcalls := 0
+	completedSubcalls := 0
+	if m.batchProgresses != nil {
+		for _, p := range m.batchProgresses {
+			if p.Completed < p.Total {
+				runningBatchCount++
+				totalSubcalls += p.Total
+				completedSubcalls += p.Completed
+			}
+		}
+	}
+	if runningBatchCount > 0 {
+		parts = append(parts, fmt.Sprintf("Running batch: %d/%d done", completedSubcalls, totalSubcalls))
+	}
 	if stats.Running > 0 {
 		parts = append(parts, fmt.Sprintf("jobs %d", stats.Running))
 	}
@@ -3753,13 +3828,16 @@ func compactionActivitySnapshot(sessionID string, trace agentruntime.TaskTrace) 
 	title := "Compacting conversation"
 	detail := compactionTraceDetail(trace)
 	finishedAt := trace.FinishedAt
+	progress := compactionProgressPercent(trace)
 	switch trace.Kind {
 	case agentruntime.TraceKindConversationCompactionFinished:
 		status = chat.RuntimeActivityDone
 		title = "Compacted conversation"
+		progress = 100
 	case agentruntime.TraceKindConversationCompactionFailed:
 		status = chat.RuntimeActivityFailed
 		title = "Compaction failed"
+		progress = -1
 		if trace.Error != "" {
 			detail = trace.Error
 		}
@@ -3775,8 +3853,40 @@ func compactionActivitySnapshot(sessionID string, trace agentruntime.TaskTrace) 
 		FinishedAt:      finishedAt,
 		Tokens:          tokens,
 		TokensAreExact:  exact,
-		ProgressPercent: -1,
+		ProgressPercent: progress,
 	}
+}
+
+// compactionProgressPercent estimates summarization progress for the live
+// progress bar. The summarizer streams its summary with no upfront length, so
+// the only honest signal available mid-flight is "bytes written so far" against
+// the model's max output budget. We approximate output tokens at 4 bytes/token
+// (the same ratio internal/agent uses in approximateBinaryTokenCount) and cap
+// the running value below 100 so the bar never sticks at full while text is
+// still streaming — the Finished trace flips it to 100. Returns 0 right after
+// the Started trace (no bytes yet) to show an empty bar immediately, and -1 to
+// suppress the bar when no budget is known.
+func compactionProgressPercent(trace agentruntime.TaskTrace) int {
+	const (
+		bytesPerToken     = 4  // matches agent.approximateBinaryTokenCount len/4 heuristic
+		maxRunningPercent = 95 // reserve the final slice for the Finished trace
+		minVisiblePercent = 1
+	)
+	if trace.MaxOutputTokens <= 0 {
+		return -1
+	}
+	if trace.OutputBytes <= 0 {
+		return 0
+	}
+	estimatedOutputTokens := int64(trace.OutputBytes) / bytesPerToken
+	percent := int(estimatedOutputTokens * 100 / trace.MaxOutputTokens)
+	if percent > maxRunningPercent {
+		percent = maxRunningPercent
+	}
+	if percent < minVisiblePercent {
+		percent = minVisiblePercent
+	}
+	return percent
 }
 
 func memoryActivitySnapshot(sessionID string, trace agentruntime.TaskTrace) chat.RuntimeActivitySnapshot {
@@ -4231,7 +4341,7 @@ func (m *UI) contextUsage() (usedTokens int64, contextWindow int64, hasUsage boo
 		return 0, 0, false, false
 	}
 	contextWindow = contextWindowForBrain(m.com)
-	usedTokens = m.session.CompletionTokens + m.session.PromptTokens
+	usedTokens = sessionContextPressureTokens(m.session)
 	if trace, ok := m.latestLLMContextTraceForSession(); ok {
 		if trace.ContextWindowTokens > 0 {
 			contextWindow = trace.ContextWindowTokens
@@ -4258,16 +4368,37 @@ func (m *UI) latestLLMContextTraceForSession() (agentruntime.TaskTrace, bool) {
 }
 
 func contextUsedTokensFromTrace(trace agentruntime.TaskTrace) int64 {
+	cacheTokens := trace.CacheCreationTokens + trace.CacheReadTokens
 	switch {
 	case trace.TotalTokens > 0:
+		if traceProviderIncludesCacheRead(trace.ProviderType) {
+			return trace.TotalTokens
+		}
+		if cacheTokens > 0 && trace.TotalTokens == trace.InputTokens+trace.OutputTokens {
+			return trace.InputTokens + cacheTokens + trace.OutputTokens
+		}
 		return trace.TotalTokens
-	case trace.InputTokens+trace.OutputTokens > 0:
-		return trace.InputTokens + trace.OutputTokens
+	case trace.InputTokens+cacheTokens+trace.OutputTokens > 0:
+		return trace.InputTokens + cacheTokens + trace.OutputTokens
 	case trace.PreflightEstimatedInputTokens > 0:
 		return trace.PreflightEstimatedInputTokens
 	default:
 		return 0
 	}
+}
+
+func traceProviderIncludesCacheRead(providerType string) bool {
+	return providerType == "google" || providerType == "gemini" || providerType == "antigravity"
+}
+
+func sessionContextPressureTokens(sess *session.Session) int64 {
+	if sess == nil {
+		return 0
+	}
+	if sess.LastContextPressureTokens > 0 {
+		return sess.LastContextPressureTokens
+	}
+	return sess.CompletionTokens + sess.PromptTokens
 }
 
 func contextWindowForBrain(com *common.Common) int64 {
@@ -4632,7 +4763,8 @@ func (m *UI) openDialog(id string) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	case dialog.ReasoningID:
-		if cmd := m.openReasoningDialog(); cmd != nil {
+		// Entry from the /commands menu targets the brain role.
+		if cmd := m.openReasoningDialog(config.SelectedModelTypeBrain); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case dialog.FilePickerID:
@@ -4708,14 +4840,15 @@ func (m *UI) openCommandsDialog() tea.Cmd {
 	return commands.InitialCmd()
 }
 
-// openReasoningDialog opens the reasoning effort dialog.
-func (m *UI) openReasoningDialog() tea.Cmd {
+// openReasoningDialog opens the reasoning effort dialog for the given agent
+// role. An empty role targets the brain role (the /commands entry point).
+func (m *UI) openReasoningDialog(role config.SelectedModelType) tea.Cmd {
 	if m.dialog.ContainsDialog(dialog.ReasoningID) {
 		m.dialog.BringToFront(dialog.ReasoningID)
 		return nil
 	}
 
-	reasoningDialog, err := dialog.NewReasoning(m.com)
+	reasoningDialog, err := dialog.NewReasoning(m.com, role)
 	if err != nil {
 		return util.ReportError(err)
 	}

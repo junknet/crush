@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -40,13 +41,14 @@ type BashToolRenderContext struct{}
 // RenderTool implements the [ToolRenderer] interface.
 func (b *BashToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
-	if opts.IsPending() {
-		return pendingTool(sty, "Bash", opts.Compact)
-	}
 
 	var params tools.BashParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
 		params.Command = "failed to parse command"
+	}
+
+	if opts.Status == ToolStatusRunning && !opts.HasResult() && !opts.IsCanceled() {
+		return renderPendingBashTool(sty, opts, cappedWidth, params)
 	}
 
 	// Check if this is a background job.
@@ -98,6 +100,54 @@ func (b *BashToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *
 	bodyWidth := cappedWidth - toolBodyLeftPaddingTotal
 	body := sty.Tool.Body.Render(toolOutputPlainContent(sty, output, bodyWidth, opts.ExpandedContent))
 	return joinToolParts(header, body)
+}
+
+func renderPendingBashTool(sty *styles.Styles, opts *ToolRenderOpts, width int, params tools.BashParams) string {
+	cmd := normalizeBashCommandForHeader(params.Command)
+	toolParams := []string{cmd}
+	if params.RunInBackground {
+		toolParams = append(toolParams, "background", "true")
+	}
+	if elapsed := runningDurationText(opts.StartedAt); elapsed != "" {
+		toolParams = append(toolParams, "elapsed", elapsed)
+	}
+
+	header := toolHeader(sty, opts.Status, "Bash", width, opts.Compact, toolParams...)
+	if opts.Compact {
+		return header
+	}
+
+	body := pendingBashStatus(sty, opts.StartedAt, params.AutoBackgroundAfter)
+	if body == "" {
+		return header
+	}
+	return joinToolParts(header, body)
+}
+
+func normalizeBashCommandForHeader(command string) string {
+	cmd := strings.ReplaceAll(command, "\n", " ")
+	return strings.ReplaceAll(cmd, "\t", "    ")
+}
+
+func pendingBashStatus(sty *styles.Styles, startedAt time.Time, autoBackgroundAfter int) string {
+	if startedAt.IsZero() {
+		return ""
+	}
+
+	elapsed := time.Since(startedAt)
+	if autoBackgroundAfter <= 0 {
+		autoBackgroundAfter = tools.DefaultAutoBackgroundAfter
+	}
+
+	remaining := autoBackgroundAfter - int(elapsed.Seconds())
+	switch {
+	case remaining > 1:
+		return sty.Tool.StateWaiting.Render(fmt.Sprintf("Running. No output yet. Background in %ds.", remaining))
+	case remaining == 1:
+		return sty.Tool.StateWaiting.Render("Running. No output yet. Background in 1s.")
+	default:
+		return sty.Tool.StateWaiting.Render("Still running. Moving to background now.")
+	}
 }
 
 // -----------------------------------------------------------------------------

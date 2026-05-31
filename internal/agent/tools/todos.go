@@ -13,7 +13,7 @@ import (
 //go:embed todos.md
 var todosDescription string
 
-const TodosToolName = "todos"
+const TodosToolName = "Todos"
 
 type TodosParams struct {
 	Todos []TodoItem `json:"todos" description:"The updated todo list"`

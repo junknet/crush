@@ -20,6 +20,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
@@ -224,11 +225,18 @@ func (app *App) resolveSession(ctx context.Context, continueSessionID string, us
 
 // RunNonInteractive runs the application in non-interactive mode with the
 // given prompt, printing to stdout.
-func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt, brainModel, exploreModel string, hideSpinner bool, continueSessionID string, useLast bool) error {
+func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt, brainModel, exploreModel string, hideSpinner bool, continueSessionID string, useLast bool, role string) error {
 	slog.Info("Running in non-interactive mode")
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Pin the root executor to an explicit role when requested (crush run
+	// --role worker), so the run drives that role end-to-end instead of brain.
+	if role != "" {
+		ctx = agent.WithRootAgentOverride(ctx, role)
+		slog.Info("Root agent role override active", "role", role)
+	}
 
 	if brainModel != "" || exploreModel != "" {
 		if err := app.overrideModelsForNonInteractive(ctx, brainModel, exploreModel); err != nil {
@@ -507,6 +515,7 @@ func (app *App) setupEvents() {
 	setupSubscriber(ctx, app.serviceEventsWG, "background-jobs", shell.SubscribeBackgroundJobs, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "lsp", SubscribeLSPEvents, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "skills", skills.SubscribeEvents, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "batch-progress", tools.SubscribeBatchProgress, app.events)
 	cleanupFunc := func(context.Context) error {
 		cancel()
 		app.serviceEventsWG.Wait()

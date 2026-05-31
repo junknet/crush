@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/history"
@@ -97,6 +98,19 @@ func TestApplyEditToContentPartialSuccess(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not found")
+}
+
+func TestValidateEditOldStringRejectsHugeBlock(t *testing.T) {
+	t.Parallel()
+
+	lines := make([]string, maxEditOldStringLines+1)
+	for i := range lines {
+		lines[i] = "same stale context"
+	}
+	err := validateEditOldString(strings.Join(lines, "\n"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "old_string is too large")
+	require.Contains(t, err.Error(), "2-4 adjacent lines")
 }
 
 func TestMultiEditSequentialApplication(t *testing.T) {

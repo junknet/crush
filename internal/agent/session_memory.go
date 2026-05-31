@@ -331,8 +331,12 @@ func (a *sessionAgent) trySessionMemoryCompaction(ctx context.Context, sessionID
 	}
 
 	currentSession.SummaryMessageID = summaryMessage.ID
-	currentSession.PromptTokens = 0
-	currentSession.CompletionTokens = int64(skills.ApproxTokenCount(summaryText))
+	summaryTokens := int64(skills.ApproxTokenCount(summaryText))
+	currentSession.LastPromptTokens = 0
+	currentSession.LastCompletionTokens = summaryTokens
+	currentSession.LastCacheCreationTokens = 0
+	currentSession.LastCacheReadTokens = 0
+	currentSession.LastContextPressureTokens = summaryTokens
 	if _, err := a.sessions.Save(ctx, currentSession); err != nil {
 		return false, err
 	}

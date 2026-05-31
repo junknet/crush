@@ -1,15 +1,13 @@
 package tools
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	_ "embed"
 	"fmt"
 	"html/template"
-	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -52,7 +50,7 @@ type LSResponseMetadata struct {
 }
 
 const (
-	LSToolName = "ls"
+	LSToolName = "ReadDir"
 	maxLSFiles = 1000
 )
 
@@ -139,59 +137,87 @@ func NewLsTool(permissions permission.Service, workingDir string, lsConfig confi
 }
 
 func ListDirectoryTree(ctx context.Context, searchPath string, params LSParams, lsConfig config.ToolLs) (string, LSResponseMetadata, error) {
-	if _, err := os.Stat(searchPath); os.IsNotExist(err) {
+	if _, err := CtxStat(ctx, searchPath); err != nil {
 		return "", LSResponseMetadata{}, fmt.Errorf("path does not exist: %s", searchPath)
 	}
 
 	depth, limit := lsConfig.Limits()
 	maxFiles := cmp.Or(limit, maxLSFiles)
 	maxDepth := cmp.Or(params.Depth, depth)
-
-	rgPath := getRg()
-	if rgPath == "" {
-		return "", LSResponseMetadata{}, fmt.Errorf("ripgrep (rg) not found")
+	if maxDepth <= 0 {
+		maxDepth = 100 // Safe default
 	}
 
-	args := []string{"--files", "--null"}
-	if maxDepth > 0 {
-		args = append(args, "--max-depth", fmt.Sprintf("%d", maxDepth))
-	}
-	for _, ignore := range params.Ignore {
-		if ignore != "" {
-			args = append(args, "--glob", "!"+ignore)
+	var ignoreMatchers []*regexp.Regexp
+	for _, pattern := range params.Ignore {
+		if pattern == "" {
+			continue
+		}
+		resolved, err := resolveFilePattern(pattern)
+		if err == nil {
+			if m, err := regexp.Compile(resolved); err == nil {
+				ignoreMatchers = append(ignoreMatchers, m)
+			}
 		}
 	}
-	args = append(args, searchPath)
 
-	var stdout bytes.Buffer
-	cmd := exec.CommandContext(ctx, rgPath, args...)
-	cmd.Stdout = &stdout
-	err := cmd.Run()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); !ok || (exitErr.ExitCode() != 1 && exitErr.ExitCode() != 2) {
-			return "", LSResponseMetadata{}, fmt.Errorf("ripgrep error: %w", err)
-		}
-		// exit 1 = no matches (normal); exit 2 = some paths were unreadable
-		// (permission denied, broken symlinks, etc.) but stdout still contains
-		// valid results for the paths that were accessible.
-	}
-
-	outputBytes := stdout.Bytes()
 	var files []string
-	if len(outputBytes) > 0 {
-		files = strings.Split(string(outputBytes), "\x00")
-		if len(files) > 0 && files[len(files)-1] == "" {
-			files = files[:len(files)-1]
+	var truncated bool
+	var walk func(path string, curDepth int) error
+
+	walk = func(path string, curDepth int) error {
+		if curDepth > maxDepth {
+			return nil
 		}
+		if len(files) >= maxFiles {
+			truncated = true
+			return nil
+		}
+		entries, err := CtxReadDir(ctx, path)
+		if err != nil {
+			return nil
+		}
+
+		for _, entry := range entries {
+			if len(files) >= maxFiles {
+				truncated = true
+				return nil
+			}
+			name := entry.Name()
+			ignored := false
+			for _, m := range ignoreMatchers {
+				if m.MatchString(name) {
+					ignored = true
+					break
+				}
+			}
+			if name == ".git" {
+				ignored = true
+			}
+
+			if ignored {
+				continue
+			}
+
+			fullPath := filepath.Join(path, name)
+			if !entry.IsDir() {
+				files = append(files, slashJoin(fullPath))
+			}
+
+			if entry.IsDir() {
+				if err := walk(fullPath, curDepth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	if err := walk(searchPath, 1); err != nil {
+		return "", LSResponseMetadata{}, err
 	}
 
 	slices.Sort(files)
-
-	truncated := false
-	if len(files) > maxFiles {
-		files = files[:maxFiles]
-		truncated = true
-	}
 
 	metadata := LSResponseMetadata{
 		NumberOfFiles: len(files),
@@ -207,6 +233,10 @@ func ListDirectoryTree(ctx context.Context, searchPath string, params LSParams, 
 		output += fmt.Sprintf("The directory tree is shown up to a depth of %d. Use a higher depth and a specific path to see more levels.\n", maxDepth)
 	}
 	return output + "\n" + printTree(tree, searchPath), metadata, nil
+}
+
+func slashJoin(p string) string {
+	return filepath.ToSlash(p)
 }
 
 func createFileTree(sortedPaths []string, rootPath string) []*TreeNode {

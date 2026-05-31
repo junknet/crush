@@ -24,7 +24,7 @@
 |--------|------|----------|
 | 文件 | view edit multiedit write ls grep find ast_grep | S2 S6 S7 |
 | 执行 | bash run monitor job_output job_kill schedule_wakeup | S5 S9 |
-| 代码情报 | code_triage bug_triage evidence_batch evidence_graph dag_run sourcegraph | S3 S7 |
+| 代码情报 | code_triage evidence_batch evidence_graph dag_run sourcegraph | S3 S7 |
 | 子代理 | agent(explore/plan/worker/auditor) | S3 S8 |
 | 远程 | remote_attach remote_detach ssh_exec ssh_session_* ssh_mount* ssh_upload/download | S1 |
 | Web | fetch agentic_fetch | S9 |

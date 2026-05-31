@@ -43,7 +43,7 @@ func TestHasMemoryWrites(t *testing.T) {
 			Role: message.Assistant,
 			Parts: []message.ContentPart{
 				message.ToolCall{
-					Name:  "write",
+					Name:  "Write",
 					Input: `{"file_path":"/workspace/project/src/main.go"}`,
 				},
 			},
@@ -63,7 +63,7 @@ func TestHasMemoryWrites(t *testing.T) {
 			Role: message.Assistant,
 			Parts: []message.ContentPart{
 				message.ToolCall{
-					Name:  "write",
+					Name:  "Write",
 					Input: `{"file_path":"/workspace/project/memory/file.md"}`,
 				},
 			},
@@ -82,7 +82,7 @@ func TestHasMemoryWrites(t *testing.T) {
 			Role: message.Assistant,
 			Parts: []message.ContentPart{
 				message.ToolCall{
-					Name:  "write",
+					Name:  "Write",
 					Input: `{"file_path":"/workspace/project/memory_backup/file.md"}`,
 				},
 			},
@@ -157,7 +157,7 @@ func TestShouldTriggerWorkspaceMemoryExtraction(t *testing.T) {
 			{ID: "u1", Role: message.User, Parts: []message.ContentPart{message.TextContent{Text: "audit this"}}},
 			{ID: "a1", Role: message.Assistant, Parts: []message.ContentPart{
 				message.ToolCall{Name: "rg", Input: "{}"},
-				message.ToolCall{Name: "view", Input: "{}"},
+				message.ToolCall{Name: "Read", Input: "{}"},
 				message.ToolCall{Name: "agent", Input: "{}"},
 			}},
 		}
@@ -194,25 +194,25 @@ func TestMemExtractToolWrapper(t *testing.T) {
 
 	// 1. Run safe filename search tool.
 	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
-		Name:  "rg",
+		Name:  tools.SearchToolName,
 		Input: `{"files_only":true}`,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "rg run", resp.Content)
+	assert.Equal(t, "Search run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
 	// 2. Run write tool targeting memory dir
 	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
-		Name:  "write",
+		Name:  "Write",
 		Input: `{"file_path":"/workspace/project/memory/test.md"}`,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "write run", resp.Content)
+	assert.Equal(t, "Write run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
 	// 3. Run write tool targeting other dir
 	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
-		Name:  "write",
+		Name:  "Write",
 		Input: `{"file_path":"/workspace/project/src/test.md"}`,
 	})
 	require.NoError(t, err)
@@ -224,11 +224,11 @@ func TestReadOnlyToolWrapper(t *testing.T) {
 	wrapper := &readOnlyToolWrapper{inner: &dummyTool{}}
 
 	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
-		Name:  tools.RgToolName,
+		Name:  tools.SearchToolName,
 		Input: "{}",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "rg run", resp.Content)
+	assert.Equal(t, "Search run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
 	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
@@ -244,7 +244,7 @@ func TestReadOnlyToolWrapper(t *testing.T) {
 		Input: `{"role":"explore","prompt":"inspect"}`,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "agent run", resp.Content)
+	assert.Equal(t, "Agent run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
 	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
@@ -256,22 +256,22 @@ func TestReadOnlyToolWrapper(t *testing.T) {
 	assert.True(t, resp.StopTurn)
 }
 
-func TestReadOnlyDagRunPolicy(t *testing.T) {
+func TestReadOnlyBatchPolicy(t *testing.T) {
 	wrapper := &readOnlyToolWrapper{inner: &dummyTool{}}
 
 	resp, err := wrapper.Run(context.Background(), fantasy.ToolCall{
-		Name: tools.DagRunToolName,
+		Name: tools.EvidenceBatchToolName,
 		Input: `{"nodes":[
 			{"id":"files","tool":"rg","pattern":"*.go","files_only":true},
 			{"id":"matches","tool":"rg","pattern":"ContextWindow","path":"internal"}
 		]}`,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "dag_run run", resp.Content)
+	assert.Equal(t, "Batch run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
 	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{
-		Name:  tools.DagRunToolName,
+		Name:  tools.EvidenceBatchToolName,
 		Input: `{"nodes":[{"id":"shell","tool":"shell","command":"date"}]}`,
 	})
 	require.NoError(t, err)
@@ -287,7 +287,7 @@ func TestReadOnlyCodeTriagePolicy(t *testing.T) {
 		Input: `{"queries":[{"id":"q","query":"TODO"}],"check_commands":[{"name":"quick","command":"go test ./..."}]}`,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "code_triage run", resp.Content)
+	assert.Equal(t, "CodeTriage run", resp.Content)
 	assert.False(t, resp.StopTurn)
 
 	resp, err = wrapper.Run(context.Background(), fantasy.ToolCall{

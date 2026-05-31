@@ -51,7 +51,7 @@ type MultiEditResponseMetadata struct {
 	EditsFailed  []FailedEdit `json:"edits_failed,omitempty"`
 }
 
-const MultiEditToolName = "multiedit"
+const MultiEditToolName = "MultiEdit"
 
 //go:embed multiedit.md
 var multieditDescription string
@@ -118,6 +118,9 @@ func validateEdits(edits []MultiEditOperation) error {
 		// Only the first edit can have empty old_string (for file creation)
 		if i > 0 && edit.OldString == "" {
 			return fmt.Errorf("edit %d: only the first edit can have empty old_string (for file creation)", i+1)
+		}
+		if err := validateEditOldString(edit.OldString); err != nil {
+			return fmt.Errorf("edit %d: %w", i+1, err)
 		}
 	}
 	return nil

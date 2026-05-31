@@ -60,19 +60,24 @@ func HasIncompleteTodos(todos []Todo) bool {
 }
 
 type Session struct {
-	ID               string
-	ParentSessionID  string
-	Title            string
-	Mode             Mode
-	MessageCount     int64
-	PromptTokens     int64
-	CompletionTokens int64
-	SummaryMessageID string
-	Cost             float64
-	Todos            []Todo
-	CreatedAt        int64
-	UpdatedAt        int64
-	WorkingDir       string
+	ID                        string
+	ParentSessionID           string
+	Title                     string
+	Mode                      Mode
+	MessageCount              int64
+	PromptTokens              int64
+	CompletionTokens          int64
+	LastPromptTokens          int64
+	LastCompletionTokens      int64
+	LastCacheCreationTokens   int64
+	LastCacheReadTokens       int64
+	LastContextPressureTokens int64
+	SummaryMessageID          string
+	Cost                      float64
+	Todos                     []Todo
+	CreatedAt                 int64
+	UpdatedAt                 int64
+	WorkingDir                string
 }
 
 type Service interface {
@@ -221,11 +226,16 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	}
 
 	dbSession, err := s.q.UpdateSession(ctx, db.UpdateSessionParams{
-		ID:               session.ID,
-		Title:            session.Title,
-		Mode:             string(session.Mode),
-		PromptTokens:     session.PromptTokens,
-		CompletionTokens: session.CompletionTokens,
+		ID:                        session.ID,
+		Title:                     session.Title,
+		Mode:                      string(session.Mode),
+		PromptTokens:              session.PromptTokens,
+		CompletionTokens:          session.CompletionTokens,
+		LastPromptTokens:          session.LastPromptTokens,
+		LastCompletionTokens:      session.LastCompletionTokens,
+		LastCacheCreationTokens:   session.LastCacheCreationTokens,
+		LastCacheReadTokens:       session.LastCacheReadTokens,
+		LastContextPressureTokens: session.LastContextPressureTokens,
 		SummaryMessageID: sql.NullString{
 			String: session.SummaryMessageID,
 			Valid:  session.SummaryMessageID != "",
@@ -290,19 +300,24 @@ func (s *service) fromDBItem(item db.Session) Session {
 		title = "Untitled Session"
 	}
 	return Session{
-		ID:               item.ID,
-		ParentSessionID:  item.ParentSessionID.String,
-		Title:            title,
-		Mode:             Mode(item.Mode),
-		MessageCount:     item.MessageCount,
-		PromptTokens:     item.PromptTokens,
-		CompletionTokens: item.CompletionTokens,
-		SummaryMessageID: item.SummaryMessageID.String,
-		Cost:             item.Cost,
-		Todos:            todos,
-		CreatedAt:        item.CreatedAt,
-		UpdatedAt:        item.UpdatedAt,
-		WorkingDir:       item.WorkingDir.String,
+		ID:                        item.ID,
+		ParentSessionID:           item.ParentSessionID.String,
+		Title:                     title,
+		Mode:                      Mode(item.Mode),
+		MessageCount:              item.MessageCount,
+		PromptTokens:              item.PromptTokens,
+		CompletionTokens:          item.CompletionTokens,
+		LastPromptTokens:          item.LastPromptTokens,
+		LastCompletionTokens:      item.LastCompletionTokens,
+		LastCacheCreationTokens:   item.LastCacheCreationTokens,
+		LastCacheReadTokens:       item.LastCacheReadTokens,
+		LastContextPressureTokens: item.LastContextPressureTokens,
+		SummaryMessageID:          item.SummaryMessageID.String,
+		Cost:                      item.Cost,
+		Todos:                     todos,
+		CreatedAt:                 item.CreatedAt,
+		UpdatedAt:                 item.UpdatedAt,
+		WorkingDir:                item.WorkingDir.String,
 	}
 }
 

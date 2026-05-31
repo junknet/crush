@@ -2,6 +2,8 @@ package message
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -691,5 +693,61 @@ func TestUpdate_StructuralFlushUsesMustDeliver(t *testing.T) {
 			require.Zero(t, impl.DropCount(),
 				"structural terminal event must not be silently dropped via lossy Publish")
 		})
+	}
+}
+
+// TestListBefore_KeysetWalksAllWithoutSkipOrDup verifies that paging older
+// history with the (created_at, id) keyset cursor — feeding each page's oldest
+// row back as the next cursor — visits every earlier message exactly once.
+func TestListBefore_KeysetWalksAllWithoutSkipOrDup(t *testing.T) {
+	t.Parallel()
+	svc, sessionID := newTestService(t)
+
+	const total = 17
+	for range total {
+		_, err := svc.Create(t.Context(), sessionID, CreateMessageParams{Role: User})
+		require.NoError(t, err)
+	}
+
+	all, err := svc.List(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.Len(t, all, total)
+
+	// Keyset total order: created_at asc, then id asc — the same order
+	// ListMessagesBySessionBefore pages through.
+	order := make([]Message, len(all))
+	copy(order, all)
+	slices.SortFunc(order, func(a, b Message) int {
+		if a.CreatedAt != b.CreatedAt {
+			return int(a.CreatedAt - b.CreatedAt)
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	// Start from the newest in keyset order and walk backwards in pages.
+	cursor := order[len(order)-1]
+	seen := map[string]int{}
+	const limit = 4
+	for {
+		page, err := svc.ListBefore(t.Context(), sessionID, cursor.CreatedAt, cursor.ID, limit)
+		require.NoError(t, err)
+		if len(page) == 0 {
+			break
+		}
+		// Each page is ascending; every element strictly precedes the cursor.
+		for _, m := range page {
+			seen[m.ID]++
+			require.True(t,
+				m.CreatedAt < cursor.CreatedAt || (m.CreatedAt == cursor.CreatedAt && m.ID < cursor.ID),
+				"page element %q not strictly before cursor %q", m.ID, cursor.ID)
+		}
+		cursor = page[0] // oldest of the ascending page becomes the next cursor
+		require.LessOrEqual(t, len(page), limit)
+	}
+
+	// Every message except the starting newest one must be seen exactly once.
+	require.Len(t, seen, total-1)
+	for id, count := range seen {
+		require.Equalf(t, 1, count, "message %q paged %d times (want 1)", id, count)
 	}
 }

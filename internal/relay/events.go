@@ -49,6 +49,21 @@ func eventSessionID(ev any) string {
 	return ""
 }
 
+// shouldPersistMessage decides whether a message event is a terminal snapshot
+// worth storing in JetStream for cold-open replay. Assistant messages stream
+// token-by-token (one full-snapshot UpdatedEvent per debounce tick), so only
+// their finished snapshot is durable; user and tool messages arrive complete;
+// deletions must propagate so a cold-open does not resurrect removed messages.
+func shouldPersistMessage(ev pubsub.Event[message.Message]) bool {
+	if ev.Type == pubsub.DeletedEvent {
+		return true
+	}
+	if ev.Payload.Role == message.Assistant {
+		return ev.Payload.IsFinished()
+	}
+	return true
+}
+
 // wrapEvent converts a raw tea.Msg (a pubsub.Event[T] from the app
 // event fan-in) into a pubsub.Payload envelope with the correct
 // PayloadType discriminator and a proto-typed inner payload that has
@@ -165,18 +180,23 @@ func mcpEventTypeToProto(t mcp.EventType) proto.MCPEventType {
 
 func sessionToProto(s session.Session) proto.Session {
 	return proto.Session{
-		ID:               s.ID,
-		ParentSessionID:  s.ParentSessionID,
-		Title:            s.Title,
-		Mode:             string(s.Mode),
-		SummaryMessageID: s.SummaryMessageID,
-		MessageCount:     s.MessageCount,
-		PromptTokens:     s.PromptTokens,
-		CompletionTokens: s.CompletionTokens,
-		Cost:             s.Cost,
-		Todos:            todosToProto(s.Todos),
-		CreatedAt:        s.CreatedAt,
-		UpdatedAt:        s.UpdatedAt,
+		ID:                        s.ID,
+		ParentSessionID:           s.ParentSessionID,
+		Title:                     s.Title,
+		Mode:                      string(s.Mode),
+		SummaryMessageID:          s.SummaryMessageID,
+		MessageCount:              s.MessageCount,
+		PromptTokens:              s.PromptTokens,
+		CompletionTokens:          s.CompletionTokens,
+		LastPromptTokens:          s.LastPromptTokens,
+		LastCompletionTokens:      s.LastCompletionTokens,
+		LastCacheCreationTokens:   s.LastCacheCreationTokens,
+		LastCacheReadTokens:       s.LastCacheReadTokens,
+		LastContextPressureTokens: s.LastContextPressureTokens,
+		Cost:                      s.Cost,
+		Todos:                     todosToProto(s.Todos),
+		CreatedAt:                 s.CreatedAt,
+		UpdatedAt:                 s.UpdatedAt,
 	}
 }
 

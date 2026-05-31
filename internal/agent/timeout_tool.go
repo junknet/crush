@@ -3,10 +3,26 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 
 	"charm.land/fantasy"
 )
+
+const defaultForegroundAgentToolTimeout = 2 * time.Minute
+
+func foregroundAgentToolTimeout() time.Duration {
+	value := os.Getenv("CRUSH_AGENT_FOREGROUND_TIMEOUT_SECONDS")
+	if value == "" {
+		return defaultForegroundAgentToolTimeout
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		return defaultForegroundAgentToolTimeout
+	}
+	return time.Duration(seconds) * time.Second
+}
 
 // timeoutTool wraps a fantasy.AgentTool to enforce a maximum execution duration.
 type timeoutTool struct {
@@ -57,7 +73,11 @@ func (t *timeoutTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.T
 	case <-timeoutCtx.Done():
 		if timeoutCtx.Err() == context.DeadlineExceeded {
 			errMsg := toolTimeoutMessage(call.Name, t.timeout)
-			return fantasy.NewTextErrorResponse(errMsg), nil
+			resp := fantasy.NewTextErrorResponse(errMsg)
+			if call.Name == AgentToolName {
+				resp.StopTurn = true
+			}
+			return resp, nil
 		}
 		return fantasy.ToolResponse{}, timeoutCtx.Err()
 	}
@@ -72,31 +92,31 @@ func toolTimeoutMessage(name string, timeout time.Duration) string {
 
 func isBackgroundCapableTool(name string) bool {
 	switch name {
-	case "bash", "bash_tool", "nu", "nu_tool", "ssh", "ssh_tool":
+	case AgentToolName, "Bash":
 		return true
 	default:
 		return false
 	}
 }
 
-// wrapToolsWithTimeout wraps allowed tools with a default timeout, excluding delegation tools.
+// wrapToolsWithTimeout wraps allowed tools with a default timeout.
 func wrapToolsWithTimeout(tools []fantasy.AgentTool, timeout time.Duration) []fantasy.AgentTool {
 	out := make([]fantasy.AgentTool, len(tools))
 	for i, tool := range tools {
 		name := tool.Info().Name
-		// remote_attach deploys the daemon (an ~80MB scp on first use) and
+		// RemoteAttach deploys the daemon (an ~80MB scp on first use) and
 		// opens an SSH channel; that legitimately exceeds the quick-tool
 		// timeout, so it (and its cheap sibling detach) run unwrapped, like the
 		// delegation tools. The ctx still cancels on session cancel.
-		// "remote_attach"/"remote_detach" are tools.RemoteAttach/DetachToolName;
+		// "RemoteAttach"/"RemoteDetach" are tools.RemoteAttach/DetachToolName;
 		// the literal is used because the `tools` param shadows the package here.
-		// "run" self-times via its own timeout_seconds param (default 60, max
-		// 300) with a graceful "run timed out" message; the outer 60s wrapper
-		// would otherwise hard-kill it at 60s and make its advertised 300s max a
-		// lie (12 such premature timeouts in real traces).
-		if name == AgentToolName || name == "agentic_fetch" || name == "agent_tool" || name == "agentic_fetch_tool" ||
-			name == "remote_attach" || name == "remote_detach" ||
-			name == "run" || name == "run_tool" {
+		if name == AgentToolName {
+			out[i] = newTimeoutTool(tool, foregroundAgentToolTimeout())
+		} else if name == "websearch-agent" ||
+			name == "RemoteAttach" || name == "RemoteDetach" ||
+			name == "Bash" ||
+			name == "JobOutput" || name == "JobKill" || name == "Monitor" ||
+			name == "Search" || name == "Batch" {
 			out[i] = tool
 		} else {
 			out[i] = newTimeoutTool(tool, timeout)

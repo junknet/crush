@@ -1,4 +1,4 @@
-Watch a running background job's output and get automatically woken when something happens — instead of polling `job_output` in a loop.
+Watch a running background job's output and get automatically woken when something happens — instead of polling `JobOutput` in a loop.
 
 Use this after a command was moved to the background (you have a `shell_id` from the bash tool). Provide a `pattern` (regular expression). The agent turn ends immediately; you are then automatically continued when one of these occurs:
 
@@ -6,7 +6,7 @@ Use this after a command was moved to the background (you have a `shell_id` from
 - the job ends before the pattern ever appears
 - the `timeout_seconds` window elapses with no match
 
-Prefer this over repeatedly calling `job_output`: it is event-driven, costs no tokens while waiting, and does not block the session.
+Prefer this over repeatedly calling `JobOutput`: it is event-driven, costs no tokens while waiting, and does not block the session.
 
 Typical uses:
 - Wait for a dev server / database to become ready: pattern `Listening on|ready to accept connections`.

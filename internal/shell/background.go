@@ -184,6 +184,10 @@ func NewBackgroundShellManager() *BackgroundShellManager {
 // sessionID ties the job back to the conversation that launched it so a
 // completion event can wake the right session; pass "" if unknown.
 func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, blockFuncs []BlockFunc, command string, description string, sessionID string) (*BackgroundShell, error) {
+	return m.StartWithRewriters(ctx, workingDir, blockFuncs, nil, command, description, sessionID)
+}
+
+func (m *BackgroundShellManager) StartWithRewriters(ctx context.Context, workingDir string, blockFuncs []BlockFunc, rewriteFuncs []RewriteFunc, command string, description string, sessionID string) (*BackgroundShell, error) {
 	m.Cleanup()
 	if stats := m.Stats(); stats.Running >= MaxBackgroundJobs {
 		return nil, fmt.Errorf("maximum number of running background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
@@ -192,8 +196,9 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 	id := fmt.Sprintf("%03X", idCounter.Add(1))
 
 	shell := NewShell(&Options{
-		WorkingDir: workingDir,
-		BlockFuncs: blockFuncs,
+		WorkingDir:   workingDir,
+		BlockFuncs:   blockFuncs,
+		RewriteFuncs: rewriteFuncs,
 	})
 
 	shellCtx, cancel := context.WithCancel(ctx)

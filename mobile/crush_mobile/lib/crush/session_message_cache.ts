@@ -1,6 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy'
 
 import { Message } from './api'
+import { dlog } from './dlog'
 
 type SessionMessageCache = {
     version: 1
@@ -47,7 +48,7 @@ export async function readSessionMessageCache(sessionID: string): Promise<Messag
         }
         return sortMessages(cache.messages)
     } catch (error) {
-        console.log('readSessionMessageCache failed:', error)
+        dlog('readSessionMessageCache failed:', error)
         return []
     }
 }
@@ -72,7 +73,7 @@ export async function writeSessionMessageCache(
         await FileSystem.makeDirectoryAsync(directory, { intermediates: true })
         await FileSystem.writeAsStringAsync(cachePath, JSON.stringify(cache))
     } catch (error) {
-        console.log('writeSessionMessageCache failed:', error)
+        dlog('writeSessionMessageCache failed:', error)
     }
 }
 
@@ -82,6 +83,6 @@ export async function deleteSessionMessageCache(sessionID: string): Promise<void
     try {
         await FileSystem.deleteAsync(cachePath, { idempotent: true })
     } catch (error) {
-        console.log('deleteSessionMessageCache failed:', error)
+        dlog('deleteSessionMessageCache failed:', error)
     }
 }

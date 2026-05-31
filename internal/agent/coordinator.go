@@ -8,13 +8,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -178,6 +181,15 @@ type coordinator struct {
 	// write/rg) transparently operate on that remote host; absent an entry
 	// they run locally. Keyed by session ID.
 	activeBackends *csync.Map[string, iodriver.Backend]
+
+	// Background-wake loop-breaker. A livelock surfaces as the SAME wake
+	// content recurring (a failing job re-monitored forever). We fingerprint
+	// each background wake by its digit-normalized content and suppress
+	// auto-continuations once an identical fingerprint repeats past threshold.
+	// Keyed by session ID; reset implicitly when the content changes.
+	bgLoopMu sync.Mutex
+	bgLoopFP map[string]string // session ID -> last wake fingerprint
+	bgLoopN  map[string]int    // session ID -> consecutive identical count
 }
 
 func NewCoordinator(
@@ -219,6 +231,8 @@ func NewCoordinator(
 		runtime:        agentruntime.NewSession(cfg.WorkingDir(), nil),
 		activeCancels:  make(map[string]context.CancelCauseFunc),
 		activeBackends: csync.NewMap[string, iodriver.Backend](),
+		bgLoopFP:       make(map[string]string),
+		bgLoopN:        make(map[string]int),
 	}
 
 	agentName := config.AgentBrain
@@ -412,9 +426,31 @@ func (c *coordinator) handleBackgroundJobEvent(ctx context.Context, job shell.Ba
 		return
 	}
 
+	// Loop-breaker. First principles: a livelock is the SAME input recurring —
+	// a failing job re-monitored forever produces a near-identical wake every
+	// turn. Fingerprint the wake by its digit-normalized content (so jittery
+	// durations/timestamps and a new job ID still collapse together) and
+	// suppress the auto-continuation once an identical fingerprint repeats past
+	// threshold. Genuinely changing output gets a new fingerprint and resets.
+	repeats := c.recordBackgroundWake(job.SessionID, backgroundWakeFingerprint(job))
+
+	if repeats > maxSimilarBackgroundWakes {
+		slog.WarnContext(ctx, "Background wake loop-breaker tripped — suppressing near-identical auto-continuation",
+			"job", job.ID, "session_id", job.SessionID, "repeats", repeats)
+		return
+	}
+
 	prompt := buildBackgroundWakePrompt(job)
+	if repeats == maxSimilarBackgroundWakes {
+		// Final allowed continuation for this content: hand the agent an
+		// explicit stop instruction so even a weak model breaks out instead of
+		// re-arming another monitor on the same job.
+		prompt += fmt.Sprintf(
+			"\n\n[loop-breaker] This same background result has auto-continued %d times in a row with no meaningful change. STOP re-running and re-monitoring this job. If you cannot make it pass, summarize the failure to the user and stop — do NOT start another monitor or re-run the same command.",
+			repeats)
+	}
 	slog.DebugContext(ctx, "Background job finished — waking session",
-		"job", job.ID, "session_id", job.SessionID, "exit_code", job.ExitCode)
+		"job", job.ID, "session_id", job.SessionID, "exit_code", job.ExitCode, "repeats", repeats)
 	go func() {
 		// Mark as a system-initiated run so that if it gets queued and then
 		// canceled on ESC, it doesn't pollute the user's textarea.
@@ -424,6 +460,57 @@ func (c *coordinator) handleBackgroundJobEvent(ctx context.Context, job shell.Ba
 				"job", job.ID, "session_id", job.SessionID, "error", err)
 		}
 	}()
+}
+
+// maxSimilarBackgroundWakes caps how many times an identical-content background
+// wake may auto-continue a session before the loop-breaker suppresses it. The
+// threshold turn appends an explicit stop instruction; beyond it, wakes drop.
+const maxSimilarBackgroundWakes = 3
+
+// backgroundWakeDigitRe collapses digit runs so wakes that differ only in
+// volatile numbers (durations, timestamps, exit-after millis, job IDs) share a
+// fingerprint. The signal we want is "same situation recurring", not exact
+// byte-equality.
+var backgroundWakeDigitRe = regexp.MustCompile(`[0-9]+`)
+
+// recordBackgroundWake updates the per-session loop-breaker state with a new
+// wake fingerprint and returns how many times that same fingerprint has now
+// recurred consecutively. A changed fingerprint resets the count to 1.
+func (c *coordinator) recordBackgroundWake(sessionID, fp string) int {
+	c.bgLoopMu.Lock()
+	defer c.bgLoopMu.Unlock()
+	// Lazy-init so a coordinator built without the constructor (e.g. in tests)
+	// is still safe.
+	if c.bgLoopFP == nil {
+		c.bgLoopFP = make(map[string]string)
+		c.bgLoopN = make(map[string]int)
+	}
+	if c.bgLoopFP[sessionID] == fp {
+		c.bgLoopN[sessionID]++
+	} else {
+		c.bgLoopFP[sessionID] = fp
+		c.bgLoopN[sessionID] = 1
+	}
+	return c.bgLoopN[sessionID]
+}
+
+// backgroundWakeFingerprint derives a content fingerprint for a background wake.
+// It hashes the OUTPUT TAIL with digits normalized — deliberately ignoring the
+// command and job ID. The invariant of a livelock is the same RESULT recurring
+// (a failing job emits the same failure text no matter how it is re-invoked),
+// so a model that varies its command wrapper or relaunches with a new ID cannot
+// evade the breaker, while genuine progress (output actually changes, e.g.
+// FAIL→PASS) yields a new fingerprint and correctly resets the count. Jobs with
+// no output fall back to the command so empty-output jobs do not all collapse.
+func backgroundWakeFingerprint(job shell.BackgroundJobEvent) string {
+	content := job.OutputTail
+	if strings.TrimSpace(content) == "" {
+		content = job.Command
+	}
+	norm := backgroundWakeDigitRe.ReplaceAllString(content, "#")
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(norm))
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // buildBackgroundWakePrompt renders the system-style message handed to the
@@ -465,6 +552,26 @@ func buildBackgroundWakePrompt(job shell.BackgroundJobEvent) string {
 	}
 }
 
+// rootAgentOverrideKey carries an explicit root-agent role through the request
+// context so a non-interactive run can execute a specific role (e.g. worker) as
+// the root executor instead of the default brain. Used by `crush run --role`
+// for end-to-end per-role benchmarking; empty/absent means default routing.
+type rootAgentOverrideKey struct{}
+
+// WithRootAgentOverride forces coordinator.Run to use the named agent role as
+// the root executor. role must be one of config.AgentBrain/Worker/Explore/
+// Plan/Auditor; an unrecognized value is ignored and default routing applies.
+func WithRootAgentOverride(ctx context.Context, role string) context.Context {
+	return context.WithValue(ctx, rootAgentOverrideKey{}, role)
+}
+
+func rootAgentOverrideFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(rootAgentOverrideKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // Run implements Coordinator.
 func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, planMode bool, attachments ...message.Attachment) (*fantasy.AgentResult, error) {
 	runCtx, runCancel := context.WithCancelCause(ctx)
@@ -504,6 +611,29 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			} else if strings.Contains(sess.Title, "Auditor Agent Session") {
 				rootProfile = scheduler.ProfileAuditorAgent
 				rootAgentName = config.AgentAuditor
+			}
+		}
+	}
+
+	// Explicit per-role override (crush run --role <role>): pins the root
+	// executor regardless of session-title routing, so a benchmark can drive a
+	// single role end-to-end. Takes precedence over the default brain root but
+	// not over planMode's structural read-only intent.
+	if !planMode {
+		if override := rootAgentOverrideFromContext(ctx); override != "" {
+			switch override {
+			case config.AgentWorker:
+				rootProfile, rootAgentName = scheduler.ProfileWorkerAgent, config.AgentWorker
+			case config.AgentExplore:
+				rootProfile, rootAgentName = scheduler.ProfileExploreAgent, config.AgentExplore
+			case config.AgentPlan:
+				rootProfile, rootAgentName = scheduler.ProfilePlanAgent, config.AgentPlan
+			case config.AgentAuditor:
+				rootProfile, rootAgentName = scheduler.ProfileAuditorAgent, config.AgentAuditor
+			case config.AgentBrain:
+				rootProfile, rootAgentName = scheduler.ProfileBrainAgent, config.AgentBrain
+			default:
+				slog.Warn("Ignoring unknown root agent override", "role", override)
 			}
 		}
 	}
@@ -1111,6 +1241,18 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *agentprompt.Prompt
 	if err != nil {
 		return nil, err
 	}
+
+	toolRegistry := make(map[string]fantasy.AgentTool)
+	for _, tool := range builtTools {
+		toolRegistry[tool.Info().Name] = tool
+	}
+	for _, tool := range builtTools {
+		unwrapped := unwrapTool(tool)
+		if setter, ok := unwrapped.(tools.RegistrySetter); ok {
+			setter.SetRegistry(toolRegistry)
+		}
+	}
+
 	result.SetTools(builtTools)
 	if deferredRegistry != nil {
 		result.SetDeferredRegistry(deferredRegistry)
@@ -1119,16 +1261,40 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *agentprompt.Prompt
 	return result, nil
 }
 
+func unwrapTool(t fantasy.AgentTool) fantasy.AgentTool {
+	for {
+		switch w := t.(type) {
+		case *tracedTool:
+			t = w.inner
+		case *hookedTool:
+			t = w.inner
+		case *timeoutTool:
+			t = w.inner
+		default:
+			return t
+		}
+	}
+}
+
 func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubAgent bool) ([]fantasy.AgentTool, *tools.DeferredRegistry, error) {
 	var allTools []fantasy.AgentTool
 
-	// Recursion guard: sub-agents never get the delegation tools. Even if a
-	// misconfigured AllowedTools includes "agent" or "agentic_fetch", we drop
-	// them here so a sub-agent can't spawn a sub-sub-agent. The current
-	// architecture has no depth budget, so one-level-only is the safe rule.
-	if !isSubAgent {
+	// Recursion guard: sub-agents normally get NO delegation tools so they
+	// can't spawn sub-sub-agents (the architecture has no depth budget).
+	// The exceptions are the read-only plan and auditor agents: each may fan
+	// out to explore sub-agents (and plan additionally to the websearch-agent).
+	// Every such target is itself a leaf sub-agent (it receives no delegation
+	// tools here), so plan/auditor→explore stays depth-bounded at one level.
+	exploreDelegation := isSubAgent && (agent.ID == config.AgentPlan || agent.ID == config.AgentAuditor)
+	if !isSubAgent || exploreDelegation {
 		if slices.Contains(agent.AllowedTools, AgentToolName) {
-			agentTool, err := c.agentTool(ctx)
+			// Confine plan/auditor to the read-only explore role; brain/worker
+			// keep the full role set.
+			var roleRestriction []string
+			if exploreDelegation {
+				roleRestriction = []string{config.AgentExplore}
+			}
+			agentTool, err := c.agentTool(ctx, roleRestriction...)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1181,48 +1347,22 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewJobKillTool(c.bgManager),
 		tools.NewMonitorTool(c.bgManager),
 		tools.NewScheduleWakeupTool(c.cfg.Config().Options.DataDirectory),
-		tools.NewSSHExecTool(c.permissions, c.cfg.Config().Options.DataDirectory),
-		tools.NewSSHSessionStartTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
-		tools.NewSSHSessionOutputTool(c.permissions, c.cfg.Config().Options.DataDirectory),
-		tools.NewSSHSessionSendTool(c.permissions, c.cfg.Config().Options.DataDirectory),
-		tools.NewSSHSessionKillTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
-		tools.NewSSHMountTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
-		tools.NewSSHUnmountTool(c.permissions, c.remoteRegistry),
-		tools.NewSSHMountListTool(c.remoteRegistry),
-		tools.NewSSHMountStatusTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
-		tools.NewSSHRemountTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
-		tools.NewSSHSessionListTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.remoteRegistry),
-		tools.NewSSHUploadTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()),
-		tools.NewSSHDownloadTool(c.permissions, c.cfg.Config().Options.DataDirectory, c.cfg.WorkingDir()),
 		tools.NewRemoteAttachTool(c.activeBackends, c.cfg.Config().Options.DataDirectory),
 		tools.NewRemoteDetachTool(c.activeBackends),
 		tools.NewEvidenceBatchTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
-		tools.NewEvidenceGraphTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
-		tools.NewDagRunTool(c.lspManager, c.permissions, c.cfg.WorkingDir(), httpClient),
 		tools.NewDownloadTool(c.permissions, c.cfg.WorkingDir(), nil),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewMultiEditTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 		tools.NewFetchTool(c.permissions, c.cfg.WorkingDir(), nil),
-		tools.NewGrepTool(c.cfg.WorkingDir()),
-		tools.NewFindTool(c.cfg.WorkingDir()),
-		tools.NewAstGrepTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.AstGrep),
+		tools.NewSearchTool(c.cfg.WorkingDir()),
 		tools.NewLsTool(c.permissions, c.cfg.WorkingDir(), c.cfg.Config().Tools.Ls),
-		tools.NewRunTool(c.permissions, c.cfg.WorkingDir()),
-		tools.NewSourcegraphTool(nil),
-		tools.NewNuTool(c.permissions, c.cfg.WorkingDir()),
 		tools.NewTodosTool(c.sessions),
 		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	)
 
-	if slices.Contains(agent.AllowedTools, tools.CodeTriageToolName) || slices.Contains(agent.AllowedTools, tools.BugTriageToolName) {
-		codeTriage := tools.NewCodeTriageTool(c.permissions, c.cfg.WorkingDir())
-		if slices.Contains(agent.AllowedTools, tools.CodeTriageToolName) {
-			allTools = append(allTools, codeTriage)
-		}
-		if slices.Contains(agent.AllowedTools, tools.BugTriageToolName) {
-			allTools = append(allTools, &aliasTool{AgentTool: codeTriage, name: tools.BugTriageToolName})
-		}
+	if slices.Contains(agent.AllowedTools, tools.CodeTriageToolName) {
+		allTools = append(allTools, tools.NewCodeTriageTool(c.permissions, c.cfg.WorkingDir()))
 	}
 
 	if len(c.cfg.Config().MCP) > 0 {
@@ -1307,7 +1447,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// per delegated turn. The top-level invocation of the sub-agent tool
 	// itself is still wrapped from the brain's side.
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
-	filteredTools = wrapToolsWithTimeout(filteredTools, 60*time.Second)
+	filteredTools = wrapToolsWithTimeout(filteredTools, 5*time.Second)
 	filteredTools = wrapToolsWithTrace(filteredTools)
 
 	if c.runtime != nil {
@@ -1753,7 +1893,7 @@ func (c *coordinator) UnmountAllRemotes(ctx context.Context) int {
 			c.activeBackends.Del(sessionID)
 		}
 	}
-	return tools.UnmountAll(ctx, c.remoteRegistry)
+	return 0
 }
 
 func (c *coordinator) ClearQueue(sessionID string) {
@@ -1822,6 +1962,19 @@ func (c *coordinator) UpdateModels(ctx context.Context) error {
 		}
 		agent.SetTools(builtTools)
 		agent.SetDeferredRegistry(deferredRegistry)
+
+		// Populate registry for sub-agent tools so they can call each other (e.g. Batch calling Bash)
+		toolRegistry := make(map[string]fantasy.AgentTool)
+		for _, tool := range builtTools {
+			toolRegistry[tool.Info().Name] = tool
+		}
+		for _, tool := range builtTools {
+			unwrapped := unwrapTool(tool)
+			if setter, ok := unwrapped.(tools.RegistrySetter); ok {
+				setter.SetRegistry(toolRegistry)
+			}
+		}
+
 		if agentName == c.currentAgentName {
 			c.currentAgent = agent
 		}
@@ -2081,7 +2234,9 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	if err := taskScheduler.Dispatch(ctx, taskNode, taskWorker); err != nil {
 		c.publishSubAgentEvent(notify.TypeSubAgentFailed, params, session.ID, err.Error())
 		c.propagateSubAgentTraces(taskRuntime)
-		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Agent failed after its internal provider retry budget was exhausted: %s\nFor long or flaky delegated work, call Agent again with run_in_background=true, then use Monitor and JobOutput.", err))
+		resp.StopTurn = true
+		return resp, nil
 	}
 	c.propagateSubAgentTraces(taskRuntime)
 	if result == nil {
@@ -2175,9 +2330,10 @@ func (c *coordinator) ensureRootTask(taskScheduler *scheduler.AgentScheduler, se
 		return nil
 	}
 	profile = normalizeSubAgentProfile(profile)
-	if profile == scheduler.ProfileWorkerAgent {
-		profile = scheduler.ProfileBrainAgent
-	}
+	// Historically the root task was always the brain, so a worker profile here
+	// was coerced to brain. With `crush run --role worker` a worker can be the
+	// explicit root executor; keep its profile so the scheduler dispatches the
+	// worker agent (model/prompt/tools), not the brain.
 	node := taskScheduler.EnsureRoot(sessionID, goal, nil, profile)
 	if node == nil {
 		return nil
@@ -2245,7 +2401,7 @@ func (c *coordinator) attachAutoExplorePreflight(taskScheduler *scheduler.AgentS
 
 func buildAutoExplorePrompt(prompt, workingDir string) string {
 	return strings.TrimSpace(fmt.Sprintf(`Read-only repository exploration preflight.
-Use rg, view, ast_grep, read-only LSP tools, or read-only dag_run nodes in parallel where useful.
+Use Grep, Read, read-only LSP tools, or read-only Batch nodes in parallel where useful.
 Do not edit files, write memories, restart services, or run mutating shell commands.
 
 Working directory:
@@ -2849,7 +3005,7 @@ func hasMemoryWrites(msgs []message.Message, memoryDir string) bool {
 			continue
 		}
 		for _, tc := range m.ToolCalls() {
-			if tc.Name == "write" || tc.Name == "edit" || tc.Name == "multiedit" {
+			if tc.Name == tools.WriteToolName || tc.Name == tools.EditToolName || tc.Name == tools.MultiEditToolName {
 				var input struct {
 					FilePath string `json:"file_path"`
 					Path     string `json:"path"`
@@ -3116,26 +3272,4 @@ func memoryRecallPromptEligible(prompt string) bool {
 		return false
 	}
 	return strings.TrimSpace(prompt) != ""
-}
-
-type aliasTool struct {
-	fantasy.AgentTool
-	name string
-}
-
-func (a *aliasTool) Info() fantasy.ToolInfo {
-	info := a.AgentTool.Info()
-	info.Name = a.name
-	return info
-}
-
-func (a *aliasTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	call.Name = a.AgentTool.Info().Name
-	return a.AgentTool.Run(ctx, call)
-}
-
-func (a *aliasTool) SetParallel(p bool) {
-	if setter, ok := a.AgentTool.(interface{ SetParallel(bool) }); ok {
-		setter.SetParallel(p)
-	}
 }

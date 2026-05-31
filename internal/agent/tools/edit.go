@@ -40,7 +40,12 @@ type EditResponseMetadata struct {
 	NewContent string `json:"new_content,omitempty"`
 }
 
-const EditToolName = "edit"
+const EditToolName = "Edit"
+
+const (
+	maxEditOldStringBytes = 12000
+	maxEditOldStringLines = 80
+)
 
 var (
 	oldStringNotFoundErr        = fantasy.NewTextErrorResponse("old_string not found in file. Make sure it matches exactly, including whitespace and line breaks.")
@@ -74,6 +79,9 @@ func NewEditTool(
 			}
 
 			params.FilePath = filepathext.SmartJoin(workingDir, params.FilePath)
+			if err := validateEditOldString(params.OldString); err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
 
 			var response fantasy.ToolResponse
 			var err error
@@ -105,6 +113,17 @@ func NewEditTool(
 			return response, nil
 		},
 	)
+}
+
+func validateEditOldString(oldString string) error {
+	if oldString == "" {
+		return nil
+	}
+	lines := strings.Count(oldString, "\n") + 1
+	if len(oldString) <= maxEditOldStringBytes && lines <= maxEditOldStringLines {
+		return nil
+	}
+	return fmt.Errorf("old_string is too large (%d bytes, %d lines). Use the smallest unique exact snippet, usually 2-4 adjacent lines, or use Write for a full-file rewrite. Large old_string blocks go stale easily and cause repeated edit failures.", len(oldString), lines)
 }
 
 func createNewFile(edit editContext, filePath, content string, call fantasy.ToolCall) (fantasy.ToolResponse, error) {

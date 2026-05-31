@@ -50,6 +50,11 @@ type Service interface {
 	Update(ctx context.Context, message Message) error
 	Get(ctx context.Context, id string) (Message, error)
 	List(ctx context.Context, sessionID string) ([]Message, error)
+	// ListBefore returns up to limit messages strictly older than the
+	// (beforeCreatedAt, beforeID) keyset cursor, in chronological (ascending)
+	// order. Used for history pagination so a page costs O(limit) rather than
+	// loading and deserializing the whole session.
+	ListBefore(ctx context.Context, sessionID string, beforeCreatedAt int64, beforeID string, limit int) ([]Message, error)
 	ListUserMessages(ctx context.Context, sessionID string) ([]Message, error)
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	Delete(ctx context.Context, id string) error
@@ -561,6 +566,32 @@ func (s *service) List(ctx context.Context, sessionID string) ([]Message, error)
 		if err != nil {
 			return nil, err
 		}
+	}
+	return messages, nil
+}
+
+func (s *service) ListBefore(ctx context.Context, sessionID string, beforeCreatedAt int64, beforeID string, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	dbMessages, err := s.q.ListMessagesBySessionBefore(ctx, db.ListMessagesBySessionBeforeParams{
+		SessionID:       sessionID,
+		BeforeCreatedAt: beforeCreatedAt,
+		BeforeID:        beforeID,
+		RowLimit:        int64(limit),
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The query returns newest-first (DESC); reverse into chronological order
+	// so callers append older pages above the existing transcript.
+	messages := make([]Message, len(dbMessages))
+	for i, dbMessage := range dbMessages {
+		m, err := s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+		messages[len(dbMessages)-1-i] = m
 	}
 	return messages, nil
 }

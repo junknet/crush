@@ -1,8 +1,6 @@
 # 代码三段式定位工具（Code/Bug Triage）
 
-该工具用于“先搜寻再执行快速校验，再做轻量分析”的定位流程，避免从 `bash` 直接跑大范围搜索+长脚本导致的低效。
-
-`bug_triage` 是 `code_triage` 的兼容别名，参数完全一致，适用于缺陷定位场景。
+该工具用于“先搜寻再执行快速校验，再做轻量分析”的定位流程，避免从 `Bash` 直接跑大范围搜索+长脚本导致的低效。
 
 ## 输入
 
@@ -20,7 +18,7 @@
 
 ## 适用场景
 
-- 先并行跑多条证据查询，再串行跑 1~N 条 compile/check；`code_triage` 和 `bug_triage` 都支持同样能力。
+- 先并行跑多条证据查询，再串行跑 1~N 条 compile/check。
 - 只读探索阶段优先用 `queries`；需要确认可执行性再加 `check_commands`。
 - 输出附带结构化 metadata，包含 `evidence` 折叠摘要和 `guidance` 下一步建议，方便 LLM 做后续决策，不必再次解析全文。
 - 单个查询失败会以 `queries[].outcome=failed` 和 `queries[].error` 返回，不会让整次 triage 丢失其他证据。

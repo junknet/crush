@@ -753,48 +753,30 @@ const maxRecentModelsPerType = 5
 
 func allToolNames() []string {
 	return []string{
-		"agent",
-		"ast_grep",
-		"bash",
-		"crush_info",
-		"crush_logs",
-		"bug_triage",
-		"dag_run",
-		"evidence_batch",
-		"evidence_graph",
-		"code_triage",
-		"job_output",
-		"job_kill",
-		"download",
-		"edit",
-		"multiedit",
-		"fetch",
-		"agentic_fetch",
-		"grep",
-		"find",
-		"ls",
-		"run",
-		"monitor",
-		"schedule_wakeup",
-		"ssh_exec",
-		"ssh_session_start",
-		"ssh_session_output",
-		"ssh_session_send",
-		"ssh_session_kill",
-		"ssh_session_list",
-		"ssh_mount",
-		"ssh_unmount",
-		"ssh_mount_list",
-		"ssh_mount_status",
-		"ssh_remount",
-		"sourcegraph",
-		"todos",
-		"view",
-		"write",
-		"remote_attach",
-		"remote_detach",
-		"list_mcp_resources",
-		"read_mcp_resource",
+		"Agent",
+		"Bash",
+		"CrushInfo",
+		"CrushLogs",
+		"Batch",
+		"CodeTriage",
+		"JobOutput",
+		"JobKill",
+		"Download",
+		"Edit",
+		"MultiEdit",
+		"Fetch",
+		"websearch-agent",
+		"Search",
+		"ReadDir",
+		"Monitor",
+		"ScheduleWakeup",
+		"Todos",
+		"Read",
+		"Write",
+		"RemoteAttach",
+		"RemoteDetach",
+		"ListMCPResources",
+		"ReadMCPResource",
 	}
 }
 
@@ -812,10 +794,36 @@ func resolveExploreTools(tools []string) []string {
 	// constrains it to read-only inspection commands. Direct mutators
 	// (edit/multiedit/write/download/todos) are excluded.
 	exploreTools := []string{
-		"bash", "grep", "find", "ls", "sourcegraph", "view", "code_triage", "bug_triage", "evidence_batch", "evidence_graph",
-		"list_mcp_resources", "read_mcp_resource",
+		"Bash", "Search", "ReadDir", "Read", "CodeTriage", "Batch",
+		"ListMCPResources", "ReadMCPResource",
 	}
 	return filterSlice(tools, exploreTools, true)
+}
+
+// resolvePlanTools is the read-only explore tool set plus the two delegation
+// tools the plan agent is allowed to drive: the Agent tool (confined to the
+// explore role at construction time) and the websearch-agent. Both extras are
+// only granted when they survive the user's DisabledTools filter.
+func resolvePlanTools(tools []string) []string {
+	allowed := resolveExploreTools(tools)
+	for _, extra := range []string{"Agent", "websearch-agent"} {
+		if slices.Contains(tools, extra) {
+			allowed = append(allowed, extra)
+		}
+	}
+	return allowed
+}
+
+// resolveAuditorTools is the read-only explore tool set plus the Agent
+// delegation tool (confined to the explore role at construction time) so the
+// auditor can fan out read-only investigation. No websearch-agent — the
+// auditor reviews local code, not the public web.
+func resolveAuditorTools(tools []string) []string {
+	allowed := resolveExploreTools(tools)
+	if slices.Contains(tools, "Agent") {
+		allowed = append(allowed, "Agent")
+	}
+	return allowed
 }
 
 func filterSlice(data []string, mask []string, include bool) []string {
@@ -851,7 +859,8 @@ func (c *Config) SetupAgents() {
 			Description:  "A read-only planning agent for design-only exploration and implementation plans.",
 			Model:        SelectedModelTypePlan,
 			ContextPaths: c.Options.ContextPaths,
-			AllowedTools: resolveExploreTools(allowedTools),
+			AllowedTools: resolvePlanTools(allowedTools),
+			MaxTurns:     8,
 		},
 		AgentWorker: {
 			ID:           AgentWorker,
@@ -861,9 +870,9 @@ func (c *Config) SetupAgents() {
 			ContextPaths: c.Options.ContextPaths,
 			AllowedTools: allowedTools,
 			ParallelTools: []string{
-				"grep", "find", "view", "ls", "bash", "nu", "sourcegraph",
-				"code_triage", "bug_triage", "evidence_batch", "evidence_graph",
-				"agent",
+				"Grep", "Find", "Read", "ReadDir", "Bash", "Nu",
+				"CodeTriage", "Batch",
+				"Agent",
 			},
 		},
 		AgentExplore: {
@@ -879,7 +888,7 @@ func (c *Config) SetupAgents() {
 			// a half-finished "going to look at X" line that looked like a
 			// truncated return to the parent.
 			MaxTurns:      16,
-			ParallelTools: []string{"grep", "find", "view", "ls", "bash", "sourcegraph", "code_triage", "bug_triage", "evidence_batch", "evidence_graph"},
+			ParallelTools: []string{"Grep", "Find", "Read", "ReadDir", "Bash", "CodeTriage", "Batch"},
 		},
 		AgentAuditor: {
 			ID:           AgentAuditor,
@@ -887,7 +896,8 @@ func (c *Config) SetupAgents() {
 			Description:  "An adversarial quantitative auditor that reviews implementations and code for mathematical and logical safety.",
 			Model:        SelectedModelTypeAuditor,
 			ContextPaths: c.Options.ContextPaths,
-			AllowedTools: resolveExploreTools(allowedTools),
+			AllowedTools: resolveAuditorTools(allowedTools),
+			MaxTurns:     8,
 		},
 	}
 

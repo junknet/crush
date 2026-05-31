@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -61,21 +62,28 @@ func (noopLogger) InfoPersist(msg string, keysAndValues ...any) {}
 // BlockFunc is a function that determines if a command should be blocked
 type BlockFunc func(args []string) bool
 
+// RewriteFunc can replace a simple command argv before it reaches the block
+// list and exec path. It is intentionally argv-level rather than source-level
+// so pipes and quoting have already been parsed by mvdan/sh.
+type RewriteFunc func(args []string) []string
+
 // Shell provides cross-platform shell execution with optional state persistence
 type Shell struct {
-	env        []string
-	cwd        string
-	mu         sync.Mutex
-	logger     Logger
-	blockFuncs []BlockFunc
+	env          []string
+	cwd          string
+	mu           sync.Mutex
+	logger       Logger
+	blockFuncs   []BlockFunc
+	rewriteFuncs []RewriteFunc
 }
 
 // Options for creating a new shell
 type Options struct {
-	WorkingDir string
-	Env        []string
-	Logger     Logger
-	BlockFuncs []BlockFunc
+	WorkingDir   string
+	Env          []string
+	Logger       Logger
+	BlockFuncs   []BlockFunc
+	RewriteFuncs []RewriteFunc
 }
 
 // NewShell creates a new shell instance with the given options
@@ -103,10 +111,11 @@ func NewShell(opts *Options) *Shell {
 	}
 
 	return &Shell{
-		cwd:        cwd,
-		env:        env,
-		logger:     logger,
-		blockFuncs: opts.BlockFuncs,
+		cwd:          cwd,
+		env:          env,
+		logger:       logger,
+		blockFuncs:   opts.BlockFuncs,
+		rewriteFuncs: opts.RewriteFuncs,
 	}
 }
 
@@ -180,6 +189,12 @@ func (s *Shell) SetBlockFuncs(blockFuncs []BlockFunc) {
 	s.blockFuncs = blockFuncs
 }
 
+func (s *Shell) SetRewriteFuncs(rewriteFuncs []RewriteFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rewriteFuncs = rewriteFuncs
+}
+
 // CommandsBlocker creates a BlockFunc that blocks exact command matches
 func CommandsBlocker(cmds []string) BlockFunc {
 	bannedSet := make(map[string]struct{})
@@ -192,6 +207,27 @@ func CommandsBlocker(cmds []string) BlockFunc {
 			return false
 		}
 		_, ok := bannedSet[args[0]]
+		return ok
+	}
+}
+
+// CommandBasenameBlocker blocks commands by executable basename, so attempts
+// like /usr/bin/ssh or ./bin/grep cannot bypass a bare-command deny rule.
+func CommandBasenameBlocker(cmds []string) BlockFunc {
+	bannedSet := make(map[string]struct{})
+	for _, cmd := range cmds {
+		bannedSet[cmd] = struct{}{}
+	}
+
+	return func(args []string) bool {
+		if len(args) == 0 {
+			return false
+		}
+		name := strings.TrimSuffix(args[0], string(os.PathSeparator))
+		if name == "" {
+			return false
+		}
+		_, ok := bannedSet[filepath.Base(name)]
 		return ok
 	}
 }
@@ -236,7 +272,7 @@ func splitArgsFlags(parts []string) (args []string, flags []string) {
 // newInterp creates a new interpreter with the current shell state. A nil
 // stdin is equivalent to an empty input stream.
 func (s *Shell) newInterp(stdin io.Reader, stdout, stderr io.Writer) (*interp.Runner, error) {
-	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs)
+	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs, s.rewriteFuncs)
 }
 
 // updateShellFromRunner updates the shell from the interpreter after execution.

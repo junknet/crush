@@ -45,6 +45,9 @@ type RunOptions struct {
 	// BlockFuncs is an optional list of deny-list matchers applied before
 	// each command reaches the exec layer. nil disables blocking entirely.
 	BlockFuncs []BlockFunc
+	// RewriteFuncs is an optional list of argv rewriters applied before
+	// block-list checks and execution.
+	RewriteFuncs []RewriteFunc
 }
 
 // Run parses and executes a shell command using the same mvdan.cc/sh
@@ -93,7 +96,7 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 		}
 	}
 
-	runner, err := newRunner(opts.Cwd, opts.Env, stdin, stdout, stderr, opts.BlockFuncs)
+	runner, err := newRunner(opts.Cwd, opts.Env, stdin, stdout, stderr, opts.BlockFuncs, opts.RewriteFuncs)
 	if err != nil {
 		return fmt.Errorf("could not run command: %w", err)
 	}
@@ -119,7 +122,7 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 // newRunner constructs an [interp.Runner] configured with the standard
 // Crush handler stack. Shared by the stateless [Run] entrypoint and the
 // stateful [Shell] so the two surfaces cannot drift.
-func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc) (*interp.Runner, error) {
+func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc, rewriteFuncs []RewriteFunc) (*interp.Runner, error) {
 	if stdin == nil {
 		stdin = strings.NewReader("")
 	}
@@ -129,7 +132,7 @@ func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writ
 		interp.Env(expand.ListEnviron(env...)),
 		interp.Dir(cwd),
 		interp.CallHandler(rewriteUnsupportedBuiltins),
-		interp.ExecHandlers(standardHandlers(blockFuncs)...),
+		interp.ExecHandlers(standardHandlers(blockFuncs, rewriteFuncs)...),
 	)
 }
 
@@ -181,11 +184,13 @@ func rewriteUnsupportedBuiltins(_ context.Context, args []string) ([]string, err
 //     script exec's rather than the outer path-prefixed wrapper;
 //  3. block list;
 //  4. optional Go coreutils (only when useGoCoreUtils is on).
-func standardHandlers(blockFuncs []BlockFunc) []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+func standardHandlers(blockFuncs []BlockFunc, rewriteFuncs []RewriteFunc) []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	handlers := []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc{
 		builtinHandler(),
 		scriptDispatchHandler(blockFuncs),
+		rewriteHandler(rewriteFuncs),
 		blockHandler(blockFuncs),
+		transparentRouteHandler(),
 	}
 	if useGoCoreUtils {
 		handlers = append(handlers, coreutils.ExecHandler)
@@ -196,6 +201,19 @@ func standardHandlers(blockFuncs []BlockFunc) []func(next interp.ExecHandlerFunc
 	// empty and the chain falls through to mvdan's default exec.
 	handlers = append(handlers, terminalExecHandlers()...)
 	return handlers
+}
+
+func rewriteHandler(rewriteFuncs []RewriteFunc) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+		return func(ctx context.Context, args []string) error {
+			for _, rewrite := range rewriteFuncs {
+				if rewritten := rewrite(args); len(rewritten) > 0 {
+					args = rewritten
+				}
+			}
+			return next(ctx, args)
+		}
+	}
 }
 
 // builtinHandler returns middleware that dispatches recognized Crush

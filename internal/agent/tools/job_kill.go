@@ -6,11 +6,12 @@ import (
 	"fmt"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/iodriver"
 	"github.com/charmbracelet/crush/internal/shell"
 )
 
 const (
-	JobKillToolName = "job_kill"
+	JobKillToolName = "JobKill"
 )
 
 //go:embed job_kill.md
@@ -33,6 +34,24 @@ func NewJobKillTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool {
 		func(ctx context.Context, params JobKillParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.ShellID == "" {
 				return fantasy.NewTextErrorResponse("missing shell_id"), nil
+			}
+			if iodriver.IsRemoteJobID(params.ShellID) {
+				backend := GetBackendFromContext(ctx)
+				jobber, ok := backend.(iodriver.Jobber)
+				if !ok || jobber == nil {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("remote background shell not available: %s", params.ShellID)), nil
+				}
+				snapshot, _ := jobber.JobOutput(ctx, params.ShellID)
+				if err := jobber.KillJob(ctx, params.ShellID); err != nil {
+					return fantasy.NewTextErrorResponse(err.Error()), nil
+				}
+				metadata := JobKillResponseMetadata{
+					ShellID:     params.ShellID,
+					Command:     snapshot.Command,
+					Description: snapshot.Description,
+				}
+				result := fmt.Sprintf("Background shell %s terminated successfully", params.ShellID)
+				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(result), metadata), nil
 			}
 
 			bgShell, ok := bgManager.Get(params.ShellID)

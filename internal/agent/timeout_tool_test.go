@@ -18,7 +18,7 @@ func (s *sleepTool) Info() fantasy.ToolInfo {
 	return fantasy.ToolInfo{Name: s.name}
 }
 
-func (s *sleepTool) ProviderOptions() fantasy.ProviderOptions { return nil }
+func (s *sleepTool) ProviderOptions() fantasy.ProviderOptions     { return nil }
 func (s *sleepTool) SetProviderOptions(_ fantasy.ProviderOptions) {}
 
 func (s *sleepTool) Run(ctx context.Context, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -81,6 +81,30 @@ func TestTimeoutTool(t *testing.T) {
 			t.Errorf("expected context.Canceled, got %v", err)
 		}
 	})
+}
+
+func TestWrapToolsWithTimeoutWrapsForegroundAgent(t *testing.T) {
+	t.Parallel()
+
+	wrapped := wrapToolsWithTimeout([]fantasy.AgentTool{
+		&sleepTool{name: AgentToolName},
+	}, 50*time.Millisecond)
+
+	agentTool, ok := wrapped[0].(*timeoutTool)
+	if !ok {
+		t.Fatalf("expected Agent tool to be timeout-wrapped, got %T", wrapped[0])
+	}
+	if agentTool.timeout != defaultForegroundAgentToolTimeout {
+		t.Fatalf("expected foreground agent timeout %s, got %s", defaultForegroundAgentToolTimeout, agentTool.timeout)
+	}
+}
+
+func TestForegroundAgentToolTimeoutEnvOverride(t *testing.T) {
+	t.Setenv("CRUSH_AGENT_FOREGROUND_TIMEOUT_SECONDS", "7")
+
+	if got := foregroundAgentToolTimeout(); got != 7*time.Second {
+		t.Fatalf("expected 7s, got %s", got)
+	}
 }
 
 func contains(s, substr string) bool {

@@ -142,7 +142,7 @@ func TestDeferredRegistryStubAndHash(t *testing.T) {
 		resp, err := s.Run(context.Background(), fantasy.ToolCall{ID: "x", Name: info.Name})
 		require.NoError(t, err)
 		require.True(t, resp.IsError)
-		require.True(t, strings.Contains(resp.Content, "tool_search"))
+		require.True(t, strings.Contains(resp.Content, "ToolSearch"))
 	}
 
 	hashBefore := reg.DeferredHash()

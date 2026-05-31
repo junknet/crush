@@ -22,6 +22,7 @@ import {
     Text,
     TextInput,
     UIManager,
+    useWindowDimensions,
     View,
 } from 'react-native'
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -46,6 +47,31 @@ import {
     downloadAndOpenAndroidUpdate,
     MobileUpdateRelease,
 } from '@lib/crush/mobile_update'
+import { dlog } from '@lib/crush/dlog'
+import {
+    clampFontScale,
+    FONT_SCALE_DEFAULT,
+    readFontScale,
+    writeFontScale,
+} from '@lib/crush/font_scale'
+// User-controlled chat font scale (drawer +/- buttons, persisted). Markdown text
+// components read it via context and multiply their font sizes, so the whole
+// transcript scales uniformly without re-threading props through every node.
+const FontScaleContext = React.createContext(FONT_SCALE_DEFAULT)
+
+/**
+ * scaleFont returns the given text style with its fontSize/lineHeight multiplied
+ * by the active font scale. A scale of 1 returns the style untouched so the
+ * common case allocates nothing.
+ */
+function scaleFont(style: any, scale: number): any {
+    if (scale === 1) return style
+    const flat = StyleSheet.flatten(style) as { fontSize?: number; lineHeight?: number }
+    const override: { fontSize?: number; lineHeight?: number } = {}
+    if (flat.fontSize) override.fontSize = Math.round(flat.fontSize * scale * 10) / 10
+    if (flat.lineHeight) override.lineHeight = Math.round(flat.lineHeight * scale)
+    return [style, override]
+}
 
 type ActivityEntry = {
     id: string
@@ -174,6 +200,38 @@ function getToolCallSummary(name?: string, input?: string): { action: string; de
                 action: '运行命令',
                 details: parsed.CommandLine || parsed.command || '',
             }
+        // Crush semantic tools (PascalCase, iodriver-backed).
+        case 'Read':
+            return { action: '查看文件', details: parsed.file_path || parsed.path || '' }
+        case 'ReadDir':
+            return { action: '列出目录', details: parsed.path || '' }
+        case 'Find':
+            return {
+                action: '查找文件',
+                details: parsed.pattern || parsed.name || parsed.path || '',
+            }
+        case 'Grep':
+            return {
+                action: '检索代码',
+                details: parsed.pattern || parsed.query ? `"${parsed.pattern || parsed.query}"` : '',
+            }
+        case 'Search':
+            if (parsed.mode === 'files') {
+                return {
+                    action: '查找文件',
+                    details: parsed.pattern || parsed.path || '',
+                }
+            } else {
+                return {
+                    action: '检索代码',
+                    details: parsed.pattern ? `"${parsed.pattern}"` : '',
+                }
+            }
+        case 'Edit':
+        case 'MultiEdit':
+            return { action: '修改文件', details: parsed.file_path || parsed.path || '' }
+        case 'Write':
+            return { action: '新建文件', details: parsed.file_path || parsed.path || '' }
         case 'view_file':
             return {
                 action: '查看文件',
@@ -806,6 +864,7 @@ HighlightedCode.displayName = 'HighlightedCode'
 // Sub-component for Markdown code blocks with copy & collapse
 const MarkdownCodeBlock = React.memo(
     ({ lang, code, flat }: { lang: string; code: string; flat?: boolean }) => {
+        const fontScale = React.useContext(FontScaleContext)
         const [expanded, setExpanded] = useState(false)
         const lines = code.split('\n')
         const needsFolding = lines.length > 12
@@ -862,7 +921,7 @@ const MarkdownCodeBlock = React.memo(
                         <Text style={styles.copyButtonText}>复制</Text>
                     </Pressable>
                 </View>
-                <Text style={styles.markdownCodeBlockText} selectable>
+                <Text style={scaleFont(styles.markdownCodeBlockText, fontScale)} selectable>
                     <HighlightedCode code={displayCode} lang={lang} />
                 </Text>
                 {needsFolding && (
@@ -979,9 +1038,9 @@ const preprocessHtmlToMarkdown = (rawText: string): string => {
 }
 
 const inlineCache = new Map<string, React.ReactNode[]>()
-const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
+const renderMarkdownInline = (inlineText: string, flat?: boolean, scale: number = 1) => {
     if (!inlineText) return ''
-    const cacheKey = `${flat ? 'f' : 'n'}:${inlineText}`
+    const cacheKey = `${flat ? 'f' : 'n'}:${scale}:${inlineText}`
     const cached = inlineCache.get(cacheKey)
     if (cached) return cached
 
@@ -1006,7 +1065,7 @@ const renderMarkdownInline = (inlineText: string, flat?: boolean) => {
                 <Text
                     key={idx}
                     style={[
-                        styles.markdownInlineCode,
+                        scaleFont(styles.markdownInlineCode, scale),
                         flat && {
                             backgroundColor: 'transparent',
                             borderWidth: 0,
@@ -1098,13 +1157,16 @@ MarkdownDetails.displayName = 'MarkdownDetails'
 // Sub-component for lightweight Markdown rendering
 const MarkdownText = React.memo(
     ({ text, style, flat }: { text: string; style?: any; flat?: boolean }) => {
+        const fontScale = React.useContext(FontScaleContext)
         const preprocessedText = preprocessHtmlToMarkdown(text)
         // Split by code blocks and details blocks
         const blocks = preprocessedText.split(
             /(```[\s\S]*?```|<details[^>]*>[\s\S]*?<\/details>)/gi
         )
 
-        const renderInline = (inlineText: string) => renderMarkdownInline(inlineText, flat)
+        const renderInline = (inlineText: string) =>
+            renderMarkdownInline(inlineText, flat, fontScale)
+        const sf = (s: any) => scaleFont(s, fontScale)
 
         return (
             <View style={styles.markdownContainer}>
@@ -1194,12 +1256,12 @@ const MarkdownText = React.memo(
                             const content = headingMatch[2]
                             const headingStyle =
                                 level === 1
-                                    ? styles.markdownH1
+                                    ? sf(styles.markdownH1)
                                     : level === 2
-                                      ? styles.markdownH2
+                                      ? sf(styles.markdownH2)
                                       : level === 3
-                                        ? styles.markdownH3
-                                        : styles.markdownH4
+                                        ? sf(styles.markdownH3)
+                                        : sf(styles.markdownH4)
                             renderedLines.push(
                                 <Text key={lineIdx} style={[headingStyle, style]}>
                                     {renderInline(content)}
@@ -1224,7 +1286,7 @@ const MarkdownText = React.memo(
                                             marginVertical: 2,
                                         },
                                     ]}>
-                                    <Text style={styles.markdownBlockquoteText}>
+                                    <Text style={sf(styles.markdownBlockquoteText)}>
                                         {renderInline(content)}
                                     </Text>
                                 </View>
@@ -1260,11 +1322,11 @@ const MarkdownText = React.memo(
                                         styles.markdownListItemRow,
                                         { paddingLeft: Math.max(8, indent) },
                                     ]}>
-                                    <Text style={styles.markdownListBullet}>
+                                    <Text style={sf(styles.markdownListBullet)}>
                                         •
                                     </Text>
                                     <Text
-                                        style={[styles.markdownListItemText, style]}>
+                                        style={[sf(styles.markdownListItemText), style]}>
                                         {renderInline(content)}
                                     </Text>
                                 </View>
@@ -1284,11 +1346,11 @@ const MarkdownText = React.memo(
                                         styles.markdownListItemRow,
                                         { paddingLeft: Math.max(8, indent) },
                                     ]}>
-                                    <Text style={styles.markdownListNum}>
+                                    <Text style={sf(styles.markdownListNum)}>
                                         {num}.
                                     </Text>
                                     <Text
-                                        style={[styles.markdownListItemText, style]}>
+                                        style={[sf(styles.markdownListItemText), style]}>
                                         {renderInline(content)}
                                     </Text>
                                 </View>
@@ -1299,7 +1361,7 @@ const MarkdownText = React.memo(
                         renderedLines.push(
                             <Text
                                 key={lineIdx}
-                                style={[styles.markdownParagraph, style]}>
+                                style={[sf(styles.markdownParagraph), style]}>
                                 {renderInline(line)}
                             </Text>
                         )
@@ -1493,6 +1555,7 @@ const AnsiText = React.memo(
     },
     (prev, next) => prev.text === next.text && prev.style === next.style
 )
+AnsiText.displayName = 'AnsiText'
 
 function cleanTerminalOutput(content?: string): string {
     if (!content) return ''
@@ -2030,17 +2093,17 @@ const TerminalSessionCard = React.memo(
             if (!hasOutput) return 'none'
             if (isError) return 'raw'
 
-            if (name === 'grep_search' || name === 'grep') {
+            if (name === 'grep_search' || name === 'grep' || name === 'Grep' || (name === 'Search' && parseJson(input)?.mode !== 'files')) {
                 const parsed = parseSearchMatches(displayableContent)
                 if (parsed.length > 0) return 'grep'
             }
 
-            if (name === 'list_dir' || name === 'ls') {
+            if (name === 'list_dir' || name === 'ls' || name === 'ReadDir' || name === 'Find' || (name === 'Search' && parseJson(input)?.mode === 'files')) {
                 const parsed = parseDirectoryTree(displayableContent)
                 if (parsed.length > 0) return 'ls'
             }
 
-            if (name === 'view_file' || name === 'read_file') {
+            if (name === 'view_file' || name === 'read_file' || name === 'Read') {
                 return 'file_view'
             }
 
@@ -2059,12 +2122,15 @@ const TerminalSessionCard = React.memo(
         return (
             <View style={[styles.terminalCardContainer, isError && styles.terminalCardError]}>
                 <View style={styles.terminalHeader}>
-                    <View style={styles.terminalHeaderLeft}>
-                        <View style={[styles.macDot, { backgroundColor: '#ef4444' }]} />
-                        <View style={[styles.macDot, { backgroundColor: '#f59e0b' }]} />
-                        <View style={[styles.macDot, { backgroundColor: '#10b981' }]} />
-                    </View>
-                    <Text style={styles.terminalHeaderTitle}>{name || 'terminal'}</Text>
+                    <Feather
+                        name="terminal"
+                        size={12}
+                        color="#475569"
+                        style={{ marginRight: 7 }}
+                    />
+                    <Text style={styles.terminalHeaderTitle} numberOfLines={1}>
+                        {name || 'terminal'}
+                    </Text>
                     <View style={styles.terminalHeaderRight}>
                         {!finished ? (
                             <ActivityIndicator size="small" color="#38bdf8" />
@@ -2263,17 +2329,17 @@ const FullTerminalModal = ({
         if (!content) return 'none'
         if (isError) return 'raw'
 
-        if (title === 'grep_search' || title === 'grep') {
+        if (title === 'grep_search' || title === 'grep' || title === 'Grep' || title === 'Search') {
             const parsed = parseSearchMatches(content)
             if (parsed.length > 0) return 'grep'
         }
 
-        if (title === 'list_dir' || title === 'ls') {
+        if (title === 'list_dir' || title === 'ls' || title === 'ReadDir' || title === 'Find' || title === 'Search') {
             const parsed = parseDirectoryTree(content)
             if (parsed.length > 0) return 'ls'
         }
 
-        if (title === 'view_file' || title === 'read_file') {
+        if (title === 'view_file' || title === 'read_file' || title === 'Read') {
             return 'file_view'
         }
 
@@ -2836,7 +2902,9 @@ const CrushMobile = () => {
     // Model selector state: target role + the user-typed provider/model
     // pair. Persisted to TUI state.yaml via api.setModel which routes the
     // command through NATS to the active relay.
-    const [modelRole, setModelRole] = useState<'brain' | 'worker' | 'explore'>('brain')
+    // explore/plan/auditor are fixed server-side (explore = tested default,
+    // plan/auditor = strongest reasoning), so only brain/worker are switchable.
+    const [modelRole, setModelRole] = useState<'brain' | 'worker'>('brain')
     const [modelProvider, setModelProvider] = useState('')
     const [modelId, setModelId] = useState('')
     const [modelSaveStatus, setModelSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>(
@@ -3011,7 +3079,7 @@ const CrushMobile = () => {
     useEffect(() => {
         const shown = Keyboard.addListener('keyboardDidShow', (event) => {
             const h = event.endCoordinates?.height || 0
-            console.log('[KEYBOARD] shown height:', h)
+            dlog('[KEYBOARD] shown height:', h)
             setKeyboardVisible(true)
             setKeyboardHeight(h)
         })
@@ -3116,10 +3184,33 @@ const CrushMobile = () => {
         return () => clearTimeout(timeout)
     }, [handleCheckMobileUpdate])
 
+    // Chat font scale, persisted across launches; adjusted via the drawer +/-.
+    const [fontScale, setFontScale] = useState(FONT_SCALE_DEFAULT)
+    useEffect(() => {
+        void readFontScale().then(setFontScale)
+    }, [])
+    // Chat font size is adjusted from the drawer footer via +/- buttons and
+    // persisted across launches (clamped to the readable range).
+    const adjustFontScale = useCallback((delta: number) => {
+        setFontScale((prev) => {
+            const next = clampFontScale(Math.round((prev + delta) * 100) / 100)
+            void writeFontScale(next)
+            return next
+        })
+    }, [])
+
     const unsubscribeRef = useRef<null | (() => void)>(null)
     const sessionsUnsubRef = useRef<null | (() => void)>(null)
     const cancelRequestedRef = useRef(false)
     const syncScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+    // Stable-ref cache for aggregated (assistant+tool) groups. Aggregation
+    // rebuilds `agg-<id>` objects every flush; without this, even historical
+    // groups get fresh refs each streaming tick and fail MessageItem's
+    // ref-equality memo, reflowing the whole transcript ~30×/sec. Keyed by
+    // agg id → { sig, msg }; an unchanged sig returns the prior object so only
+    // the actively-growing tail group re-renders.
+    const aggCacheRef = useRef<Map<string, { sig: string; msg: Message }>>(new Map())
 
     const flatListRef = useRef<FlatList>(null)
     const isCloseToBottom = useRef(true)
@@ -3157,6 +3248,11 @@ const CrushMobile = () => {
             layoutMeasurement.height + contentOffset.y >= contentSize.height - paddingToBottom
         isCloseToBottom.current = closeToBottom
         if (userScrollRef.current) {
+            // TRACE: user scrolled → bottom-follow lock toggles. When released
+            // (scrolled up), streaming output stops auto-pinning to bottom.
+            if (bottomFollowLockedRef.current !== closeToBottom) {
+                dlog(`[TRACE] bottomlock=${closeToBottom} (user_scroll y=${Math.round(contentOffset.y)})`)
+            }
             bottomFollowLockedRef.current = closeToBottom
         }
         // Lazy-load only when the user is actively dragging upward and we
@@ -3237,23 +3333,39 @@ const CrushMobile = () => {
         oldestLoadedTsRef.current = oldestTsMs
         loadingOlderRef.current = true
         setLoadingOlder(true)
+        // TRACE pull-history breakdown: pull_start → pull_net (NATS request/
+        // reply round-trip) → pull_render_set (Map merge + setMessages) →
+        // pull_render_done (logged from handleContentSizeChange once the
+        // prepended rows actually lay out). Splits network vs render cost.
+        const gp = globalThis as any
+        const pullStart = Date.now()
+        dlog(`[TRACE] pull_start size=${messagesMapRef.current.size}`)
         try {
             const sizeBefore = messagesMapRef.current.size
+            const tNet0 = Date.now()
             const page = await api.loadHistoryBefore(sessionID, oldestMessage.id, oldestTs, 50)
+            dlog(
+                `[TRACE] pull_net +${Date.now() - tNet0}ms count=${page.messages.length} exhausted=${page.exhausted}`
+            )
             for (const message of page.messages) {
                 messagesMapRef.current.set(message.id, message)
             }
-            console.log(
-                `[HISTORY] loaded_before session=${sessionID} count=${page.messages.length} exhausted=${page.exhausted}`
-            )
             const out = projectMessages()
             setMessages(out)
+            // Only arm pull_render_done when rows were actually prepended;
+            // an exhausted page (count=0) produces no content-size change, so a
+            // lingering pending flag would mis-fire on the next unrelated layout.
+            if (page.messages.length > 0) {
+                gp.__pullOrigin = pullStart
+                gp.__pullRenderPending = true
+            }
+            dlog(`[TRACE] pull_render_set +${Date.now() - pullStart}ms total=${out.length}`)
             scheduleMessageCacheWrite(sessionID, out)
             if (page.exhausted || messagesMapRef.current.size === sizeBefore) {
                 setExhaustedHistory(true)
             }
         } catch (err) {
-            console.log('loadOlderHistory failed:', err)
+            dlog('loadOlderHistory failed:', err)
         } finally {
             loadingOlderRef.current = false
             setLoadingOlder(false)
@@ -3263,6 +3375,22 @@ const CrushMobile = () => {
 
     const handleContentSizeChange = useCallback(
         (_w: number, h: number) => {
+            // TRACE: first real content layout after a switch / pull = the
+            // moment the user actually sees rendered messages. Logged before
+            // the grow-guard below so it fires even when a pull prepends rows.
+            const gp = globalThis as any
+            if (gp.__pullRenderPending && h > 0) {
+                gp.__pullRenderPending = false
+                dlog(
+                    `[TRACE] pull_render_done +${Date.now() - (gp.__pullOrigin || Date.now())}ms h=${Math.round(h)}`
+                )
+            }
+            if (gp.__switchRenderPending && h > 0) {
+                gp.__switchRenderPending = false
+                dlog(
+                    `[TRACE] T5_render_complete +${Date.now() - (gp.__switchOrigin || Date.now())}ms h=${Math.round(h)}`
+                )
+            }
             // Only scroll when content height actually grew (new message content).
             // Keyboard show/hide changes FlatList layout but NOT contentSize, so
             // this guard prevents the spurious scroll-to-top flash on Android that
@@ -3281,6 +3409,11 @@ const CrushMobile = () => {
                         scrollToBottom(false)
                     }, 100)
                 } else {
+                    // Bottom-lock during LLM output: content grew (new token
+                    // frame) and we're following the tail, so pin to bottom.
+                    dlog(
+                        `[TRACE] stream_autoscroll locked=${bottomFollowLockedRef.current} h=${Math.round(h)}`
+                    )
                     scrollToBottom(true)
                 }
             }
@@ -3480,7 +3613,7 @@ const CrushMobile = () => {
                     map.set(nextMessage.id, nextMessage)
                 }
 
-                const flushNow = () => {
+                const flushNow = (persist: boolean) => {
                     if (messagesFlushScheduledRef.current) {
                         clearTimeout(messagesFlushScheduledRef.current)
                         messagesFlushScheduledRef.current = null
@@ -3490,12 +3623,17 @@ const CrushMobile = () => {
                     const isFirstFlush = !g.__perfFirstFlush && g.__perfTap
                     if (isFirstFlush) {
                         g.__perfFirstFlush = Date.now()
-                        console.log(
+                        dlog(
                             `[PERF] T3 first_flush +${g.__perfFirstFlush - g.__perfTap}ms count=${out.length}`
                         )
                     }
                     setMessages(out)
-                    scheduleMessageCacheWrite(sessionIDRef.current, out)
+                    // Persist only on terminal checkpoints (turn finish /
+                    // sync_complete / history load), NOT on every streaming
+                    // flush. The old per-flush write re-serialized the entire
+                    // transcript (≤2000 msgs) to disk ~every 250ms during a
+                    // turn. The read side (sinceTs) is unaffected.
+                    if (persist) scheduleMessageCacheWrite(sessionIDRef.current, out)
 
                     if (isSyncing) {
                         if (syncingTimeoutRef.current) clearTimeout(syncingTimeoutRef.current)
@@ -3527,7 +3665,7 @@ const CrushMobile = () => {
                     nextMessage.role === 'assistant' &&
                     isMessageFinished(nextMessage)
                 ) {
-                    flushNow()
+                    flushNow(true)
                     setAgentInfo((prev) => ({ ...prev, is_busy: false }))
                     return
                 }
@@ -3538,7 +3676,7 @@ const CrushMobile = () => {
                     const delay = isSyncing ? 300 : 100
                     messagesFlushScheduledRef.current = setTimeout(() => {
                         messagesFlushScheduledRef.current = null
-                        flushNow()
+                        flushNow(false)
                     }, delay)
                 }
                 return
@@ -3578,7 +3716,11 @@ const CrushMobile = () => {
                 return
             }
             if (envelope.type === 'sync_complete') {
-                console.log(`[PERF] T4 sync_complete session=${envelope.payload.session_id}`)
+                dlog(`[PERF] T4 sync_complete session=${envelope.payload.session_id}`)
+                // Persist the fully-synced transcript so the next open of this
+                // session restores from cache and only pulls the tail via
+                // sinceTs. Streaming flushes no longer write (see flushNow).
+                scheduleMessageCacheWrite(sessionIDRef.current, projectMessages())
                 setIsSyncing(false)
                 if (syncingTimeoutRef.current) {
                     clearTimeout(syncingTimeoutRef.current)
@@ -3653,7 +3795,7 @@ const CrushMobile = () => {
             try {
                 const unsub = await api.listSessions((next) => {
                     if (!active) return
-                    console.log(
+                    dlog(
                         `[PERF] listSessions cb: ${next.length} sessions, alive=${next.filter((s) => s.alive !== false).length}, first=${next[0]?.id?.slice(0, 8)}/${next[0]?.alive}`
                     )
                     setSessions(next)
@@ -3666,7 +3808,7 @@ const CrushMobile = () => {
                             return prev
                         }
                         const picked = aliveSorted[0]?.id || next[0]?.id || ''
-                        console.log(
+                        dlog(
                             `[PERF] setSessionID prev=${prev?.slice(0, 8) || '(empty)'} -> ${picked?.slice(0, 8) || '(empty)'}`
                         )
                         return picked
@@ -3682,7 +3824,7 @@ const CrushMobile = () => {
                 }
                 sessionsUnsubRef.current = unsub
             } catch (error) {
-                console.log('Failed to subscribe sessions:', error)
+                dlog('Failed to subscribe sessions:', error)
                 if (active) {
                     setStatus('连接失败')
                     setErrorText(error instanceof Error ? error.message : String(error))
@@ -3728,7 +3870,18 @@ const CrushMobile = () => {
         g.__perfFirstEvent = 0
         g.__perfFirstFlush = 0
         g.__perfRendered = 0
-        console.log(`[PERF] T0 session_change session=${sessionID}`)
+        // Switch-cost origin: prefer the real tap timestamp (drawer onPress)
+        // so the trace captures the user-perceived tap→render-complete span,
+        // including React scheduling + drawer close animation. Falls back to
+        // now for cold auto-select (no tap). __switchRenderPending is cleared
+        // by the first content layout in handleContentSizeChange (= T5).
+        const tapTs: number = g.__tapTs && Date.now() - g.__tapTs < 5000 ? g.__tapTs : Date.now()
+        g.__switchOrigin = tapTs
+        g.__switchRenderPending = true
+        g.__tapTs = 0
+        dlog(
+            `[TRACE] T0_session_change +${Date.now() - tapTs}ms_since_tap session=${sessionID.slice(0, 8)}`
+        )
 
         // Replace the previous session projection before restoring this
         // session's local cache and pulling its incremental relay tail.
@@ -3770,7 +3923,7 @@ const CrushMobile = () => {
                         scrollToBottom(false)
                     })
                 }
-                console.log(`[PERF] T1 subscribe_begin +${Date.now() - g.__perfTap}ms`)
+                dlog(`[PERF] T1 subscribe_begin +${Date.now() - g.__perfTap}ms`)
                 const unsub = await api.subscribeSessionEvents(
                     sessionID,
                     (envelope) => {
@@ -3778,7 +3931,7 @@ const CrushMobile = () => {
                         const g2 = globalThis as any
                         if (!g2.__perfFirstEvent && g2.__perfTap) {
                             g2.__perfFirstEvent = Date.now()
-                            console.log(
+                            dlog(
                                 `[PERF] T2 first_event +${g2.__perfFirstEvent - g2.__perfTap}ms type=${envelope.type}`
                             )
                         }
@@ -3786,7 +3939,7 @@ const CrushMobile = () => {
                         handleEventRef.current?.(envelope)
                     },
                     (err) => {
-                        console.log('Crush events failed:', err)
+                        dlog('Crush events failed:', err)
                         if (active) {
                             setStatus('连接失败')
                             setIsSyncing(false)
@@ -3804,7 +3957,7 @@ const CrushMobile = () => {
                 }
                 unsubscribeRef.current = unsub
             } catch (error) {
-                console.log('Failed to subscribe session events:', error)
+                dlog('Failed to subscribe session events:', error)
                 if (active) {
                     setStatus('连接失败')
                     setErrorText(error instanceof Error ? error.message : String(error))
@@ -4008,7 +4161,36 @@ const CrushMobile = () => {
                 aggregated.push(msg)
             }
         }
-        return aggregated.filter(messageHasVisibleContent)
+        // Stabilize aggregated-group object refs across flushes. The merge
+        // above rebuilds every `agg-<id>` object on each recompute, so without
+        // this an unchanged historical group would get a fresh ref every
+        // streaming tick and fail MessageItem's ref-equality memo. Key by agg
+        // id; reuse the prior object when its content signature is unchanged so
+        // only the actively-growing tail group re-renders.
+        const prevAggCache = aggCacheRef.current
+        const nextAggCache = new Map<string, { sig: string; msg: Message }>()
+        const stabilized = aggregated.map((m) => {
+            if (!m.id.startsWith('agg-')) return m
+            const parts = m.parts || []
+            const last = parts[parts.length - 1]
+            const lastLen = last
+                ? (last.data?.text?.length ??
+                  last.data?.thinking?.length ??
+                  last.data?.content?.length ??
+                  last.data?.input?.length ??
+                  0)
+                : 0
+            const sig = `${parts.length}:${lastLen}:${last?.type ?? ''}:${last?.data?.finished_at ?? ''}:${last?.data?.finished ?? ''}`
+            const cached = prevAggCache.get(m.id)
+            if (cached && cached.sig === sig) {
+                nextAggCache.set(m.id, cached)
+                return cached.msg
+            }
+            nextAggCache.set(m.id, { sig, msg: m })
+            return m
+        })
+        aggCacheRef.current = nextAggCache
+        return stabilized.filter(messageHasVisibleContent)
     }, [messages, activeRunVisible])
 
     const isConnected = status === '在线'
@@ -4151,7 +4333,7 @@ const CrushMobile = () => {
                                         切换模型 (写入 state.yaml)
                                     </Text>
                                     <View style={styles.modelRoleRow}>
-                                        {(['brain', 'worker', 'explore'] as const).map((r) => (
+                                        {(['brain', 'worker'] as const).map((r) => (
                                             <Pressable
                                                 key={r}
                                                 onPress={() => setModelRole(r)}
@@ -4294,32 +4476,6 @@ const CrushMobile = () => {
                         </View>
                     )}
 
-                    <View style={styles.compactMetaRow}>
-                        <Pressable
-                            style={styles.metaBadge}
-                            onPress={() => setQuickSelectRole('brain')}>
-                            {switchingModelRole === 'brain' ? (
-                                <ActivityIndicator size={11} color="#c084fc" />
-                            ) : (
-                                <Feather name="cpu" size={11} color="#c084fc" />
-                            )}
-                            <Text style={styles.metaBadgeText} numberOfLines={1}>
-                                Brain: {brainModel}
-                            </Text>
-                        </Pressable>
-                        <Pressable
-                            style={styles.metaBadge}
-                            onPress={() => setQuickSelectRole('worker')}>
-                            {switchingModelRole === 'worker' ? (
-                                <ActivityIndicator size={11} color="#eab308" />
-                            ) : (
-                                <Feather name="user" size={11} color="#eab308" />
-                            )}
-                            <Text style={styles.metaBadgeText} numberOfLines={1}>
-                                Worker: {workerModel}
-                            </Text>
-                        </Pressable>
-                    </View>
                 </View>
 
                 <View style={styles.content}>
@@ -4329,8 +4485,9 @@ const CrushMobile = () => {
                             <Text style={styles.syncingText}>正在同步历史记录...</Text>
                         </View>
                     )}
-                    <FlatList
-                        ref={flatListRef}
+                    <FontScaleContext.Provider value={fontScale}>
+                            <FlatList
+                                ref={flatListRef}
                         style={styles.messages}
                         data={displayMessages}
                         keyExtractor={(item) => item.id}
@@ -4346,6 +4503,11 @@ const CrushMobile = () => {
                         windowSize={11}
                         removeClippedSubviews={true}
                         updateCellsBatchingPeriod={50}
+                        // Prepending older history (load-on-scroll-up) must not
+                        // shift the viewport. minIndexForVisible:1 pins the
+                        // first already-visible row in place while rows are
+                        // inserted above it, so pulling history no longer jumps.
+                        maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
                         contentContainerStyle={[
                             styles.messagesContent,
                             { flexGrow: 1 },
@@ -4387,7 +4549,8 @@ const CrushMobile = () => {
                                 </Text>
                             </View>
                         }
-                    />
+                            />
+                    </FontScaleContext.Provider>
                 </View>
 
                 {pendingPermissions.length > 0 && (
@@ -4513,7 +4676,6 @@ const CrushMobile = () => {
                     )}
                 </View>
             </KeyboardAvoidingView>
-            </View>
 
                 {/* Drawer 阴影遮罩层 */}
                 {drawerOpen && (
@@ -4592,6 +4754,10 @@ const CrushMobile = () => {
                                                 if (deletingSessionId) {
                                                     setDeletingSessionId(null)
                                                 } else {
+                                                    ;(globalThis as any).__tapTs = Date.now()
+                                                    dlog(
+                                                        `[TRACE] tap_switch target=${session.id.slice(0, 8)}`
+                                                    )
                                                     setSessionID(session.id)
                                                     setSessionAccessTimes((prev) => ({
                                                         ...prev,
@@ -4773,6 +4939,11 @@ const CrushMobile = () => {
                                                             if (deletingSessionId) {
                                                                 setDeletingSessionId(null)
                                                             } else {
+                                                                ;(globalThis as any).__tapTs =
+                                                                    Date.now()
+                                                                dlog(
+                                                                    `[TRACE] tap_switch target=${session.id.slice(0, 8)}`
+                                                                )
                                                                 setSessionID(session.id)
                                                                 setSessionAccessTimes((prev) => ({
                                                                     ...prev,
@@ -4905,6 +5076,31 @@ const CrushMobile = () => {
                     </ScrollView>
 
                     <View style={styles.drawerFooter}>
+                        <View style={styles.fontSizeRow}>
+                            <Text style={styles.drawerFooterLabel}>字号</Text>
+                            <View style={styles.fontSizeControls}>
+                                <Pressable
+                                    style={({ pressed }) => [
+                                        styles.fontSizeBtn,
+                                        pressed && styles.pressed,
+                                    ]}
+                                    onPress={() => adjustFontScale(-0.1)}>
+                                    <Feather name="minus" size={16} color="#cbd5e1" />
+                                </Pressable>
+                                <Text style={styles.fontSizeVal}>
+                                    {Math.round(fontScale * 100)}%
+                                </Text>
+                                <Pressable
+                                    style={({ pressed }) => [
+                                        styles.fontSizeBtn,
+                                        pressed && styles.pressed,
+                                    ]}
+                                    onPress={() => adjustFontScale(0.1)}>
+                                    <Feather name="plus" size={16} color="#cbd5e1" />
+                                </Pressable>
+                            </View>
+                        </View>
+                        <View style={styles.drawerFooterDivider} />
                         <Text style={styles.drawerFooterLabel}>当前大语言模型</Text>
                         <Text style={styles.drawerFooterVal} numberOfLines={1}>
                             {modelName}
@@ -4960,7 +5156,6 @@ const CrushMobile = () => {
                         </Text>
                     </View>
                 </Animated.View>
-            </KeyboardAvoidingView>
 
             <FullTerminalModal
                 visible={terminalModalVisible}
@@ -5396,10 +5591,10 @@ const styles = StyleSheet.create({
         backgroundColor: '#07090e',
     },
     messagesContent: {
-        paddingHorizontal: 16,
-        paddingTop: 16,
-        paddingBottom: 24,
-        rowGap: 18,
+        paddingHorizontal: 10,
+        paddingTop: 10,
+        paddingBottom: 16,
+        rowGap: 9,
     },
     loadOlderText: {
         textAlign: 'center',
@@ -5534,11 +5729,13 @@ const styles = StyleSheet.create({
         borderRadius: 4,
     },
     terminalHeaderTitle: {
-        color: '#64748b',
-        fontSize: 10.5,
+        flex: 1,
+        color: '#94a3b8',
+        fontSize: 11,
         fontWeight: '700',
         fontFamily: 'FiraCode-Regular',
         textTransform: 'uppercase',
+        letterSpacing: 0.4,
     },
     terminalHeaderRight: {
         flexDirection: 'row',
@@ -5550,7 +5747,7 @@ const styles = StyleSheet.create({
     },
     terminalCommandRow: {
         flexDirection: 'row',
-        alignItems: 'center',
+        alignItems: 'flex-start',
         backgroundColor: '#020617',
         paddingHorizontal: 12,
         paddingTop: 8,
@@ -5559,13 +5756,16 @@ const styles = StyleSheet.create({
     },
     terminalPrompt: {
         color: '#10b981',
-        fontSize: 11,
+        fontSize: 11.5,
+        lineHeight: 18,
         fontWeight: 'bold',
         fontFamily: 'FiraCode-Regular',
+        marginRight: 7,
     },
     terminalCommandText: {
         color: '#f1f5f9',
         fontSize: 11.5,
+        lineHeight: 18,
         fontFamily: 'FiraCode-Regular',
         flex: 1,
     },
@@ -5688,20 +5888,20 @@ const styles = StyleSheet.create({
     },
     messageText: {
         color: '#f8fafc',
-        fontSize: 14.2,
-        lineHeight: 21.5,
+        fontSize: 13.8,
+        lineHeight: 18,
     },
     compoundTextContainer: {
-        maxWidth: '85%',
+        maxWidth: '97%',
         alignSelf: 'flex-start',
         backgroundColor: '#131b2e88',
         borderWidth: 1,
         borderColor: '#242f41',
-        paddingHorizontal: 16,
-        paddingVertical: 10,
-        borderRadius: 16,
+        paddingHorizontal: 11,
+        paddingVertical: 8,
+        borderRadius: 14,
         borderBottomLeftRadius: 4,
-        marginTop: 6,
+        marginTop: 3,
         marginBottom: 4,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 1.5 },
@@ -5990,46 +6190,46 @@ const styles = StyleSheet.create({
     },
     markdownParagraph: {
         color: '#f8fafc',
-        fontSize: 14.5,
-        lineHeight: 22,
-        marginBottom: 6,
+        fontSize: 13.8,
+        lineHeight: 18,
+        marginBottom: 3,
     },
     markdownH1: {
         color: '#f8fafc',
         fontSize: 22,
         lineHeight: 30,
         fontWeight: '800',
-        marginTop: 16,
-        marginBottom: 10,
+        marginTop: 10,
+        marginBottom: 6,
     },
     markdownH2: {
         color: '#f8fafc',
         fontSize: 19,
         lineHeight: 26,
         fontWeight: '700',
-        marginTop: 14,
-        marginBottom: 8,
+        marginTop: 9,
+        marginBottom: 5,
     },
     markdownH3: {
         color: '#f8fafc',
         fontSize: 17,
         lineHeight: 24,
         fontWeight: '700',
-        marginTop: 12,
-        marginBottom: 8,
+        marginTop: 8,
+        marginBottom: 5,
     },
     markdownH4: {
         color: '#f8fafc',
         fontSize: 15.5,
         lineHeight: 22,
         fontWeight: '600',
-        marginTop: 10,
-        marginBottom: 6,
+        marginTop: 7,
+        marginBottom: 4,
     },
     markdownListItemRow: {
         flexDirection: 'row',
         alignItems: 'flex-start',
-        marginBottom: 8,
+        marginBottom: 3,
     },
     markdownListBullet: {
         color: '#a78bfa',
@@ -6047,17 +6247,17 @@ const styles = StyleSheet.create({
     markdownListItemText: {
         flex: 1,
         color: '#e2e8f0',
-        fontSize: 14.5,
-        lineHeight: 22,
+        fontSize: 13.8,
+        lineHeight: 18,
     },
     markdownInlineCode: {
         fontFamily: 'FiraCode-Regular',
         backgroundColor: '#131224',
         color: '#a78bfa',
-        fontSize: 11.5,
+        fontSize: 13.8,
         fontWeight: '600',
-        paddingHorizontal: 6,
-        paddingVertical: 1.5,
+        paddingHorizontal: 5,
+        paddingVertical: 1,
         borderRadius: 4,
         borderWidth: 1,
         borderColor: '#2e264d',
@@ -6081,8 +6281,8 @@ const styles = StyleSheet.create({
     },
     markdownCodeBlockText: {
         color: '#e2e8f0',
-        fontSize: 11,
-        lineHeight: 16,
+        fontSize: 12.5,
+        lineHeight: 17,
         fontFamily: 'FiraCode-Regular',
     },
     markdownCodeBlockHeader: {
@@ -6395,6 +6595,35 @@ const styles = StyleSheet.create({
         fontSize: 9.5,
         fontWeight: '800',
         textTransform: 'uppercase',
+    },
+    fontSizeRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 6,
+    },
+    fontSizeControls: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        columnGap: 10,
+    },
+    fontSizeBtn: {
+        width: 30,
+        height: 30,
+        borderRadius: 8,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: '#1e293b',
+        borderWidth: 1,
+        borderColor: '#334155',
+    },
+    fontSizeVal: {
+        color: '#e2e8f0',
+        fontSize: 13,
+        fontWeight: '700',
+        fontFamily: 'FiraCode-Regular',
+        minWidth: 42,
+        textAlign: 'center',
     },
     drawerFooterVal: {
         color: '#94a3b8',

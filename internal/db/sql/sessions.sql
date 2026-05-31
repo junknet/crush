@@ -25,15 +25,15 @@ INSERT INTO sessions (
     ?,
     strftime('%s', 'now'),
     strftime('%s', 'now')
-) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir;
+) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir, last_prompt_tokens, last_completion_tokens, last_cache_creation_tokens, last_cache_read_tokens, last_context_pressure_tokens;
 
 -- name: GetSessionByID :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir, last_prompt_tokens, last_completion_tokens, last_cache_creation_tokens, last_cache_read_tokens, last_context_pressure_tokens
 FROM sessions
 WHERE id = ? LIMIT 1;
 
 -- name: GetLastSession :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir, last_prompt_tokens, last_completion_tokens, last_cache_creation_tokens, last_cache_read_tokens, last_context_pressure_tokens
 FROM sessions
 WHERE parent_session_id is NULL
   AND working_dir = ?
@@ -41,7 +41,7 @@ ORDER BY updated_at DESC
 LIMIT 1;
 
 -- name: ListSessions :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir, last_prompt_tokens, last_completion_tokens, last_cache_creation_tokens, last_cache_read_tokens, last_context_pressure_tokens
 FROM sessions
 WHERE parent_session_id is NULL
   AND working_dir = ?
@@ -54,11 +54,16 @@ SET
     mode = ?,
     prompt_tokens = ?,
     completion_tokens = ?,
+    last_prompt_tokens = ?,
+    last_completion_tokens = ?,
+    last_cache_creation_tokens = ?,
+    last_cache_read_tokens = ?,
+    last_context_pressure_tokens = ?,
     summary_message_id = ?,
     cost = ?,
     todos = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir;
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, mode, working_dir, last_prompt_tokens, last_completion_tokens, last_cache_creation_tokens, last_cache_read_tokens, last_context_pressure_tokens;
 
 -- name: UpdateSessionTitleAndUsage :exec
 UPDATE sessions

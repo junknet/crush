@@ -40,7 +40,7 @@ type WriteResponseMetadata struct {
 	Removals  int    `json:"removals"`
 }
 
-const WriteToolName = "write"
+const WriteToolName = "Write"
 
 func NewWriteTool(
 	lspManager *lsp.Manager,

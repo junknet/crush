@@ -9,7 +9,11 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // Serve runs the daemon side of the IO protocol: it decodes requests from r,
@@ -84,6 +88,12 @@ func handleRequest(_ context.Context, req rpcRequest) rpcResponse {
 		}
 	case methodExec:
 		return handleExec(req, resp)
+	case methodJobStart:
+		return handleJobStart(req, resp)
+	case methodJobOutput:
+		return handleJobOutput(req, resp)
+	case methodJobKill:
+		return handleJobKill(req, resp)
 	default:
 		resp.ErrKind = errKindOther
 		resp.ErrMsg = "iodriver: unknown method " + string(req.Method)
@@ -91,17 +101,143 @@ func handleRequest(_ context.Context, req rpcRequest) rpcResponse {
 	return resp
 }
 
+type remoteJob struct {
+	id          string
+	command     string
+	description string
+	cwd         string
+	cmd         *exec.Cmd
+	stdout      bytes.Buffer
+	stderr      bytes.Buffer
+	mu          sync.RWMutex
+	done        chan struct{}
+	exitCode    int
+	errMsg      string
+	completedAt atomic.Int64
+}
+
+var remoteJobs sync.Map
+var remoteJobCounter atomic.Uint64
+
+func handleJobStart(req rpcRequest, resp rpcResponse) rpcResponse {
+	cmd := buildExecCommand(req)
+	if req.Cwd != "" {
+		cmd.Dir = req.Cwd
+	}
+	if len(req.Env) > 0 {
+		cmd.Env = append(os.Environ(), req.Env...)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	id := strconv.FormatUint(remoteJobCounter.Add(1), 16)
+	job := &remoteJob{
+		id:          id,
+		command:     req.Command,
+		description: req.Description,
+		cwd:         req.Cwd,
+		cmd:         cmd,
+		done:        make(chan struct{}),
+		exitCode:    -1,
+	}
+	cmd.Stdout = lockedWriter{job: job, stderr: false}
+	cmd.Stderr = lockedWriter{job: job, stderr: true}
+
+	if err := cmd.Start(); err != nil {
+		resp.ErrKind = errKindOther
+		resp.ErrMsg = err.Error()
+		return resp
+	}
+	remoteJobs.Store(id, job)
+
+	go func() {
+		err := cmd.Wait()
+		job.mu.Lock()
+		switch e := err.(type) {
+		case nil:
+			job.exitCode = 0
+		case *exec.ExitError:
+			job.exitCode = e.ExitCode()
+		default:
+			job.exitCode = -1
+			job.errMsg = err.Error()
+		}
+		job.completedAt.Store(time.Now().Unix())
+		job.mu.Unlock()
+		close(job.done)
+	}()
+
+	return fillJobResponse(resp, job)
+}
+
+func handleJobOutput(req rpcRequest, resp rpcResponse) rpcResponse {
+	job, ok := getRemoteJob(req.JobID)
+	if !ok {
+		resp.ErrKind = errKindOther
+		resp.ErrMsg = "background job not found: " + req.JobID
+		return resp
+	}
+	return fillJobResponse(resp, job)
+}
+
+func handleJobKill(req rpcRequest, resp rpcResponse) rpcResponse {
+	job, ok := getRemoteJob(req.JobID)
+	if !ok {
+		resp.ErrKind = errKindOther
+		resp.ErrMsg = "background job not found: " + req.JobID
+		return resp
+	}
+	if job.cmd.Process != nil {
+		_ = syscall.Kill(-job.cmd.Process.Pid, syscall.SIGTERM)
+		_ = job.cmd.Process.Kill()
+	}
+	return fillJobResponse(resp, job)
+}
+
+func getRemoteJob(id string) (*remoteJob, bool) {
+	value, ok := remoteJobs.Load(id)
+	if !ok {
+		return nil, false
+	}
+	job, ok := value.(*remoteJob)
+	return job, ok
+}
+
+func fillJobResponse(resp rpcResponse, job *remoteJob) rpcResponse {
+	job.mu.RLock()
+	defer job.mu.RUnlock()
+	resp.JobID = job.id
+	resp.Command = job.command
+	resp.Description = job.description
+	resp.Cwd = job.cwd
+	resp.Stdout = append([]byte(nil), job.stdout.Bytes()...)
+	resp.Stderr = append([]byte(nil), job.stderr.Bytes()...)
+	resp.ExitCode = job.exitCode
+	resp.Done = job.completedAt.Load() != 0
+	if job.errMsg != "" {
+		resp.ErrKind = errKindOther
+		resp.ErrMsg = job.errMsg
+	}
+	return resp
+}
+
+type lockedWriter struct {
+	job    *remoteJob
+	stderr bool
+}
+
+func (w lockedWriter) Write(p []byte) (int, error) {
+	w.job.mu.Lock()
+	defer w.job.mu.Unlock()
+	if w.stderr {
+		return w.job.stderr.Write(p)
+	}
+	return w.job.stdout.Write(p)
+}
+
 // handleExec runs one command to completion in a fresh shell on the daemon
 // host, capturing stdout and stderr separately and reporting the exit code.
 func handleExec(req rpcRequest, resp rpcResponse) rpcResponse {
-	var cmd *exec.Cmd
-	if len(req.Argv) > 0 {
-		// Direct exec, no shell: structured tools (grep/find) pass argv so a
-		// pattern with shell metacharacters is never reinterpreted.
-		cmd = exec.Command(req.Argv[0], req.Argv[1:]...)
-	} else {
-		cmd = exec.Command("/bin/sh", "-c", req.Command)
-	}
+	cmd := buildExecCommand(req)
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
@@ -130,6 +266,15 @@ func handleExec(req rpcRequest, resp rpcResponse) rpcResponse {
 		resp.ErrMsg = err.Error()
 	}
 	return resp
+}
+
+func buildExecCommand(req rpcRequest) *exec.Cmd {
+	if len(req.Argv) > 0 {
+		// Direct exec, no shell: structured tools (grep/find) pass argv so a
+		// pattern with shell metacharacters is never reinterpreted.
+		return exec.Command(req.Argv[0], req.Argv[1:]...)
+	}
+	return exec.Command("/bin/sh", "-c", req.Command)
 }
 
 // withErr classifies an os error so the client can reconstruct the sentinel a

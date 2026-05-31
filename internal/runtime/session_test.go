@@ -111,7 +111,7 @@ func TestRuntimeSessionAppendTraceDeduplicatesIdenticalEntries(t *testing.T) {
 		Status:                "completed",
 		Goal:                  "fetch docs",
 		Output:                "done",
-		ToolName:              "agentic_fetch",
+		ToolName:              "websearch-agent",
 		ToolCallID:            "call-1",
 		ConversationSessionID: "conversation-1",
 	}
@@ -126,7 +126,7 @@ func TestRuntimeSessionAppendTraceDeduplicatesIdenticalEntries(t *testing.T) {
 		Status:                "completed",
 		Goal:                  "fetch docs",
 		Output:                "done",
-		ToolName:              "agentic_fetch",
+		ToolName:              "websearch-agent",
 		ToolCallID:            "call-1",
 		ConversationSessionID: "conversation-1",
 	})
@@ -150,7 +150,7 @@ func TestRuntimeSessionAppendTraceKeepsSimilarEntries(t *testing.T) {
 		Status:                "completed",
 		Goal:                  "fetch docs",
 		Output:                "first output",
-		ToolName:              "agentic_fetch",
+		ToolName:              "websearch-agent",
 		ToolCallID:            "call-1",
 		ConversationSessionID: "conversation-1",
 	}

@@ -28,6 +28,9 @@ const (
 	methodRename    rpcMethod = "rename"
 	methodReadDir   rpcMethod = "read_dir"
 	methodExec      rpcMethod = "exec"
+	methodJobStart  rpcMethod = "job_start"
+	methodJobOutput rpcMethod = "job_output"
+	methodJobKill   rpcMethod = "job_kill"
 )
 
 // errKind lets the client reconstruct the sentinel a caller checks for, since
@@ -58,6 +61,10 @@ type rpcRequest struct {
 	Argv    []string `json:"argv,omitempty"`
 	Cwd     string   `json:"cwd,omitempty"`
 	Env     []string `json:"env,omitempty"`
+	// JobID identifies a remote background command.
+	JobID       string `json:"job_id,omitempty"`
+	Description string `json:"description,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
 }
 
 type rpcResponse struct {
@@ -71,6 +78,12 @@ type rpcResponse struct {
 	Stdout   []byte `json:"stdout,omitempty"`
 	Stderr   []byte `json:"stderr,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
+	// remote job results
+	JobID       string `json:"job_id,omitempty"`
+	Command     string `json:"command,omitempty"`
+	Description string `json:"description,omitempty"`
+	Cwd         string `json:"cwd,omitempty"`
+	Done        bool   `json:"done,omitempty"`
 }
 
 // wireInfo is the serializable projection of fs.FileInfo.

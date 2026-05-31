@@ -6,6 +6,8 @@
 - `worker`：执行编辑、重构、修复、验证（可修改文件）
 - `auditor`：安全/数学/逻辑对抗审查（只读）
 
+如果用户明确要求某个 agent（例如“让审计 agent 看看”、“调用规划 agent”、“派 worker 修”），该显式要求优先：必须调用本工具并设置对应 `role`，不要由 Brain 自己直接完成来替代委托。
+
 ## run_in_background 参数
 
 **默认 false（同步）**：brain 等待子 agent 完成后才继续，适合短任务或需要立即使用结果的情况。
@@ -14,14 +16,14 @@
 
 ```
 # 启动后台 worker 不阻塞 brain
-agent(role=worker, prompt="实现 X 功能", run_in_background=true)
+Agent(role=worker, prompt="实现 X 功能", run_in_background=true)
 → 返回: agent_job_id: 00A
 
-# 然后 brain 可以做其他事，再用 monitor 等待
-monitor(shell_id=00A, regex="agent_job_id: 00A|error:")
+# 然后 brain 可以做其他事，再用 Monitor 等待
+Monitor(shell_id=00A, regex="agent_job_id: 00A|error:")
 
-# 完成后用 job_output 取结果
-job_output(shell_id=00A)
+# 完成后用 JobOutput 取结果
+JobOutput(shell_id=00A)
 ```
 
 **何时用 run_in_background=true**：
@@ -38,4 +40,4 @@ job_output(shell_id=00A)
 
 当任务是自包含且角色与工作匹配时委托。对于 1-3 次直接查找、已知文件读取或已知文件内的代码搜索，跳过子 agent。好的 prompt 应说明目标、列出已排除的路径/符号、要求具体输出格式。模糊 prompt 产生模糊报告。
 
-**成本**：`explore` 并行化广泛搜索——父级链式调用 `rg` + 4-6 个 `view` 消耗 8-15 轮并膨胀上下文；一次 `explore` 调用 1 轮内返回相同证据。范围不明确或可并行化时分发；搜索已有界时保持内联。
+**成本**：`explore` 并行化广泛搜索——父级链式调用 `Grep` + 4-6 个 `Read` 消耗 8-15 轮并膨胀上下文；一次 `explore` 调用 1 轮内返回相同证据。范围不明确或可并行化时分发；搜索已有界时保持内联。

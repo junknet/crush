@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	ScheduleWakeupToolName = "schedule_wakeup"
+	ScheduleWakeupToolName = "ScheduleWakeup"
 	// MinWakeupSeconds / MaxWakeupSeconds clamp the delay so a wakeup is neither
 	// a tight busy-loop nor effectively never.
 	MinWakeupSeconds = 5

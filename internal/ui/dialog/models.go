@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strings"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -22,9 +23,15 @@ type ModelType int
 const (
 	ModelTypeBrain ModelType = iota
 	ModelTypeWorker
+	ModelTypePlan
 	ModelTypeAuditor
 	ModelTypeExplore
 )
+
+// switchableModelTypeCount is how many role tabs the Switch Model dialog cycles
+// through with tab/shift+tab: Brain, Worker, Plan, Auditor. Explore is derived
+// from a tested default and stays off the tab strip.
+const switchableModelTypeCount = 4
 
 // String returns the string representation of the [ModelType].
 func (mt ModelType) String() string {
@@ -33,6 +40,8 @@ func (mt ModelType) String() string {
 		return "Brain"
 	case ModelTypeWorker:
 		return "Worker"
+	case ModelTypePlan:
+		return "Plan"
 	case ModelTypeAuditor:
 		return "Auditor"
 	case ModelTypeExplore:
@@ -51,6 +60,8 @@ func (mt ModelType) Config() config.SelectedModelType {
 		return config.SelectedModelTypeBrain
 	case ModelTypeWorker:
 		return config.SelectedModelTypeWorker
+	case ModelTypePlan:
+		return config.SelectedModelTypePlan
 	case ModelTypeAuditor:
 		return config.SelectedModelTypeAuditor
 	case ModelTypeExplore:
@@ -67,6 +78,8 @@ func (mt ModelType) Placeholder() string {
 		return brainModelInputPlaceholder
 	case ModelTypeWorker:
 		return workerModelInputPlaceholder
+	case ModelTypePlan:
+		return planModelInputPlaceholder
 	case ModelTypeAuditor:
 		return auditorModelInputPlaceholder
 	case ModelTypeExplore:
@@ -80,7 +93,8 @@ const (
 	onboardingModelInputPlaceholder = "Find your fave"
 	brainModelInputPlaceholder      = "Choose a model for the brain role"
 	workerModelInputPlaceholder     = "Choose a model for the worker role"
-	auditorModelInputPlaceholder    = "Choose a model for the auditor role"
+	planModelInputPlaceholder       = "Choose a reasoning model for the plan role"
+	auditorModelInputPlaceholder    = "Choose a reasoning model for the auditor role"
 	exploreModelInputPlaceholder    = "Choose a model for the explore role"
 )
 
@@ -231,15 +245,13 @@ func (m *Models) HandleMsg(msg tea.Msg) Action {
 			if m.isOnboarding {
 				break
 			}
-			// Cycle Brain → Worker → Auditor → Explore → Brain. Shift+Tab reverses
-			// the cycle so the same key chord moves both directions through the
-			// four role slots. Plan mode follows brain (no separate slot).
-
+			// Cycle Brain → Worker → Plan → Auditor. Explore uses its
+			// configured tested default, so it stays off the tab strip.
 			dir := 1
 			if msg.String() == "shift+tab" {
 				dir = -1
 			}
-			m.modelType = ModelType((int(m.modelType) + dir + 4) % 4)
+			m.modelType = ModelType((int(m.modelType) + dir + switchableModelTypeCount) % switchableModelTypeCount)
 			if err := m.setProviderItems(); err != nil {
 				return util.ReportError(err)
 			}
@@ -262,8 +274,10 @@ func (m *Models) Cursor() *tea.Cursor {
 	return InputCursor(m.com.Styles, m.input.Cursor())
 }
 
-// modelTypeRadioView renders the Brain / Worker / Auditor / Explore radio strip.
-// The currently-active tab gets the `On` style; tab cycles through them.
+// modelTypeRadioView renders the Brain / Worker / Plan / Auditor radio strip.
+// Explore is not user-selectable (it derives from a tested default), so it does
+// not appear. The currently-active tab gets the `On` style; tab cycles through
+// them.
 func (m *Models) modelTypeRadioView() string {
 	t := m.com.Styles
 	textStyle := t.Radio.Label
@@ -273,11 +287,12 @@ func (m *Models) modelTypeRadioView() string {
 		}
 		return t.Radio.Off.Padding(0, 1).Render()
 	}
-	return fmt.Sprintf("%s%s  %s%s  %s%s  %s%s",
-		radioFor(m.modelType == ModelTypeBrain), textStyle.Render(ModelTypeBrain.String()),
-		radioFor(m.modelType == ModelTypeWorker), textStyle.Render(ModelTypeWorker.String()),
-		radioFor(m.modelType == ModelTypeAuditor), textStyle.Render(ModelTypeAuditor.String()),
-		radioFor(m.modelType == ModelTypeExplore), textStyle.Render(ModelTypeExplore.String()))
+	tabs := []ModelType{ModelTypeBrain, ModelTypeWorker, ModelTypePlan, ModelTypeAuditor}
+	parts := make([]string, 0, len(tabs))
+	for _, mt := range tabs {
+		parts = append(parts, radioFor(m.modelType == mt)+textStyle.Render(mt.String()))
+	}
+	return strings.Join(parts, "  ")
 }
 
 // Draw implements [Dialog].
@@ -368,6 +383,16 @@ func (m *Models) isSelectedConfigured() bool {
 }
 
 // setProviderItems sets the provider items in the list.
+// includeModel reports whether a model should appear under the current tab.
+// Plan and Auditor are reasoning-heavy roles confined to reasoning-capable
+// models, so non-reasoning models (e.g. the flash tiers) are hidden there.
+func (m *Models) includeModel(model catwalk.Model) bool {
+	if m.modelType == ModelTypePlan || m.modelType == ModelTypeAuditor {
+		return model.CanReason
+	}
+	return true
+}
+
 func (m *Models) setProviderItems() error {
 	t := m.com.Styles
 	cfg := m.com.Config()
@@ -412,6 +437,9 @@ func (m *Models) setProviderItems() error {
 
 			group := NewModelGroup(t, name, true)
 			for _, model := range p.Models {
+				if !m.includeModel(model) {
+					continue
+				}
 				item := NewModelItem(t, provider, model, m.modelType)
 				group.AppendItems(item)
 				itemsMap[item.ID()] = item
@@ -478,6 +506,9 @@ func (m *Models) setProviderItems() error {
 
 		group := NewModelGroup(t, name, providerConfigured)
 		for _, model := range displayProvider.Models {
+			if !m.includeModel(model) {
+				continue
+			}
 			item := NewModelItem(t, provider, model, m.modelType)
 			group.AppendItems(item)
 			itemsMap[item.ID()] = item
@@ -498,6 +529,9 @@ func (m *Models) setProviderItems() error {
 			key := modelKey(recent.Provider, recent.Model)
 			item, ok := itemsMap[key]
 			if !ok {
+				continue
+			}
+			if !m.includeModel(item.model) {
 				continue
 			}
 

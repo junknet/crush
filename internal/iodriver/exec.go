@@ -26,6 +26,26 @@ type ExecResult struct {
 	ExitCode int
 }
 
+// JobRequest starts a long-running command on a backend and returns a stable
+// job id so callers can detach foreground tool execution without losing output.
+type JobRequest struct {
+	ExecRequest
+	Description string
+	SessionID   string
+}
+
+// JobSnapshot is a point-in-time view of a background command.
+type JobSnapshot struct {
+	ID          string
+	Command     string
+	Description string
+	Cwd         string
+	Stdout      []byte
+	Stderr      []byte
+	Done        bool
+	ExitCode    int
+}
+
 // Execer is the exec face of a backend, kept as a SEPARATE interface (not part
 // of Backend) so the LocalBackend need not reimplement the rich local shell
 // (BackgroundShellManager) it already has: the bash/rg tools type-assert the
@@ -37,4 +57,11 @@ type ExecResult struct {
 // stage.
 type Execer interface {
 	Exec(ctx context.Context, req ExecRequest) (ExecResult, error)
+}
+
+// Jobber is the detached-command face of a backend.
+type Jobber interface {
+	StartJob(ctx context.Context, req JobRequest) (JobSnapshot, error)
+	JobOutput(ctx context.Context, id string) (JobSnapshot, error)
+	KillJob(ctx context.Context, id string) error
 }

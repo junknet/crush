@@ -289,7 +289,9 @@ func TestRunSubAgent(t *testing.T) {
 		// runSubAgent returns (errorResponse, nil) when agent.Run fails — not a Go error.
 		require.NoError(t, err)
 		assert.True(t, resp.IsError)
-		assert.Equal(t, "Failed to generate response: provider request failed", resp.Content)
+		assert.True(t, resp.StopTurn)
+		assert.Contains(t, resp.Content, "Agent failed after its internal provider retry budget was exhausted: provider request failed")
+		assert.Contains(t, resp.Content, "run_in_background=true")
 	})
 
 	t.Run("session setup callback is invoked", func(t *testing.T) {
@@ -625,7 +627,7 @@ func TestCoordinatorPropagateSubAgentTracesDeduplicatesParentTrace(t *testing.T)
 		Status:                "completed",
 		Goal:                  "fetch docs",
 		Output:                "done",
-		ToolName:              "agentic_fetch",
+		ToolName:              "websearch-agent",
 		ToolCallID:            "call-1",
 	}
 	parentRuntime.AppendTrace(entry)

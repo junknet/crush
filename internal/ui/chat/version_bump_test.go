@@ -312,7 +312,7 @@ func TestAgenticFetchToolMessageItem_NestedToolMutatorsBumpVersion(t *testing.T)
 	t.Parallel()
 
 	sty := styles.CharmtonePantera()
-	parent := message.ToolCall{ID: "fetch-parent", Name: "agentic_fetch", Input: `{}`, Finished: false}
+	parent := message.ToolCall{ID: "fetch-parent", Name: "websearch-agent", Input: `{}`, Finished: false}
 	item := NewAgenticFetchToolMessageItem(&sty, parent, nil, false)
 
 	mkChild := func(id string) ToolMessageItem {
@@ -379,7 +379,7 @@ func TestAgenticFetchToolMessageItem_NestedChildInPlaceMutationBumpsParent(t *te
 	t.Parallel()
 
 	sty := styles.CharmtonePantera()
-	parent := message.ToolCall{ID: "fetch-parent", Name: "agentic_fetch", Input: `{}`, Finished: false}
+	parent := message.ToolCall{ID: "fetch-parent", Name: "websearch-agent", Input: `{}`, Finished: false}
 	item := NewAgenticFetchToolMessageItem(&sty, parent, nil, false)
 
 	childTC := message.ToolCall{ID: "c1", Name: "fetch", Input: `{}`, Finished: false}
@@ -513,7 +513,7 @@ func TestAgenticFetchToolMessageItem_AnimateBumpsVersion(t *testing.T) {
 	t.Parallel()
 
 	sty := styles.CharmtonePantera()
-	parentTC := message.ToolCall{ID: "fetch-parent", Name: "agentic_fetch", Input: `{}`, Finished: false}
+	parentTC := message.ToolCall{ID: "fetch-parent", Name: "websearch-agent", Input: `{}`, Finished: false}
 	parent := NewAgenticFetchToolMessageItem(&sty, parentTC, nil, false)
 
 	childTC := message.ToolCall{ID: "fetch-child", Name: "fetch", Input: `{}`, Finished: false}

@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	FetchToolName = "fetch"
+	FetchToolName = "Fetch"
 	MaxFetchSize  = 100 * 1024 // 100KB
 )
 

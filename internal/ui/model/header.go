@@ -171,7 +171,7 @@ func renderHeaderDetails(
 	session *session.Session,
 	mode session.Mode,
 	lspErrorCount int,
-	detailsOpen bool,
+	showingActivity bool,
 	availWidth int,
 	hyperCredits *int,
 	elapsedSec int64,
@@ -230,7 +230,7 @@ func renderHeaderDetails(
 	}
 
 	if contextWindow := contextWindowForBrain(com); contextWindow > 0 {
-		percentage := (float64(session.CompletionTokens+session.PromptTokens) / float64(contextWindow)) * 100
+		percentage := (float64(sessionContextPressureTokens(session)) / float64(contextWindow)) * 100
 		formattedPercentage := t.Header.Percentage.Render(fmt.Sprintf("%d%%", int(percentage)))
 		parts = append(parts, formattedPercentage)
 	}
@@ -244,9 +244,11 @@ func renderHeaderDetails(
 		parts = append(parts, t.Header.Keystroke.Render("plan mode"))
 	}
 
+	// showingActivity is true when the activity panel is visible; ctrl+d then
+	// hides it. Otherwise ctrl+d opens activity.
 	const keystroke = "ctrl+d"
-	if detailsOpen {
-		parts = append(parts, t.Header.Keystroke.Render(keystroke)+t.Header.KeystrokeTip.Render(" activity close"))
+	if showingActivity {
+		parts = append(parts, t.Header.Keystroke.Render(keystroke)+t.Header.KeystrokeTip.Render(" hide"))
 	} else {
 		parts = append(parts, t.Header.Keystroke.Render(keystroke)+t.Header.KeystrokeTip.Render(" activity"))
 	}

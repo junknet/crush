@@ -12,9 +12,9 @@ import (
 const (
 	// RemoteAttachToolName attaches the session to a remote host so all
 	// file/exec tools transparently operate there.
-	RemoteAttachToolName = "remote_attach"
+	RemoteAttachToolName = "RemoteAttach"
 	// RemoteDetachToolName reverts the session to local operation.
-	RemoteDetachToolName = "remote_detach"
+	RemoteDetachToolName = "RemoteDetach"
 )
 
 // RemoteAttachParams selects the host (and optional remote working dir) to make
@@ -24,8 +24,8 @@ type RemoteAttachParams struct {
 	Path string `json:"path,omitempty" description:"Optional remote working directory to use as the default root. Defaults to the remote home directory."`
 }
 
-// NewRemoteAttachTool wires remote_attach against the shared per-session backend
-// registry. After a successful attach, bash/edit/view/write/rg in this session
+// NewRemoteAttachTool wires RemoteAttach against the shared per-session backend
+// registry. After a successful attach, bash/Edit/Read/Write/Grep in this session
 // run on the remote host as if local, over a persistent daemon channel.
 func NewRemoteAttachTool(backends *csync.Map[string, iodriver.Backend], dataDir string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
@@ -53,14 +53,14 @@ func NewRemoteAttachTool(backends *csync.Map[string, iodriver.Backend], dataDir 
 			backends.Set(sessionID, backend)
 
 			return fantasy.NewTextResponse(fmt.Sprintf(
-				"Attached to %s. File and shell tools now operate on the remote host (root: %s). Use remote_detach to return to local.",
+				"Attached to %s. File and shell tools now operate on the remote host (root: %s). Use RemoteDetach to return to local.",
 				backend.Kind(), backend.Root(),
 			)), nil
 		},
 	)
 }
 
-// NewRemoteDetachTool wires remote_detach against the same registry.
+// NewRemoteDetachTool wires RemoteDetach against the same registry.
 func NewRemoteDetachTool(backends *csync.Map[string, iodriver.Backend]) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		RemoteDetachToolName,
@@ -82,8 +82,8 @@ func NewRemoteDetachTool(backends *csync.Map[string, iodriver.Backend]) fantasy.
 	)
 }
 
-const remoteAttachDescription = `Attach this session to a remote host over SSH so that every subsequent file and shell tool — bash, edit, view, write, rg — operates on the remote machine transparently, as if it were local.
+const remoteAttachDescription = `Attach this session to a remote host over SSH so that every subsequent file and shell tool — bash, Edit, Read, Write, Grep — operates on the remote machine transparently, as if it were local.
 
-This deploys a small daemon (the crush binary itself) to the host on first use and connects to it over a persistent, connection-multiplexed SSH channel. Prefer this over the one-shot ssh_* tools for any remote work spanning more than a single command: it keeps one channel, preserves the working directory across commands, and routes file edits to the remote filesystem with exact-byte fidelity.
+This deploys a small daemon (the crush binary itself) to the host on first use and connects to it over a persistent, connection-multiplexed SSH channel. Prefer this over one-shot SSH tools for any remote work spanning more than a single command: it keeps one channel, preserves the working directory across commands, and routes file edits to the remote filesystem with exact-byte fidelity.
 
-Requires key-based SSH access to the host (no password prompt) and a matching architecture/OS between local and remote. Call remote_detach to return to local operation.`
+Requires key-based SSH access to the host (no password prompt) and a matching architecture/OS between local and remote. Call RemoteDetach to return to local operation.`

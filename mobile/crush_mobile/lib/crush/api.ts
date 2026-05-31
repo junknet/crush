@@ -1,6 +1,8 @@
 import 'react-native-get-random-values'
 import { connect, consumerOpts, JSONCodec, NatsConnection } from 'nats.ws'
 
+import { dlog } from './dlog'
+
 export type Session = {
     id: string
     title: string
@@ -121,7 +123,8 @@ export class CrushApi {
 
     async connect(): Promise<NatsConnection> {
         if (this.nc) return this.nc
-        console.log('[CrushApi] connecting to', this.url)
+        dlog('[CrushApi] connecting to', this.url)
+        const t0 = Date.now()
         this.nc = await connect({
             servers: this.url,
             token: this.token,
@@ -129,7 +132,7 @@ export class CrushApi {
             waitOnFirstConnect: true,
             reconnect: true,
         })
-        console.log('[CrushApi] connected')
+        dlog(`[TRACE] nats_connect +${Date.now() - t0}ms url=${this.url}`)
         return this.nc
     }
 
@@ -239,6 +242,30 @@ export class CrushApi {
         const js = nc.jetstream()
 
         const subject = `crush.sess.${sessionID}.events`
+        // Live streaming deltas arrive over an ephemeral core-NATS subject the
+        // relay publishes to per token-debounce tick. JetStream (.events) now
+        // stores ONLY terminal message snapshots (finished assistant /
+        // complete user|tool / deletions), so a cold-open replay no longer
+        // carries every intermediate frame. We must subscribe to .live too or
+        // an attached session would only refresh on each finished message.
+        const liveSubject = `crush.sess.${sessionID}.live`
+        const liveSub = nc.subscribe(liveSubject)
+        ;(async () => {
+            try {
+                for await (const m of liveSub) {
+                    try {
+                        onEvent(jc.decode(m.data))
+                    } catch (err) {
+                        console.error('Failed to decode live event', err)
+                    }
+                }
+            } catch (err) {
+                // A live-subject error is non-fatal: durable .events still
+                // delivers terminal snapshots. Log and let the JetStream sub
+                // drive onError for connection-level failures.
+                dlog('Live subject subscription ended', err)
+            }
+        })()
         try {
             const opts = consumerOpts()
             opts.orderedConsumer().filterSubject(subject)
@@ -246,10 +273,10 @@ export class CrushApi {
             // looks attractive ("cap to last N min") but breaks the common
             // case where the user opens a paused session whose last event
             // is older than the window — the ordered consumer then sits
-            // empty forever and the UI stays blank. Map dedupe + 100ms
-            // batch + FlatList virtualization already handle the volume
-            // (tested up to 11k events / 78MB). Pass historyMs explicitly
-            // only if the caller really wants to cap.
+            // empty forever and the UI stays blank. JetStream now holds only
+            // terminal snapshots so cold-open replay is bounded by message
+            // count, not per-token frames. Pass historyMs explicitly only if
+            // the caller really wants to cap.
             if (opts2?.sinceTs && opts2.sinceTs > 0) {
                 // Reopening a locally cached session only needs events after
                 // the cached tail. Include a small overlap for streaming
@@ -286,11 +313,28 @@ export class CrushApi {
                 }
             })()
 
-            return () => sub.unsubscribe()
+            return () => {
+                try {
+                    sub.unsubscribe()
+                } catch {
+                    // ignore
+                }
+                try {
+                    liveSub.unsubscribe()
+                } catch {
+                    // ignore
+                }
+            }
         } catch (err) {
             console.error('Failed to create JetStream consumer', err)
             onError?.(err as Error)
-            return () => {}
+            return () => {
+                try {
+                    liveSub.unsubscribe()
+                } catch {
+                    // ignore
+                }
+            }
         }
     }
 

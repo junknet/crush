@@ -23,7 +23,7 @@ type ToolResponse struct {
 	IsError  bool             `json:"is_error"`
 }
 
-const BashToolName = "bash"
+const BashToolName = "Bash"
 
 // BashParams represents the parameters for the bash tool.
 type BashParams struct {
@@ -47,7 +47,7 @@ type DiagnosticsParams struct {
 	FilePath string `json:"file_path"`
 }
 
-const DownloadToolName = "download"
+const DownloadToolName = "Download"
 
 // DownloadParams represents the parameters for the download tool.
 type DownloadParams struct {
@@ -59,7 +59,7 @@ type DownloadParams struct {
 // DownloadPermissionsParams represents the permission parameters for the download tool.
 type DownloadPermissionsParams = tools.DownloadPermissionsParams
 
-const EditToolName = "edit"
+const EditToolName = "Edit"
 
 // EditParams represents the parameters for the edit tool.
 type EditParams struct {
@@ -80,7 +80,7 @@ type EditResponseMetadata struct {
 	NewContent string `json:"new_content,omitempty"`
 }
 
-const FetchToolName = "fetch"
+const FetchToolName = "Fetch"
 
 // FetchParams represents the parameters for the fetch tool.
 type FetchParams struct {
@@ -99,24 +99,15 @@ const AgenticFetchToolName = tools.AgenticFetchToolName
 // agentic_fetch tool.
 type AgenticFetchPermissionsParams = tools.AgenticFetchPermissionsParams
 
-const RgToolName = "rg"
+const SearchToolName = "Search"
 
-// RgParams represents the parameters for the rg tool.
-type RgParams struct {
-	Pattern     string `json:"pattern"`
-	Path        string `json:"path"`
-	Include     string `json:"include"`
-	LiteralText bool   `json:"literal_text"`
-	FilesOnly   bool   `json:"files_only"`
-}
+// SearchParams represents the parameters for the search tool.
+type SearchParams = tools.SearchParams
 
-// RgResponseMetadata represents the metadata for an rg tool response.
-type RgResponseMetadata struct {
-	NumberOfMatches int  `json:"number_of_matches"`
-	Truncated       bool `json:"truncated"`
-}
+// SearchResponseMetadata represents the metadata for a search tool response.
+type SearchResponseMetadata = tools.SearchResponseMetadata
 
-const LSToolName = "ls"
+const LSToolName = "ReadDir"
 
 // LSParams represents the parameters for the ls tool.
 type LSParams struct {
@@ -141,7 +132,7 @@ type LSResponseMetadata struct {
 	Truncated     bool `json:"truncated"`
 }
 
-const MultiEditToolName = "multiedit"
+const MultiEditToolName = "MultiEdit"
 
 // MultiEditOperation represents a single edit operation in a multi-edit.
 type MultiEditOperation struct {
@@ -184,7 +175,7 @@ type SourcegraphResponseMetadata struct {
 	Truncated       bool `json:"truncated"`
 }
 
-const ViewToolName = "view"
+const ViewToolName = "Read"
 
 // ViewParams represents the parameters for the view tool.
 type ViewParams struct {
@@ -202,7 +193,7 @@ type ViewResponseMetadata struct {
 	Content  string `json:"content"`
 }
 
-const WriteToolName = "write"
+const WriteToolName = "Write"
 
 // WriteParams represents the parameters for the write tool.
 type WriteParams struct {

@@ -1,82 +1,70 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
+	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/iodriver"
 )
 
-// This file implements the grep and find tools.
-//
-// Naming is deliberate: `grep` and `find` are the highest-frequency search
-// verbs in LLM training data ("命名即 prompt"), so the model reaches for them
-// correctly by reflex — unlike `rg`/`fd`, which are sparse in the corpus and
-// invite mis-applied flags. The tools expose grep/find-shaped STRUCTURED
-// params (no raw CLI), then transparently transpile to ripgrep / fd when those
-// faster, .gitignore-aware tools exist on the target, falling back to real
-// grep/find otherwise. The model gets familiar semantics; we get rg/fd speed.
-//
-// Everything runs through the active IO backend (iodriver.Execer) when a remote
-// host is attached, so grep/find operate on the remote exactly as locally — and
-// capability detection (does the remote have rg/fd?) is per-target.
-
 const (
-	// GrepToolName searches file CONTENTS.
-	GrepToolName = "grep"
-	// FindToolName searches for FILES by name.
-	FindToolName = "find"
-
-	searchMatchLimit = 100
+	SearchToolName    = "Search"
+	searchMatchLimit  = 100
+	searchToolTimeout = 10 * time.Second
 )
 
-// GrepParams is the grep-shaped content-search request.
-type GrepParams struct {
-	Pattern    string `json:"pattern" description:"Regex (or literal, with literal=true) to search for in file contents."`
-	Path       string `json:"path,omitempty" description:"Directory to search. Defaults to the working directory."`
-	Glob       string `json:"glob,omitempty" description:"Only search files matching this glob, e.g. \"*.go\" or \"*.{ts,tsx}\"."`
-	IgnoreCase bool   `json:"ignore_case,omitempty" description:"Case-insensitive match (grep -i)."`
-	Literal    bool   `json:"literal,omitempty" description:"Treat pattern as a fixed string, not regex (grep -F)."`
-	FilesOnly  bool   `json:"files_only,omitempty" description:"List only the names of files that contain a match (grep -l)."`
-	NoIgnore   bool   `json:"no_ignore,omitempty" description:"Also search files normally excluded by .gitignore and hidden files. Off by default to skip build/vendor noise."`
+var defaultSearchExcludes = []string{
+	"!**/.git/**",
+	"!**/.repo/**",
+	"!**/node_modules/**",
+	"!**/vendor/**",
+	"!**/dist/**",
+	"!**/build/**",
+	"!**/out/**",
+	"!**/target/**",
+	"!**/prebuilts/**",
 }
 
-// FindParams is the find-shaped file-search request.
-type FindParams struct {
-	Name     string `json:"name,omitempty" description:"Glob to match file/dir names, e.g. \"*.go\" or \"Dockerfile\". Empty lists everything."`
-	Path     string `json:"path,omitempty" description:"Directory to search. Defaults to the working directory."`
-	Type     string `json:"type,omitempty" description:"Restrict to \"f\" (files) or \"d\" (directories). Empty matches both."`
-	MaxDepth int    `json:"max_depth,omitempty" description:"Maximum directory depth to descend. 0 means unlimited."`
-	NoIgnore bool   `json:"no_ignore,omitempty" description:"Also include files excluded by .gitignore and hidden files."`
+type SearchParams struct {
+	Mode       string `json:"mode" description:"Search mode: 'content' to search file contents, or 'files' to search for filenames."`
+	Pattern    string `json:"pattern,omitempty" description:"The regex/literal pattern (for content search) or filename glob pattern (for files search)."`
+	Path       string `json:"path,omitempty" description:"The directory to search in. Defaults to the current working directory."`
+	Include    string `json:"include,omitempty" description:"Only search files matching this glob, e.g. \"*.go\" or \"*.{ts,tsx}\" (useful in content mode)."`
+	IgnoreCase bool   `json:"ignore_case,omitempty" description:"Case-insensitive match (for content mode)."`
+	Literal    bool   `json:"literal,omitempty" description:"Treat pattern as a fixed string, not regex (for content mode)."`
+	FilesOnly  bool   `json:"files_only,omitempty" description:"List only the names of files that contain a match (for content mode)."`
+	NoIgnore   bool   `json:"no_ignore,omitempty" description:"Include files excluded by .gitignore and hidden files."`
 }
 
-// searchCaps records, per target, whether the fast tools are present.
-type searchCaps struct {
-	hasRg bool
-	hasFd bool
-	fdBin string // "fd" or "fdfind"
+type SearchResponseMetadata struct {
+	NumberOfMatches int  `json:"number_of_matches"`
+	Truncated       bool `json:"truncated"`
 }
 
-var (
-	capsMu    sync.Mutex
-	capsCache = map[string]searchCaps{} // keyed by backend kind ("local"/"remote:host")
-)
+func getRg() string {
+	if path, err := exec.LookPath("rg"); err == nil {
+		return path
+	}
+	EnsureEmbeddedToolsExist()
+	if path, err := exec.LookPath("rg"); err == nil {
+		return path
+	}
+	return ""
+}
 
-// runner abstracts running a program argv against the active target (local
-// process or the attached remote daemon) and returns stdout, exit code, err.
 type runner func(ctx context.Context, argv []string, cwd string) ([]byte, int, error)
 
-// resolveRunner returns the target's runner, working dir, and fast-tool caps.
-// Local uses the bundled rg (getRg) and the local PATH; remote probes the
-// daemon once and caches.
-func resolveRunner(ctx context.Context) (run runner, cwd string, caps searchCaps, localRg string) {
+func resolveRunner(ctx context.Context) (run runner, cwd string, localRg string) {
 	backend := GetBackendFromContext(ctx)
 	if ex, ok := backend.(iodriver.Execer); ok {
 		cwd = backend.Root()
@@ -87,10 +75,8 @@ func resolveRunner(ctx context.Context) (run runner, cwd string, caps searchCaps
 			}
 			return res.Stdout, res.ExitCode, nil
 		}
-		caps = detectCaps(ctx, backend.Kind(), run)
-		return run, cwd, caps, ""
+		return run, cwd, ""
 	}
-	// Local: bundled rg is always available; detect fd on PATH.
 	run = func(ctx context.Context, argv []string, cwd string) ([]byte, int, error) {
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		if cwd != "" {
@@ -100,9 +86,7 @@ func resolveRunner(ctx context.Context) (run runner, cwd string, caps searchCaps
 		return out, commandExit(err), localExecErr(err)
 	}
 	localRg = getRg()
-	caps = detectCaps(ctx, "local", run)
-	caps.hasRg = localRg != "" // bundled rg
-	return run, "", caps, localRg
+	return run, "", localRg
 }
 
 func commandExit(err error) int {
@@ -115,8 +99,6 @@ func commandExit(err error) int {
 	return -1
 }
 
-// localExecErr discards non-zero-exit errors (handled via the exit code) but
-// surfaces real failures (binary missing, etc.).
 func localExecErr(err error) error {
 	if err == nil {
 		return nil
@@ -127,190 +109,255 @@ func localExecErr(err error) error {
 	return err
 }
 
-// detectCaps probes rg/fd availability on the target once, then caches.
-func detectCaps(ctx context.Context, key string, run runner) searchCaps {
-	capsMu.Lock()
-	defer capsMu.Unlock()
-	if c, ok := capsCache[key]; ok {
-		return c
-	}
-	c := searchCaps{}
-	if _, code, err := run(ctx, []string{"rg", "--version"}, ""); err == nil && code == 0 {
-		c.hasRg = true
-	}
-	for _, name := range []string{"fd", "fdfind"} {
-		if _, code, err := run(ctx, []string{name, "--version"}, ""); err == nil && code == 0 {
-			c.hasFd = true
-			c.fdBin = name
-			break
-		}
-	}
-	capsCache[key] = c
-	return c
-}
-
-// NewGrepTool returns the content-search tool, backed by rg when available.
-func NewGrepTool(workingDir string) fantasy.AgentTool {
+func NewSearchTool(workingDir string) fantasy.AgentTool {
 	return fantasy.NewParallelAgentTool(
-		GrepToolName,
-		grepDescription,
-		func(ctx context.Context, params GrepParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			if params.Pattern == "" {
-				return fantasy.NewTextErrorResponse("grep: missing pattern"), nil
-			}
-			run, root, caps, localRg := resolveRunner(ctx)
-			searchPath := firstNonEmpty(params.Path, root, workingDir, ".")
-
-			argv, parseRg := grepArgv(params, caps.hasRg, localRg, searchPath)
-			stdout, code, err := run(ctx, argv, "")
-			if err != nil {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("grep: %v", err)), nil
-			}
-			// rg/grep exit 1 == no matches (not an error).
-			if code > 1 {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("grep: search exited %d", code)), nil
+		SearchToolName,
+		searchDescription,
+		func(ctx context.Context, params SearchParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			mode := strings.ToLower(strings.TrimSpace(params.Mode))
+			if mode != "content" && mode != "files" {
+				return fantasy.NewTextErrorResponse("search: mode must be either 'content' or 'files'"), nil
 			}
 
-			var out string
-			var n int
-			if params.FilesOnly {
-				files := splitNonEmptyLines(stdout)
-				n = len(files)
-				out = renderList(files, "file")
-			} else if parseRg {
-				lines, total := parseRgJSON(stdout)
-				n = total
-				out = renderLines(lines)
-			} else {
-				lines := splitNonEmptyLines(stdout)
-				n = len(lines)
-				out = renderLines(truncate(lines))
+			run, root, localRg := resolveRunner(ctx)
+			searchPath := resolveSearchPath(root, workingDir, params.Path)
+			defaultPath := strings.TrimSpace(params.Path) == ""
+
+			bin := localRg
+			if bin == "" {
+				bin = "rg" // fallback for remote
 			}
-			meta := RgResponseMetadata{NumberOfMatches: n, Truncated: n > searchMatchLimit}
-			if n == 0 {
-				return fantasy.WithResponseMetadata(fantasy.NewTextResponse("No matches found."), meta), nil
+
+			searchCtx, cancel := context.WithTimeout(ctx, searchToolTimeout)
+			defer cancel()
+
+			if mode == "content" {
+				if params.Pattern == "" {
+					return fantasy.NewTextErrorResponse("search: pattern is required for content mode"), nil
+				}
+				argv := []string{bin}
+				if params.FilesOnly {
+					argv = append(argv, "-l")
+				} else {
+					argv = append(argv, "--json", "-H", "-n")
+				}
+				if params.IgnoreCase {
+					argv = append(argv, "-i")
+				}
+				if params.Literal {
+					argv = append(argv, "-F")
+				}
+				if params.Include != "" {
+					argv = append(argv, "--glob", sanitizeGlobInclude(params.Include))
+				}
+				if !params.NoIgnore {
+					argv = appendDefaultSearchExcludes(argv)
+				} else {
+					argv = append(argv, "--no-ignore", "--hidden")
+				}
+				argv = append(argv, "--", params.Pattern, searchPath)
+
+				stdout, code, err := run(searchCtx, argv, "")
+				timedOut := searchCtx.Err() == context.DeadlineExceeded
+				if err != nil && !timedOut {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("search content: %v", err)), nil
+				}
+				if code > 1 && !timedOut {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("search content: rg exited %d", code)), nil
+				}
+
+				var out string
+				var n int
+				if params.FilesOnly {
+					files := splitNonEmptyLines(stdout)
+					n = len(files)
+					out = renderList(files)
+				} else {
+					lines, total := parseRgJSON(stdout)
+					n = total
+					out = renderLines(lines)
+				}
+
+				if defaultPath {
+					out = strings.TrimSpace(out + "\n(searched the working directory because path was omitted; default excludes applied.)")
+				}
+				if timedOut {
+					out = strings.TrimSpace(out + "\n(search timed out; partial results may be shown.)")
+				}
+
+				meta := SearchResponseMetadata{NumberOfMatches: n, Truncated: n > searchMatchLimit}
+				if n == 0 {
+					return fantasy.WithResponseMetadata(fantasy.NewTextResponse("No matches found."), meta), nil
+				}
+				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(out), meta), nil
+
+			} else { // mode == "files"
+				argv := []string{bin, "--files", "--null"}
+				if params.Include != "" {
+					argv = append(argv, "--glob", sanitizeGlobInclude(params.Include))
+				}
+				if !params.NoIgnore {
+					argv = appendDefaultSearchExcludes(argv)
+				} else {
+					argv = append(argv, "--no-ignore", "--hidden")
+				}
+				argv = append(argv, searchPath)
+
+				stdout, code, err := run(searchCtx, argv, "")
+				timedOut := searchCtx.Err() == context.DeadlineExceeded
+				if err != nil && !timedOut {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("search files: %v", err)), nil
+				}
+				if code > 1 && !timedOut {
+					if code != 2 {
+						return fantasy.NewTextErrorResponse(fmt.Sprintf("search files: rg exited %d", code)), nil
+					}
+				}
+
+				var matcher *regexp.Regexp
+				var resolvedPattern string
+				if params.Pattern != "" {
+					var err error
+					resolvedPattern, err = resolveFilePattern(params.Pattern)
+					if err != nil {
+						return fantasy.NewTextErrorResponse(fmt.Sprintf("search files: %v", err)), nil
+					}
+					matcher, err = regexp.Compile(resolvedPattern)
+					if err != nil {
+						return fantasy.NewTextErrorResponse(fmt.Sprintf("search files: %v", err)), nil
+					}
+				}
+
+				var matchedFiles []string
+				for p := range bytes.SplitSeq(stdout, []byte{0}) {
+					if len(p) == 0 {
+						continue
+					}
+					filePath := string(p)
+					slashPath := filepath.ToSlash(filePath)
+
+					if matcher != nil {
+						var matchTarget string
+						if strings.Contains(resolvedPattern, "/") {
+							rel, err := filepath.Rel(searchPath, filePath)
+							if err != nil {
+								rel = slashPath
+							}
+							matchTarget = filepath.ToSlash(rel)
+						} else {
+							matchTarget = filepath.Base(slashPath)
+						}
+
+						if !matcher.MatchString(matchTarget) {
+							continue
+						}
+					}
+					matchedFiles = append(matchedFiles, slashPath)
+				}
+
+				sort.SliceStable(matchedFiles, func(i, j int) bool {
+					return len(matchedFiles[i]) < len(matchedFiles[j])
+				})
+
+				n := len(matchedFiles)
+				truncated := n > searchMatchLimit
+				if truncated {
+					matchedFiles = matchedFiles[:searchMatchLimit]
+				}
+
+				out := strings.Join(matchedFiles, "\n")
+				if defaultPath {
+					out = strings.TrimSpace(out + "\n(searched the working directory because path was omitted; default excludes applied.)")
+				}
+				if timedOut {
+					out = strings.TrimSpace(out + "\n(search timed out; partial results may be shown.)")
+				}
+
+				meta := SearchResponseMetadata{NumberOfMatches: n, Truncated: truncated}
+				if n == 0 {
+					return fantasy.WithResponseMetadata(fantasy.NewTextResponse("No files found."), meta), nil
+				}
+				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(out), meta), nil
 			}
-			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(out), meta), nil
 		},
 	)
 }
 
-// NewFindTool returns the file-search tool, backed by fd when available.
-func NewFindTool(workingDir string) fantasy.AgentTool {
-	return fantasy.NewParallelAgentTool(
-		FindToolName,
-		findDescription,
-		func(ctx context.Context, params FindParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			run, root, caps, _ := resolveRunner(ctx)
-			searchPath := firstNonEmpty(params.Path, root, workingDir, ".")
-
-			argv := findArgv(params, caps.hasFd, caps.fdBin, searchPath)
-			stdout, code, err := run(ctx, argv, "")
-			if err != nil {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("find: %v", err)), nil
-			}
-			if code > 1 {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("find: exited %d", code)), nil
-			}
-			files := truncate(splitNonEmptyLines(stdout))
-			meta := RgResponseMetadata{NumberOfMatches: len(files), Truncated: len(files) >= searchMatchLimit}
-			if len(files) == 0 {
-				return fantasy.WithResponseMetadata(fantasy.NewTextResponse("No files found."), meta), nil
-			}
-			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(renderList(files, "file")), meta), nil
-		},
-	)
+func sanitizeGlobInclude(include string) string {
+	include = strings.TrimPrefix(include, "./")
+	include = strings.TrimPrefix(include, "/")
+	return include
 }
 
-// grepArgv transpiles GrepParams to ripgrep argv (parseRg=true) or grep argv.
-func grepArgv(p GrepParams, hasRg bool, localRg, searchPath string) (argv []string, parseRg bool) {
-	if hasRg {
-		bin := localRg
-		if bin == "" {
-			bin = "rg"
-		}
-		argv = []string{bin}
-		if p.FilesOnly {
-			argv = append(argv, "-l")
-		} else {
-			argv = append(argv, "--json", "-H", "-n")
-		}
-		if p.IgnoreCase {
-			argv = append(argv, "-i")
-		}
-		if p.Literal {
-			argv = append(argv, "-F")
-		}
-		if p.Glob != "" {
-			argv = append(argv, "--glob", p.Glob)
-		}
-		if p.NoIgnore {
-			argv = append(argv, "--no-ignore", "--hidden")
-		}
-		argv = append(argv, "--", p.Pattern, searchPath)
-		return argv, !p.FilesOnly
+func escapeRegexPattern(pattern string) string {
+	specialChars := []string{"\\", ".", "+", "*", "?", "(", ")", "[", "]", "{", "}", "^", "$", "|"}
+	escaped := pattern
+	for _, char := range specialChars {
+		escaped = strings.ReplaceAll(escaped, char, "\\"+char)
 	}
-	// Fallback: real grep (recursive, line-numbered).
-	argv = []string{"grep", "-rn", "--color=never"}
-	if p.FilesOnly {
-		argv = []string{"grep", "-rl", "--color=never"}
-	}
-	if p.IgnoreCase {
-		argv = append(argv, "-i")
-	}
-	if p.Literal {
-		argv = append(argv, "-F")
-	}
-	if p.Glob != "" {
-		argv = append(argv, "--include="+p.Glob)
-	}
-	argv = append(argv, "-e", p.Pattern, searchPath)
-	return argv, false
+	return escaped
 }
 
-// findArgv transpiles FindParams to fd argv or find argv.
-func findArgv(p FindParams, hasFd bool, fdBin, searchPath string) []string {
-	if hasFd {
-		bin := fdBin
-		if bin == "" {
-			bin = "fd"
-		}
-		argv := []string{bin, "--color", "never"}
-		if p.Type == "f" {
-			argv = append(argv, "-t", "f")
-		} else if p.Type == "d" {
-			argv = append(argv, "-t", "d")
-		}
-		if p.MaxDepth > 0 {
-			argv = append(argv, "-d", strconv.Itoa(p.MaxDepth))
-		}
-		if p.NoIgnore {
-			argv = append(argv, "--no-ignore", "--hidden")
-		}
-		if p.Name != "" {
-			argv = append(argv, "-g", p.Name)
-		}
-		argv = append(argv, ".", searchPath)
-		return argv
+func isGlobPattern(s string) bool {
+	if !strings.ContainsAny(s, "*?") {
+		return false
 	}
-	// Fallback: real find.
-	argv := []string{"find", searchPath}
-	if p.MaxDepth > 0 {
-		argv = append(argv, "-maxdepth", strconv.Itoa(p.MaxDepth))
+	if strings.Contains(s, ".*") {
+		return false
 	}
-	if p.Type == "f" {
-		argv = append(argv, "-type", "f")
-	} else if p.Type == "d" {
-		argv = append(argv, "-type", "d")
+	if strings.Contains(s, "+(){}|^$") {
+		return false
 	}
-	if p.Name != "" {
-		argv = append(argv, "-name", p.Name)
+	if strings.Contains(s, `\`) {
+		return false
+	}
+	return true
+}
+
+func globToRegex(glob string) string {
+	var b strings.Builder
+	b.WriteByte('^')
+	i := 0
+	for i < len(glob) {
+		switch {
+		case glob[i] == '*' && i+1 < len(glob) && glob[i+1] == '*':
+			b.WriteString(".*")
+			i += 2
+			if i < len(glob) && glob[i] == '/' {
+				i++
+			}
+		case glob[i] == '*':
+			b.WriteString("[^/]*")
+			i++
+		case glob[i] == '?':
+			b.WriteString("[^/]")
+			i++
+		default:
+			b.WriteString(regexp.QuoteMeta(string(glob[i])))
+			i++
+		}
+	}
+	b.WriteByte('$')
+	return b.String()
+}
+
+func resolveFilePattern(pattern string) (string, error) {
+	if isGlobPattern(pattern) {
+		return globToRegex(pattern), nil
+	}
+	if _, err := regexp.Compile(pattern); err != nil {
+		return "", fmt.Errorf("invalid file search pattern %q (not a valid glob or regex): %w", pattern, err)
+	}
+	return pattern, nil
+}
+
+func appendDefaultSearchExcludes(argv []string) []string {
+	for _, glob := range defaultSearchExcludes {
+		argv = append(argv, "--glob", glob)
 	}
 	return argv
 }
 
-// parseRgJSON parses ripgrep --json match events into "path:line: text" lines,
-// returning the rendered slice (capped) and the total match count.
 func parseRgJSON(stdout []byte) (lines []string, total int) {
 	for _, raw := range strings.Split(strings.TrimSpace(string(stdout)), "\n") {
 		if raw == "" {
@@ -345,20 +392,16 @@ func splitNonEmptyLines(b []byte) []string {
 	return out
 }
 
-func truncate(lines []string) []string {
-	if len(lines) > searchMatchLimit {
-		return lines[:searchMatchLimit]
-	}
-	return lines
-}
-
 func renderLines(lines []string) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderList(items []string, _ string) string {
+func renderList(items []string) string {
 	sort.Strings(items)
-	return strings.Join(truncate(items), "\n")
+	if len(items) > searchMatchLimit {
+		items = items[:searchMatchLimit]
+	}
+	return strings.Join(items, "\n")
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -370,10 +413,171 @@ func firstNonEmpty(vals ...string) string {
 	return "."
 }
 
-const grepDescription = `Search file CONTENTS for a regex (or literal) pattern. Backed by ripgrep when available (fast, .gitignore-aware) and plain grep otherwise — you don't choose; just give the pattern.
+func resolveSearchPath(root, workingDir, requested string) string {
+	base := firstNonEmpty(root, workingDir, ".")
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return base
+	}
+	return filepathext.SmartJoin(base, requested)
+}
 
-By default it skips files ignored by .gitignore and hidden files (build/vendor/node_modules noise); set no_ignore=true to search everything. Use glob to scope by file type ("*.go"), files_only to get just matching filenames, literal=true to match a fixed string. When attached to a remote host (remote_attach), it searches the remote filesystem.`
+const searchDescription = `Search file contents (mode="content") or find filenames (mode="files"). Fast, .gitignore-aware, works both locally and on attached remote hosts.
 
-const findDescription = `Find FILES and directories by name. Backed by fd when available (fast, .gitignore-aware) and plain find otherwise.
+In content mode:
+- pattern: regex pattern to search for.
+- ignore_case: set true for case-insensitive search.
+- literal: set true to treat pattern as literal text.
+- files_only: set true to only list filenames with matches.
+- include: glob pattern to restrict searched files (e.g. "*.go").
 
-Give a name glob ("*.go", "Dockerfile"); empty lists everything under path. type="f"/"d" restricts to files/dirs; max_depth limits descent; no_ignore includes .gitignore'd and hidden entries. When attached to a remote host, it searches the remote filesystem.`
+In files mode:
+- pattern: glob pattern (e.g. "*.go") or regex to match filenames.
+
+Global parameters:
+- path: search directory path (defaults to current directory).
+- no_ignore: set true to include hidden and gitignored files.`
+
+type RgMatch struct {
+	Path     string
+	ModTime  time.Time
+	LineNum  int
+	CharNum  int
+	LineText string
+}
+
+func RgSearch(ctx context.Context, pattern, path, include string, limit int) ([]RgMatch, bool, error) {
+	run, root, localRg := resolveRunner(ctx)
+	searchPath := resolveSearchPath(root, "", path)
+	bin := localRg
+	if bin == "" {
+		bin = "rg"
+	}
+	argv := []string{bin, "--json", "-H", "-n", "-0", pattern}
+	if include != "" {
+		argv = append(argv, "--glob", sanitizeGlobInclude(include))
+	}
+	argv = appendDefaultSearchExcludes(argv)
+	argv = append(argv, searchPath)
+
+	stdout, code, err := run(ctx, argv, "")
+	if err != nil {
+		if code == 1 {
+			return []RgMatch{}, false, nil
+		}
+		return nil, false, err
+	}
+	if code > 1 {
+		return nil, false, fmt.Errorf("rg exited %d: %s", code, string(stdout))
+	}
+
+	var matches []RgMatch
+	for _, raw := range strings.Split(strings.TrimSpace(string(stdout)), "\n") {
+		if raw == "" {
+			continue
+		}
+		var m struct {
+			Type string `json:"type"`
+			Data struct {
+				Path       struct{ Text string } `json:"path"`
+				Lines      struct{ Text string } `json:"lines"`
+				LineNumber int                   `json:"line_number"`
+				Submatches []struct{ Start int } `json:"submatches"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(raw), &m); err != nil || m.Type != "match" {
+			continue
+		}
+
+		charNum := 1
+		if len(m.Data.Submatches) > 0 {
+			charNum = m.Data.Submatches[0].Start + 1
+		}
+
+		matches = append(matches, RgMatch{
+			Path:     m.Data.Path.Text,
+			LineNum:  m.Data.LineNumber,
+			CharNum:  charNum,
+			LineText: strings.TrimRight(m.Data.Lines.Text, "\n"),
+		})
+	}
+
+	truncated := len(matches) > limit
+	if truncated {
+		matches = matches[:limit]
+	}
+	return matches, truncated, nil
+}
+
+func RgSearchFiles(ctx context.Context, pattern, path, include string, limit int) ([]RgMatch, bool, error) {
+	run, root, localRg := resolveRunner(ctx)
+	searchPath := resolveSearchPath(root, "", path)
+	bin := localRg
+	if bin == "" {
+		bin = "rg"
+	}
+	argv := []string{bin, "--files", "--null"}
+	if include != "" {
+		argv = append(argv, "--glob", sanitizeGlobInclude(include))
+	}
+	argv = appendDefaultSearchExcludes(argv)
+	argv = append(argv, searchPath)
+
+	stdout, code, err := run(ctx, argv, "")
+	if err != nil && code != 2 {
+		return nil, false, err
+	}
+
+	var matcher *regexp.Regexp
+	var resolvedPattern string
+	if pattern != "" {
+		var err error
+		resolvedPattern, err = resolveFilePattern(pattern)
+		if err != nil {
+			return nil, false, err
+		}
+		matcher, err = regexp.Compile(resolvedPattern)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+
+	var matches []RgMatch
+	for p := range bytes.SplitSeq(stdout, []byte{0}) {
+		if len(p) == 0 {
+			continue
+		}
+		filePath := string(p)
+		slashPath := filepath.ToSlash(filePath)
+
+		if matcher != nil {
+			var matchTarget string
+			if strings.Contains(resolvedPattern, "/") {
+				rel, err := filepath.Rel(searchPath, filePath)
+				if err != nil {
+					rel = slashPath
+				}
+				matchTarget = filepath.ToSlash(rel)
+			} else {
+				matchTarget = filepath.Base(slashPath)
+			}
+
+			if !matcher.MatchString(matchTarget) {
+				continue
+			}
+		}
+		matches = append(matches, RgMatch{
+			Path: slashPath,
+		})
+	}
+
+	sort.SliceStable(matches, func(i, j int) bool {
+		return len(matches[i].Path) < len(matches[j].Path)
+	})
+
+	truncated := len(matches) > limit
+	if truncated {
+		matches = matches[:limit]
+	}
+	return matches, truncated, nil
+}

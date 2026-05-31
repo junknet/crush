@@ -53,6 +53,7 @@ crush run --continue "Follow up on your last response"
 			exploreModel, _ = cmd.Flags().GetString("explore-model")
 			sessionID, _    = cmd.Flags().GetString("session")
 			useLast, _      = cmd.Flags().GetBool("continue")
+			role, _         = cmd.Flags().GetString("role")
 		)
 
 		// Cancel on SIGINT or SIGTERM.
@@ -96,7 +97,7 @@ crush run --continue "Follow up on your last response"
 			slog.SetDefault(slog.New(log.New(os.Stderr)))
 		}
 
-		return ws.App().RunNonInteractive(ctx, os.Stdout, prompt, brainModel, exploreModel, quiet || verbose, sessionID, useLast)
+		return ws.App().RunNonInteractive(ctx, os.Stdout, prompt, brainModel, exploreModel, quiet || verbose, sessionID, useLast, role)
 	},
 }
 
@@ -107,5 +108,6 @@ func init() {
 	runCmd.Flags().String("explore-model", "", "Explore model to use. If not provided, uses the default explore model for the provider")
 	runCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
 	runCmd.Flags().BoolP("continue", "c", false, "Continue the most recent session")
+	runCmd.Flags().String("role", "", "Root agent role to execute the prompt: brain|worker|explore|plan|auditor (default brain)")
 	runCmd.MarkFlagsMutuallyExclusive("session", "continue")
 }

@@ -57,9 +57,10 @@ type (
 		SessionID string
 	}
 	// ActionSelectReasoningEffort is a message indicating a reasoning effort
-	// has been selected.
+	// has been selected for a specific agent role.
 	ActionSelectReasoningEffort struct {
 		Effort string
+		Role   config.SelectedModelType
 	}
 	ActionPermissionResponse struct {
 		Permission permission.PermissionRequest

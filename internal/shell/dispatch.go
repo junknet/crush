@@ -413,7 +413,7 @@ func runShellSource(ctx context.Context, path string, args []string, blockFuncs 
 		interp.Interactive(false),
 		interp.Env(hc.Env),
 		interp.Dir(hc.Dir),
-		interp.ExecHandlers(standardHandlers(blockFuncs)...),
+		interp.ExecHandlers(standardHandlers(blockFuncs, nil)...),
 	}
 	if len(args) > 1 {
 		// Params with a leading "--" avoids any of args[1:] being

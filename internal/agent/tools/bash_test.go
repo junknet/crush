@@ -38,6 +38,56 @@ func TestBashTool_GrepNoMatchIsNotCommandFailure(t *testing.T) {
 	require.Equal(t, "no_match", meta.Outcome)
 }
 
+func TestBashTool_RewritesCommonGrepToRg(t *testing.T) {
+	workingDir := t.TempDir()
+	targetFile := filepath.Join(workingDir, "sample.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte("alpha\nbeta\nCLS limit\n"), 0o644))
+	tool, _ := newBashToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "grep rewrite",
+		Command:     `grep -Ei "cls|xueqiu" ` + targetFile,
+	})
+
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "CLS limit")
+	require.NotContains(t, resp.Content, "not allowed for security reasons")
+}
+
+func TestBashTool_AllowsRgInBash(t *testing.T) {
+	workingDir := t.TempDir()
+	targetFile := filepath.Join(workingDir, "sample.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte("alpha\nbeta\n"), 0o644))
+	tool, _ := newBashToolForTest(workingDir)
+	ctx := context.WithValue(context.Background(), SessionIDContextKey, "test-session")
+
+	resp := runBashTool(t, tool, ctx, BashParams{
+		Description: "rg direct",
+		Command:     "rg alpha " + targetFile,
+	})
+
+	require.False(t, resp.IsError)
+	require.Contains(t, resp.Content, "alpha")
+	require.NotContains(t, resp.Content, "not allowed for security reasons")
+}
+
+func TestBashBlockListAllowsPlainGrepWithoutRewrite(t *testing.T) {
+	workingDir := t.TempDir()
+	targetFile := filepath.Join(workingDir, "sample.txt")
+	require.NoError(t, os.WriteFile(targetFile, []byte("alpha\nbeta\n"), 0o644))
+	sh := shell.NewShell(&shell.Options{
+		WorkingDir: workingDir,
+		BlockFuncs: blockFuncs(),
+	})
+
+	stdout, stderr, err := sh.Exec(t.Context(), "grep alpha "+targetFile)
+
+	require.NoError(t, err)
+	require.Empty(t, stderr)
+	require.Contains(t, stdout, "alpha")
+}
+
 func (m *mockBashPermissionService) Request(ctx context.Context, req permission.CreatePermissionRequest) (bool, error) {
 	return true, nil
 }
@@ -189,7 +239,22 @@ func newBashToolForTest(workingDir string) (fantasy.AgentTool, *shell.Background
 	permissions := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
 	bgManager := shell.NewBackgroundShellManager()
-	return NewBashTool(permissions, bgManager, workingDir, filepath.Join(workingDir, ".crush"), attribution, "test-model"), bgManager
+	tool := NewBashTool(permissions, bgManager, workingDir, filepath.Join(workingDir, ".crush"), attribution, "test-model")
+
+	// Create and register tools needed for transparent routing redirect tests
+	searchTool := NewSearchTool(workingDir)
+	readTool := NewViewTool(nil, permissions, mockFileTracker{}, nil, workingDir)
+	readDirTool := NewLsTool(permissions, workingDir, config.ToolLs{})
+
+	if bt, ok := tool.(*BashTool); ok {
+		bt.SetRegistry(map[string]fantasy.AgentTool{
+			"Search":  searchTool,
+			"Read":    readTool,
+			"ReadDir": readDirTool,
+		})
+	}
+
+	return tool, bgManager
 }
 
 func runBashTool(t *testing.T, tool fantasy.AgentTool, ctx context.Context, params BashParams) fantasy.ToolResponse {

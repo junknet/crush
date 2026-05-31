@@ -144,7 +144,7 @@ func TestPermissionRequestParamsTypeAssertable(t *testing.T) {
 			},
 		},
 		{
-			name:     "agentic_fetch",
+			name:     "websearch-agent",
 			toolName: tools.AgenticFetchToolName,
 			params: tools.AgenticFetchPermissionsParams{
 				URL:    "https://example.com",

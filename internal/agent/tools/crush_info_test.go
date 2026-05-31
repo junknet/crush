@@ -169,12 +169,12 @@ func TestCrushInfo_DisabledTools(t *testing.T) {
 
 	cfg := config.NewTestStore(&config.Config{
 		Providers: csync.NewMap[string, config.ProviderConfig](),
-		Options:   &config.Options{DisabledTools: []string{"sourcegraph", "agentic_fetch"}},
+		Options:   &config.Options{DisabledTools: []string{"sourcegraph", "websearch-agent"}},
 	})
 
 	output := buildCrushInfo(cfg, nil, nil, nil, nil)
 	require.Contains(t, output, "[tools]")
-	require.Contains(t, output, "disabled = agentic_fetch, sourcegraph")
+	require.Contains(t, output, "disabled = sourcegraph, websearch-agent")
 }
 
 func TestCrushInfo_Options(t *testing.T) {

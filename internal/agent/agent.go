@@ -1441,8 +1441,11 @@ func (a *sessionAgent) summarizeSession(ctx context.Context, sessionID string, o
 	// Just in case, get just the last usage info.
 	usage := resp.Response.Usage
 	currentSession.SummaryMessageID = summaryMessage.ID
-	currentSession.CompletionTokens = usage.OutputTokens
-	currentSession.PromptTokens = 0
+	currentSession.LastPromptTokens = 0
+	currentSession.LastCompletionTokens = usage.OutputTokens
+	currentSession.LastCacheCreationTokens = 0
+	currentSession.LastCacheReadTokens = 0
+	currentSession.LastContextPressureTokens = usage.OutputTokens
 	_, err = a.sessions.Save(genCtx, currentSession)
 	if err != nil {
 		return err
@@ -1639,7 +1642,7 @@ func (a *sessionAgent) preparePrompt(currentSession session.Session, msgs []mess
 		var reminder string
 		if len(currentSession.Todos) == 0 {
 			reminder = `This is a reminder that your todo list is currently empty. DO NOT mention this to the user explicitly because they are already aware.
-If you are working on tasks that would benefit from a todo list please use the "todos" tool to create one.
+If you are working on tasks that would benefit from a todo list please use the "Todos" tool to create one.
 If not, please feel free to ignore. Again do not mention this message to the user.`
 			history = append(history, fantasy.NewUserMessage(
 				fmt.Sprintf(
@@ -2079,7 +2082,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		cost = 0
 	}
 
-	promptTokens := resp.TotalUsage.InputTokens + resp.TotalUsage.CacheCreationTokens
+	promptTokens := usagePromptTokens(model, resp.TotalUsage)
 	completionTokens := resp.TotalUsage.OutputTokens
 
 	// Atomically update only title and usage fields to avoid overriding other
@@ -2124,8 +2127,14 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	}
 
 	session.Cost += cost
-	session.CompletionTokens = usage.OutputTokens
-	session.PromptTokens = usage.InputTokens + usage.CacheReadTokens
+	promptTokens := usagePromptTokens(model, usage)
+	session.PromptTokens += promptTokens
+	session.CompletionTokens += usage.OutputTokens
+	session.LastPromptTokens = promptTokens
+	session.LastCompletionTokens = usage.OutputTokens
+	session.LastCacheCreationTokens = usage.CacheCreationTokens
+	session.LastCacheReadTokens = usage.CacheReadTokens
+	session.LastContextPressureTokens = usageContextPressureTokens(model, usage)
 }
 
 func (a *sessionAgent) shouldAutoSummarize(model Model, session session.Session) bool {
@@ -2149,7 +2158,53 @@ func resolvedModelContextWindow(model Model) int64 {
 }
 
 func autoSummarizeUsedTokens(session session.Session) int64 {
+	if session.LastContextPressureTokens > 0 {
+		return session.LastContextPressureTokens
+	}
 	return session.CompletionTokens + session.PromptTokens
+}
+
+func usagePromptTokens(model Model, usage fantasy.Usage) int64 {
+	cacheTokens := usage.CacheCreationTokens + usage.CacheReadTokens
+	if usageProviderIncludesCacheRead(model) {
+		return usage.InputTokens + usage.CacheCreationTokens
+	}
+	if cacheTokens == 0 || usage.TotalTokens <= 0 {
+		return usage.InputTokens + cacheTokens
+	}
+	if usage.TotalTokens == usage.InputTokens+usage.OutputTokens {
+		return usage.InputTokens + cacheTokens
+	}
+	if usage.ReasoningTokens > 0 && usage.TotalTokens == usage.InputTokens+usage.OutputTokens+usage.ReasoningTokens {
+		return usage.InputTokens
+	}
+	if promptTokens := usage.TotalTokens - usage.OutputTokens; promptTokens > usage.InputTokens {
+		return promptTokens
+	}
+	return usage.InputTokens
+}
+
+func usageContextPressureTokens(model Model, usage fantasy.Usage) int64 {
+	cacheTokens := usage.CacheCreationTokens + usage.CacheReadTokens
+	if usageProviderIncludesCacheRead(model) && usage.TotalTokens > 0 {
+		return usage.TotalTokens
+	}
+	if usage.TotalTokens > 0 {
+		if cacheTokens > 0 && usage.TotalTokens == usage.InputTokens+usage.OutputTokens {
+			return usage.InputTokens + cacheTokens + usage.OutputTokens
+		}
+		return usage.TotalTokens
+	}
+	return usage.InputTokens + cacheTokens + usage.OutputTokens
+}
+
+func usageProviderIncludesCacheRead(model Model) bool {
+	switch model.ProviderType {
+	case google.Name, antigravity.Name:
+		return true
+	default:
+		return false
+	}
 }
 
 func firstModelEventTimeoutForMetrics(metrics llmRequestMetrics) time.Duration {
@@ -2393,7 +2448,7 @@ func (a *sessionAgent) maybeInjectDeferredReminder(messages []fantasy.Message, r
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	if len(deferred) > 0 {
-		sb.WriteString("The following deferred tools are now available via tool_search. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use tool_search with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\n")
+		sb.WriteString("The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail with InputValidationError. Use ToolSearch with query \"select:<name>[,<name>...]\" to load tool schemas before calling them:\n")
 		for _, n := range deferred {
 			sb.WriteString("  - ")
 			sb.WriteString(n)
@@ -2677,22 +2732,14 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []a
 }
 
 var readOnlyBlockedTools = map[string]struct{}{
-	tools.BashToolName:            {},
-	tools.DownloadToolName:        {},
-	tools.EditToolName:            {},
-	tools.JobKillToolName:         {},
-	tools.MultiEditToolName:       {},
-	tools.NuToolName:              {},
-	tools.RunToolName:             {},
-	tools.ScheduleWakeupToolName:  {},
-	tools.SSHExecToolName:         {},
-	tools.SSHMountToolName:        {},
-	tools.SSHSessionKillToolName:  {},
-	tools.SSHSessionSendToolName:  {},
-	tools.SSHSessionStartToolName: {},
-	tools.SSHUnmountToolName:      {},
-	tools.TodosToolName:           {},
-	tools.WriteToolName:           {},
+	tools.BashToolName:           {},
+	tools.DownloadToolName:       {},
+	tools.EditToolName:           {},
+	tools.JobKillToolName:        {},
+	tools.MultiEditToolName:      {},
+	tools.ScheduleWakeupToolName: {},
+	tools.TodosToolName:          {},
+	tools.WriteToolName:          {},
 }
 
 type readOnlyToolWrapper struct {
@@ -2718,20 +2765,20 @@ func (r *readOnlyToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (f
 		}
 		return r.inner.Run(ctx, call)
 	}
-	if call.Name == tools.DagRunToolName || call.Name == tools.EvidenceBatchToolName || call.Name == tools.EvidenceGraphToolName {
-		if resp, blocked := readOnlyDagRunToolResponse(call); blocked {
+	if call.Name == tools.EvidenceBatchToolName {
+		if resp, blocked := readOnlyBatchToolResponse(call); blocked {
 			return resp, nil
 		}
 		return r.inner.Run(ctx, call)
 	}
-	if call.Name == tools.CodeTriageToolName || call.Name == tools.BugTriageToolName {
+	if call.Name == tools.CodeTriageToolName {
 		if resp, blocked := readOnlyCodeTriageToolResponse(call); blocked {
 			return resp, nil
 		}
 		return r.inner.Run(ctx, call)
 	}
 	if _, blocked := readOnlyBlockedTools[call.Name]; blocked {
-		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because this turn is read-only. Use view, ls, rg, ast_grep, sourcegraph, or fetch instead.", call.Name))
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because this turn is read-only. Use Read, ReadDir, Grep, Find, or fetch instead.", call.Name))
 		resp.StopTurn = true
 		return resp, nil
 	}
@@ -2761,8 +2808,8 @@ func readOnlyAgentToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, boo
 	}
 }
 
-func readOnlyDagRunToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bool) {
-	var params tools.DagRunParams
+func readOnlyBatchToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bool) {
+	var params tools.BatchParams
 	if err := json.Unmarshal([]byte(call.Input), &params); err != nil {
 		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because its input could not be parsed for read-only policy: %v", call.Name, err))
 		resp.StopTurn = true
@@ -2772,16 +2819,20 @@ func readOnlyDagRunToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bo
 		kind := strings.ToLower(strings.TrimSpace(node.Kind))
 		if kind == "" {
 			kind = strings.ToLower(strings.TrimSpace(node.Tool))
-			switch kind {
-			case "rg":
-				if node.FilesOnly {
-					kind = "search_files"
-				} else {
-					kind = "search_text"
-				}
-			case "view":
-				kind = "read_file"
+		}
+		switch kind {
+		case "rg", "grep", "search", "search_text", "search_files":
+			if node.FilesOnly {
+				kind = "search_files"
+			} else {
+				kind = "search_text"
 			}
+		case "glob", "find", "file_search", "files":
+			kind = "search_files"
+		case "ls", "list", "tree", "directory", "dir", "readdir", "read_dir":
+			kind = "list_tree"
+		case "view", "cat", "read":
+			kind = "read_file"
 		}
 		switch kind {
 		case "search_text", "search_files", "search_structure", "list_tree", "read_file", "check_file":
@@ -2853,11 +2904,11 @@ func (m *memExtractToolWrapper) SetProviderOptions(opts fantasy.ProviderOptions)
 
 func (m *memExtractToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	name := call.Name
-	if name == "view" || name == "rg" || name == "todos" {
+	if name == tools.ViewToolName || name == tools.SearchToolName || name == tools.TodosToolName {
 		return m.inner.Run(ctx, call)
 	}
 
-	if name == "write" || name == "edit" {
+	if name == tools.WriteToolName || name == tools.EditToolName || name == tools.MultiEditToolName {
 		var input struct {
 			FilePath string `json:"file_path"`
 			Path     string `json:"path"`

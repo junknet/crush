@@ -15,7 +15,7 @@ import (
 
 // ToolSearchToolName is the model-facing identifier for the schema-loading
 // tool. Kept short so the model uses it freely.
-const ToolSearchToolName = "tool_search"
+const ToolSearchToolName = "ToolSearch"
 
 //go:embed tool_search.md
 var toolSearchDescription string

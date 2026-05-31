@@ -28,7 +28,7 @@ func TestCompactRedundantToolResults(t *testing.T) {
 	// 7. Assistant calls view (again)
 	// 8. Tool returns view result (again)
 	// 9. Extra tool messages to push older ones out of the protection window.
-	
+
 	// Turn 1: ls /
 	a1, err := env.messages.Create(ctx, sess.ID, message.CreateMessageParams{
 		Role: message.Assistant,
@@ -218,26 +218,26 @@ func TestCompactRedundantToolResults(t *testing.T) {
 	require.True(t, tr11Found)
 	require.True(t, tr12Found)
 
-	// Turn 16: evidence_batch
+	// Turn 16: Batch
 	a16, err := env.messages.Create(ctx, sess.ID, message.CreateMessageParams{Role: message.Assistant})
 	require.NoError(t, err)
-	a16.AddToolCall(message.ToolCall{ID: "call16", Name: "evidence_batch", Input: `{"nodes":[{"id":"n1","kind":"ls","path":"/"}]}`})
+	a16.AddToolCall(message.ToolCall{ID: "call16", Name: "Batch", Input: `{"nodes":[{"id":"n1","kind":"ls","path":"/"}]}`})
 	require.NoError(t, env.messages.Update(ctx, a16))
 
 	tr16, err := env.messages.Create(ctx, sess.ID, message.CreateMessageParams{Role: message.Tool})
 	require.NoError(t, err)
-	tr16.AddToolResult(message.ToolResult{ToolCallID: "call16", Name: "evidence_batch", Content: "file1\nfile2"})
+	tr16.AddToolResult(message.ToolResult{ToolCallID: "call16", Name: "Batch", Content: "file1\nfile2"})
 	require.NoError(t, env.messages.Update(ctx, tr16))
 
-	// Turn 17: evidence_batch (redundant, different whitespace/order in JSON)
+	// Turn 17: Batch (redundant, different whitespace/order in JSON)
 	a17, err := env.messages.Create(ctx, sess.ID, message.CreateMessageParams{Role: message.Assistant})
 	require.NoError(t, err)
-	a17.AddToolCall(message.ToolCall{ID: "call17", Name: "evidence_batch", Input: `{"nodes": [ { "kind": "ls", "id": "n1", "path": "/" } ]}`})
+	a17.AddToolCall(message.ToolCall{ID: "call17", Name: "Batch", Input: `{"nodes": [ { "kind": "ls", "id": "n1", "path": "/" } ]}`})
 	require.NoError(t, env.messages.Update(ctx, a17))
 
 	tr17, err := env.messages.Create(ctx, sess.ID, message.CreateMessageParams{Role: message.Tool})
 	require.NoError(t, err)
-	tr17.AddToolResult(message.ToolResult{ToolCallID: "call17", Name: "evidence_batch", Content: "file1\nfile2"})
+	tr17.AddToolResult(message.ToolResult{ToolCallID: "call17", Name: "Batch", Content: "file1\nfile2"})
 	require.NoError(t, env.messages.Update(ctx, tr17))
 
 	// Add more tool messages to push tr16 out of protection.

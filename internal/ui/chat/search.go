@@ -13,64 +13,56 @@ import (
 // Search Tool
 // -----------------------------------------------------------------------------
 
-// SearchToolMessageItem is a message item that represents an search tool call.
+// SearchToolMessageItem is a message item that represents a search tool call.
 type SearchToolMessageItem struct {
 	*baseToolMessageItem
 }
 
 var _ ToolMessageItem = (*SearchToolMessageItem)(nil)
 
-// -----------------------------------------------------------------------------
-// Rg Tool
-// -----------------------------------------------------------------------------
-
-// RgToolMessageItem is a message item that represents an rg tool call.
-type RgToolMessageItem struct {
-	*baseToolMessageItem
-}
-
-var _ ToolMessageItem = (*RgToolMessageItem)(nil)
-
-// NewRgToolMessageItem creates a new [RgToolMessageItem].
-func NewRgToolMessageItem(
+// NewSearchToolMessageItem creates a new [SearchToolMessageItem].
+func NewSearchToolMessageItem(
 	sty *styles.Styles,
 	toolCall message.ToolCall,
 	result *message.ToolResult,
 	canceled bool,
 ) ToolMessageItem {
-	return newBaseToolMessageItem(sty, toolCall, result, &RgToolRenderContext{}, canceled)
+	return newBaseToolMessageItem(sty, toolCall, result, &SearchToolRenderContext{}, canceled)
 }
 
-// RgToolRenderContext renders rg tool messages.
-type RgToolRenderContext struct{}
+// SearchToolRenderContext renders search tool messages.
+type SearchToolRenderContext struct{}
 
 // RenderTool implements the [ToolRenderer] interface.
-func (g *RgToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
+func (g *SearchToolRenderContext) RenderTool(sty *styles.Styles, width int, opts *ToolRenderOpts) string {
 	cappedWidth := cappedMessageWidth(width)
 	if opts.IsPending() {
-		return pendingTool(sty, tools.RgToolName, opts.Compact)
+		return pendingTool(sty, tools.SearchToolName, opts.Compact)
 	}
 
-	var params tools.RgParams
+	var params tools.SearchParams
 	if err := json.Unmarshal([]byte(opts.ToolCall.Input), &params); err != nil {
 		return toolErrorContent(sty, &message.ToolResult{Content: "Invalid parameters"}, cappedWidth)
 	}
 
 	toolParams := []string{params.Pattern}
+	if params.Mode != "" {
+		toolParams = append(toolParams, "mode", params.Mode)
+	}
 	if params.Path != "" {
 		toolParams = append(toolParams, "path", params.Path)
 	}
 	if params.Include != "" {
 		toolParams = append(toolParams, "include", params.Include)
 	}
-	if params.LiteralText {
+	if params.Literal {
 		toolParams = append(toolParams, "literal", "true")
 	}
 	if params.FilesOnly {
 		toolParams = append(toolParams, "files_only", "true")
 	}
 
-	header := toolHeader(sty, opts.Status, tools.RgToolName, cappedWidth, opts.Compact, toolParams...)
+	header := toolHeader(sty, opts.Status, tools.SearchToolName, cappedWidth, opts.Compact, toolParams...)
 	if opts.Compact {
 		return header
 	}

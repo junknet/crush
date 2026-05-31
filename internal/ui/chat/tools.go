@@ -227,11 +227,9 @@ func NewToolMessageItem(
 		item = NewEditToolMessageItem(sty, toolCall, result, canceled)
 	case tools.MultiEditToolName:
 		item = NewMultiEditToolMessageItem(sty, toolCall, result, canceled)
-	case tools.RgToolName:
-		item = NewRgToolMessageItem(sty, toolCall, result, canceled)
+	case tools.SearchToolName:
+		item = NewSearchToolMessageItem(sty, toolCall, result, canceled)
 	case tools.CodeTriageToolName:
-		item = NewCodeTriageToolMessageItem(sty, toolCall, result, canceled)
-	case tools.BugTriageToolName:
 		item = NewCodeTriageToolMessageItem(sty, toolCall, result, canceled)
 	case tools.LSToolName:
 		item = NewLSToolMessageItem(sty, toolCall, result, canceled)
@@ -249,6 +247,8 @@ func NewToolMessageItem(
 		item = NewWebFetchToolMessageItem(sty, toolCall, result, canceled)
 	case tools.WebSearchToolName:
 		item = NewWebSearchToolMessageItem(sty, toolCall, result, canceled)
+	case tools.EvidenceBatchToolName:
+		item = NewBatchToolMessageItem(sty, toolCall, result, canceled)
 	case tools.TodosToolName:
 		item = NewTodosToolMessageItem(sty, toolCall, result, canceled)
 	default:
@@ -1257,10 +1257,13 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			return fmt.Sprintf("**URL:** %s", params.URL)
 		}
-	case tools.RgToolName:
-		var params tools.RgParams
+	case tools.SearchToolName:
+		var params tools.SearchParams
 		if json.Unmarshal([]byte(t.toolCall.Input), &params) == nil {
 			var parts []string
+			if params.Mode != "" {
+				parts = append(parts, fmt.Sprintf("**Mode:** %s", params.Mode))
+			}
 			parts = append(parts, fmt.Sprintf("**Pattern:** %s", params.Pattern))
 			if params.Path != "" {
 				parts = append(parts, fmt.Sprintf("**Path:** %s", params.Path))
@@ -1268,7 +1271,7 @@ func (t *baseToolMessageItem) formatParametersForCopy() string {
 			if params.Include != "" {
 				parts = append(parts, fmt.Sprintf("**Include:** %s", params.Include))
 			}
-			if params.LiteralText {
+			if params.Literal {
 				parts = append(parts, "**Literal:** true")
 			}
 			if params.FilesOnly {
@@ -1364,7 +1367,7 @@ func (t *baseToolMessageItem) formatResultForCopy() string {
 		return t.formatWebFetchResultForCopy()
 	case agent.AgentToolName:
 		return t.formatAgentResultForCopy()
-	case tools.DownloadToolName, tools.RgToolName, tools.LSToolName, tools.SourcegraphToolName, tools.TodosToolName:
+	case tools.DownloadToolName, tools.SearchToolName, tools.LSToolName, tools.SourcegraphToolName, tools.TodosToolName:
 		return fmt.Sprintf("```\n%s\n```", t.result.Content)
 	default:
 		return t.result.Content
@@ -1705,8 +1708,8 @@ func prettifyToolName(name string) string {
 		return tools.WebFetchToolName
 	case tools.WebSearchToolName:
 		return tools.WebSearchToolName
-	case tools.RgToolName:
-		return tools.RgToolName
+	case tools.SearchToolName:
+		return tools.SearchToolName
 	case tools.CodeTriageToolName:
 		return tools.CodeTriageToolName
 	case tools.LSToolName:
@@ -1724,20 +1727,60 @@ func prettifyToolName(name string) string {
 	}
 }
 
-// normalizeToolName normalizes legacy or aliased tool names (e.g. "bash_tool")
-// to their canonical standard forms.
+// normalizeToolName maps legacy/aliased/lowercase tool names to their canonical
+// PascalCase form so rich rendering still triggers when a model emits an old
+// name (e.g. "view"/"grep") instead of the current "Read"/"Grep".
 func normalizeToolName(name string) string {
 	if strings.HasSuffix(name, "_tool") {
 		name = strings.TrimSuffix(name, "_tool")
 	}
-	switch name {
-	case "multiedit":
-		return "edit:multi"
-	case tools.BugTriageToolName:
+	switch strings.ToLower(name) {
+	case "view", "read":
+		return tools.ViewToolName
+	case "ls", "list", "readdir", "read_dir":
+		return tools.LSToolName
+	case "find", "glob", "grep", "search", "rg":
+		return tools.SearchToolName
+	case "edit":
+		return tools.EditToolName
+	case "multiedit", "multi_edit":
+		return tools.MultiEditToolName
+	case "write":
+		return tools.WriteToolName
+	case "bash":
+		return tools.BashToolName
+	case "nu":
+		return "Nu"
+	case "agent":
+		return "Agent"
+	case "fetch":
+		return tools.FetchToolName
+	case "code_triage", "codetriage", "bug_triage", "bugtriage":
 		return tools.CodeTriageToolName
-	case "list":
-		return "ls"
-	default:
-		return name
+	case "crush_info", "crushinfo":
+		return tools.CrushInfoToolName
+	case "crush_logs", "crushlogs":
+		return tools.CrushLogsToolName
+	case "job_output", "joboutput":
+		return tools.JobOutputToolName
+	case "job_kill", "jobkill":
+		return tools.JobKillToolName
+	case "monitor":
+		return tools.MonitorToolName
+	case "schedule_wakeup", "schedulewakeup":
+		return tools.ScheduleWakeupToolName
+	case "download":
+		return tools.DownloadToolName
+	case "todos":
+		return tools.TodosToolName
+	case "tool_search", "toolsearch":
+		return tools.ToolSearchToolName
+	case "list_mcp_resources", "listmcpresources":
+		return tools.ListMCPResourcesToolName
+	case "read_mcp_resource", "readmcpresource":
+		return tools.ReadMCPResourceToolName
+	case "dag_run", "evidence_batch", "evidence_graph", "batch":
+		return tools.EvidenceBatchToolName
 	}
+	return name
 }

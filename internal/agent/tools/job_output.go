@@ -8,17 +8,18 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/iodriver"
 	"github.com/charmbracelet/crush/internal/shell"
 )
 
 const (
-	JobOutputToolName = "job_output"
+	JobOutputToolName = "JobOutput"
 	// jobOutputWaitBudget bounds wait=true below the 60s tool-execution timeout
 	// so the call returns the current output + running status gracefully instead
 	// of blocking until the timeout wrapper kills it and discards the output —
 	// the single most frequent job_output failure in real traces (140 hard
 	// timeouts). For longer waits the model polls again or uses monitor.
-	jobOutputWaitBudget = 50 * time.Second
+	jobOutputWaitBudget = 5 * time.Second
 )
 
 //go:embed job_output.md
@@ -44,6 +45,9 @@ func NewJobOutputTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool
 		func(ctx context.Context, params JobOutputParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.ShellID == "" {
 				return fantasy.NewTextErrorResponse("missing shell_id"), nil
+			}
+			if iodriver.IsRemoteJobID(params.ShellID) {
+				return remoteJobOutput(ctx, params)
 			}
 
 			bgShell, ok := bgManager.Get(params.ShellID)
@@ -110,4 +114,73 @@ func NewJobOutputTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(result), metadata), nil
 		},
 	)
+}
+
+func remoteJobOutput(ctx context.Context, params JobOutputParams) (fantasy.ToolResponse, error) {
+	backend := GetBackendFromContext(ctx)
+	jobber, ok := backend.(iodriver.Jobber)
+	if !ok || jobber == nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("remote background shell not available: %s", params.ShellID)), nil
+	}
+
+	if params.Wait {
+		waitCtx, cancel := context.WithTimeout(ctx, jobOutputWaitBudget)
+		defer cancel()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			snapshot, err := jobber.JobOutput(waitCtx, params.ShellID)
+			if err != nil {
+				return fantasy.NewTextErrorResponse(err.Error()), nil
+			}
+			if snapshot.Done {
+				return remoteJobOutputResponse(params.ShellID, snapshot, false), nil
+			}
+			select {
+			case <-ticker.C:
+			case <-waitCtx.Done():
+				snapshot, _ = jobber.JobOutput(ctx, params.ShellID)
+				return remoteJobOutputResponse(params.ShellID, snapshot, true), nil
+			}
+		}
+	}
+
+	snapshot, err := jobber.JobOutput(ctx, params.ShellID)
+	if err != nil {
+		return fantasy.NewTextErrorResponse(err.Error()), nil
+	}
+	return remoteJobOutputResponse(params.ShellID, snapshot, false), nil
+}
+
+func remoteJobOutputResponse(shellID string, snapshot iodriver.JobSnapshot, waitExpired bool) fantasy.ToolResponse {
+	outputParts := make([]string, 0, 2)
+	if len(snapshot.Stdout) > 0 {
+		outputParts = append(outputParts, string(snapshot.Stdout))
+	}
+	if len(snapshot.Stderr) > 0 {
+		outputParts = append(outputParts, string(snapshot.Stderr))
+	}
+	status := "running"
+	if snapshot.Done {
+		status = "completed"
+		if snapshot.ExitCode != 0 {
+			outputParts = append(outputParts, fmt.Sprintf("Exit code %d", snapshot.ExitCode))
+		}
+	}
+	output := headPreview(strings.Join(outputParts, "\n"))
+	if output == "" {
+		output = BashNoOutput
+	}
+	result := fmt.Sprintf("Status: %s\n\n%s", status, output)
+	if waitExpired {
+		result += fmt.Sprintf("\n\n[job %s still running after %s — call job_output again to poll, or use the monitor tool to wake on a completion/error pattern instead of blocking.]", shellID, jobOutputWaitBudget)
+	}
+	metadata := JobOutputResponseMetadata{
+		ShellID:          shellID,
+		Command:          snapshot.Command,
+		Description:      snapshot.Description,
+		Done:             snapshot.Done,
+		WorkingDirectory: snapshot.Cwd,
+	}
+	return fantasy.WithResponseMetadata(fantasy.NewTextResponse(result), metadata)
 }
