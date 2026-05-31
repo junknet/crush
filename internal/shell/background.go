@@ -302,6 +302,50 @@ func (bs *BackgroundShell) maybePublishDone() {
 	})
 }
 
+// RegisterVirtualJob registers a background job that is NOT backed by a real
+// shell process — used for sub-agent background tasks so they share the exact
+// same Monitor / JobOutput / JobKill / auto-wake machinery as bash background
+// jobs. Without this the agent_job_id was never in m.shells, so the advertised
+// monitor(shell_id=…) / job_output(shell_id=…) path failed with "background
+// shell not found". The job starts running and is marked backgrounded
+// immediately (it is a background job from birth); call Complete on the
+// returned shell when the work finishes. cancel is invoked by Kill /
+// KillBySession to stop the underlying work.
+func (m *BackgroundShellManager) RegisterVirtualJob(id, description, sessionID string, cancel context.CancelFunc) *BackgroundShell {
+	if cancel == nil {
+		cancel = func() {}
+	}
+	bs := &BackgroundShell{
+		ID:          id,
+		Command:     description,
+		Description: description,
+		SessionID:   sessionID,
+		cancel:      cancel,
+		stdout:      &syncBuffer{},
+		stderr:      &syncBuffer{},
+		done:        make(chan struct{}),
+	}
+	bs.backgrounded.Store(true)
+	m.shells.Set(id, bs)
+	return bs
+}
+
+// Complete finishes a virtual job: records its output, marks completion, and
+// fires the same wake-up path (maybePublishDone) as a real background shell.
+// Idempotent — only the first call takes effect, so a Kill-then-finish race is
+// safe.
+func (bs *BackgroundShell) Complete(output string, exitErr error) {
+	if !bs.completedAt.CompareAndSwap(0, time.Now().Unix()) {
+		return
+	}
+	if output != "" {
+		bs.stdout.WriteString(output)
+	}
+	bs.exitErr = exitErr
+	close(bs.done)
+	bs.maybePublishDone()
+}
+
 // StartMonitor watches a running background job's output and fires a single
 // wake-up event when: a new line matches pattern (BackgroundKindMonitorHit),
 // the job ends before matching (BackgroundKindMonitorEOF), or timeout elapses

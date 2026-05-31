@@ -98,8 +98,16 @@ func (c *coordinator) runSubAgentBackground(
 	jobID := fmt.Sprintf("%03X", shell.NextJobID())
 	description := fmt.Sprintf("agent(%s): %s", role, truncateDesc(prompt, 60))
 
+	// Register the sub-agent as a virtual background job so its agent_job_id is
+	// resolvable by Monitor / JobOutput / JobKill exactly like a bash bg shell —
+	// the advertised polling path below only works because of this registration
+	// (previously the ID was never in the manager, so it failed with
+	// "background shell not found"). runCtx is detached from the caller (must
+	// survive this tool returning) but cancelable via JobKill / session reaping.
+	runCtx, cancel := context.WithCancel(context.Background())
+	bgShell := c.bgManager.RegisterVirtualJob(jobID, description, sessionID, cancel)
+
 	go func() {
-		runCtx := context.Background() // detached from caller ctx — must not cancel on return
 		result, err := c.runSubAgent(runCtx, subAgentParams{
 			Agent:          agent,
 			SessionID:      sessionID,
@@ -110,32 +118,19 @@ func (c *coordinator) runSubAgentBackground(
 			SessionTitle:   agentSessionTitle(role),
 		})
 
-		var outputTail string
-		var exitCode int
+		output := ""
 		if err != nil {
-			exitCode = 1
-			outputTail = fmt.Sprintf("error: %v", err)
+			output = fmt.Sprintf("error: %v", err)
 		} else {
-			text := result.Content
-			if len(text) > 4096 {
-				text = text[len(text)-4096:]
-			}
-			outputTail = text
+			output = result.Content
 		}
-
-		shell.PublishBackgroundDone(shell.BackgroundJobEvent{
-			Kind:        shell.BackgroundKindDone,
-			ID:          jobID,
-			SessionID:   sessionID,
-			Command:     description,
-			Description: description,
-			ExitCode:    exitCode,
-			OutputTail:  outputTail,
-		})
+		// Drives maybePublishDone → the same auto-wake the agent loop already
+		// listens for, and makes job_output(shell_id) return the result.
+		bgShell.Complete(output, err)
 	}()
 
 	return fantasy.NewTextResponse(fmt.Sprintf(
-		"agent_job_id: %s\n角色: %s\n状态: 后台运行中\n\n任务已在后台启动。使用 monitor(shell_id=%s, regex=\"agent_job_id: %s\") 等待完成，或用 job_output(shell_id=%s) 查看输出。",
+		"agent_job_id: %s\n角色: %s\n状态: 后台运行中\n\n任务已在后台启动，完成后会自动通知你继续（并带回输出摘要）。也可用 monitor(shell_id=%s) 等待完成、job_output(shell_id=%s) 查看输出、job_kill(shell_id=%s) 终止。",
 		jobID, role, jobID, jobID, jobID,
 	)), nil
 }
