@@ -2778,7 +2778,7 @@ func (r *readOnlyToolWrapper) Run(ctx context.Context, call fantasy.ToolCall) (f
 		return r.inner.Run(ctx, call)
 	}
 	if _, blocked := readOnlyBlockedTools[call.Name]; blocked {
-		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because this turn is read-only. Use Read, ReadDir, Grep, Find, or fetch instead.", call.Name))
+		resp := fantasy.NewTextErrorResponse(fmt.Sprintf("Tool %s is blocked because this turn is read-only. Use Read, ReadDir, Search, or Fetch instead.", call.Name))
 		resp.StopTurn = true
 		return resp, nil
 	}
@@ -2815,35 +2815,33 @@ func readOnlyBatchToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, boo
 		resp.StopTurn = true
 		return resp, true
 	}
+	// A Batch node runs one ordinary tool, so a node is read-only-safe iff that
+	// tool is read-only-safe by the same policy as a standalone call. One source
+	// of truth (readOnlyBlockedTools) — no separate evidence-node whitelist.
 	for _, node := range params.Nodes {
-		kind := strings.ToLower(strings.TrimSpace(node.Kind))
-		if kind == "" {
-			kind = strings.ToLower(strings.TrimSpace(node.Tool))
-		}
-		switch kind {
-		case "rg", "grep", "search", "search_text", "search_files":
-			if node.FilesOnly {
-				kind = "search_files"
-			} else {
-				kind = "search_text"
-			}
-		case "glob", "find", "file_search", "files":
-			kind = "search_files"
-		case "ls", "list", "tree", "directory", "dir", "readdir", "read_dir":
-			kind = "list_tree"
-		case "view", "cat", "read":
-			kind = "read_file"
-		}
-		switch kind {
-		case "search_text", "search_files", "search_structure", "list_tree", "read_file", "check_file":
-			continue
-		default:
-			resp := fantasy.NewTextErrorResponse(fmt.Sprintf("%s node %s uses %q, but read-only turns only allow evidence read nodes.", call.Name, node.ID, kind))
+		if isReadOnlyBlockedTool(node.Tool) {
+			resp := fantasy.NewTextErrorResponse(fmt.Sprintf("%s node %s runs %q, which mutates state and is blocked on a read-only turn. Use Read, ReadDir, Search, or CodeTriage nodes instead.", call.Name, node.ID, node.Tool))
 			resp.StopTurn = true
 			return resp, true
 		}
 	}
 	return fantasy.ToolResponse{}, false
+}
+
+// isReadOnlyBlockedTool reports whether a tool mutates state (or spawns agents)
+// and is therefore disallowed on a read-only turn. Matched case-insensitively so
+// a "bash" node is caught the same as "Bash".
+func isReadOnlyBlockedTool(name string) bool {
+	name = strings.TrimSpace(name)
+	if strings.EqualFold(name, AgentToolName) || strings.EqualFold(name, tools.EvidenceBatchToolName) {
+		return true
+	}
+	for blocked := range readOnlyBlockedTools {
+		if strings.EqualFold(blocked, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func readOnlyCodeTriageToolResponse(call fantasy.ToolCall) (fantasy.ToolResponse, bool) {

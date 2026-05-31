@@ -18,6 +18,13 @@ import (
 
 const (
 	EvidenceBatchToolName = "Batch"
+
+	// batchOutputBudget is the total byte budget shared across all node outputs,
+	// divided evenly so one chatty node can't crowd out the rest of the context.
+	batchOutputBudget = 50000
+	batchMinNodeBytes = 500
+	batchMaxParallel  = 16
+	batchDefaultPar   = 4
 )
 
 // RegistrySetter allows the coordinator to inject the complete map of unwrapped or wrapped tools.
@@ -81,10 +88,31 @@ func (b *EvidenceBatchTool) SetRegistry(registry map[string]fantasy.AgentTool) {
 }
 
 // Info returns the metadata of the Batch tool.
+//
+// A node is one ordinary tool call run in parallel: name the real tool and give
+// its native input verbatim. Batch transports the input untouched to the target
+// tool, so there is exactly one schema per tool — Batch never re-declares or
+// translates a tool's parameters. This is what makes Batch generalize to every
+// registered tool (including MCP) with zero per-tool wiring.
 func (b *EvidenceBatchTool) Info() fantasy.ToolInfo {
+	// Parameters is intentionally left empty (no formal JSON Schema): the
+	// Gemini/antigravity function-declaration validator rejects hand-written
+	// nested schemas (repeated `required`, free-form object inputs), and an
+	// empty schema is accepted by every provider. The node contract is carried
+	// in the Description and the role templates instead — and parseBatchNode
+	// tolerates both the nested {tool,input} and the flat shape, so the model
+	// does not need a formal schema to produce valid nodes.
 	return fantasy.ToolInfo{
-		Name:        EvidenceBatchToolName,
-		Description: "Run multiple tools in parallel (up to 16 concurrently) to batch content search, file finding, reading, or running terminal commands.",
+		Name: EvidenceBatchToolName,
+		Description: "Run multiple tools in parallel (up to 16 concurrently). " +
+			"Input is {\"nodes\":[ ... ], optional \"max_parallel\":N}. " +
+			"Each node is one ordinary tool call: {\"tool\":\"<exact tool name>\",\"input\":{<that tool's normal input object>}} plus an optional \"id\" label. " +
+			"The input is identical to a standalone call. " +
+			"Examples: {\"tool\":\"Read\",\"input\":{\"file_path\":\"main.go\"}}; " +
+			"{\"tool\":\"Search\",\"input\":{\"mode\":\"content\",\"pattern\":\"foo\"}}; " +
+			"{\"tool\":\"ReadDir\",\"input\":{\"path\":\"internal\"}}; " +
+			"{\"tool\":\"Bash\",\"input\":{\"command\":\"go build ./...\"}}. " +
+			"Use it to fan out independent reads, searches, directory listings, or short commands in a single turn.",
 	}
 }
 
@@ -100,38 +128,18 @@ func (b *EvidenceBatchTool) SetProviderOptions(opts fantasy.ProviderOptions) {
 	b.providerOpts = opts
 }
 
+// BatchNode is one parallel tool call. Tool names the target; Input is that
+// tool's native input, passed through verbatim. There are intentionally no
+// per-tool typed fields here — adding them would re-create a second, divergent
+// copy of every tool's schema (the historical source of dropped arguments).
 type BatchNode struct {
-	ID        string   `json:"id"`
-	Kind      string   `json:"kind"`
-	Tool      string   `json:"tool,omitempty"`       // Legacy fallback for tool name
-	DependsOn []string `json:"depends_on,omitempty"` // Legacy ignored
-	OnFailure string   `json:"on_failure,omitempty"` // Legacy ignored
-
-	// Parameters for run_short_command / bash
-	Command string `json:"command,omitempty"`
-
-	// Parameters for search_files / search_text / Search / Find / Grep
-	Query       string `json:"query,omitempty"`
-	Pattern     string `json:"pattern,omitempty"`
-	LiteralText bool   `json:"literal_text,omitempty"`
-	FilesOnly   bool   `json:"files_only,omitempty"`
-	Include     string `json:"include,omitempty"`
-
-	// Parameters for read_file / View / Read
-	Path  string `json:"path,omitempty"`
-	Limit int    `json:"limit,omitempty"`
-
-	// Parameters for list_tree / ReadDir
-	Depth int `json:"depth,omitempty"`
-
-	// Arbitrary custom inputs (for arguments/parameters)
-	Args       map[string]any `json:"args,omitempty"`
-	Arguments  map[string]any `json:"arguments,omitempty"`
-	Parameters map[string]any `json:"parameters,omitempty"`
+	ID    string          `json:"id,omitempty"`
+	Tool  string          `json:"tool"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 type BatchParams struct {
-	MaxParallel int         `json:"max_parallel"`
+	MaxParallel int         `json:"max_parallel,omitempty"`
 	Nodes       []BatchNode `json:"nodes"`
 }
 
@@ -154,20 +162,65 @@ type BatchResponse struct {
 	Summary BatchSummary      `json:"summary"`
 }
 
+// parseBatchNode decodes one node, tolerating the flat shape (tool params at the
+// node top level) in addition to the canonical nested {tool, input} shape. This
+// is structural tolerance only — no field is renamed or mapped per tool.
+func parseBatchNode(raw json.RawMessage) BatchNode {
+	var node BatchNode
+	_ = json.Unmarshal(raw, &node)
+
+	if !hasInput(node.Input) {
+		var top map[string]json.RawMessage
+		if json.Unmarshal(raw, &top) == nil {
+			delete(top, "id")
+			delete(top, "tool")
+			if len(top) > 0 {
+				if encoded, err := json.Marshal(top); err == nil {
+					node.Input = encoded
+				}
+			}
+		}
+	}
+	if !hasInput(node.Input) {
+		node.Input = json.RawMessage("{}")
+	}
+	return node
+}
+
+func hasInput(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
+}
+
+// resolveTool finds the target tool by exact name, then case-insensitively, so
+// "bash" resolves to the registered "Bash" without a hand-maintained alias list.
+func resolveTool(registry map[string]fantasy.AgentTool, want string) (string, fantasy.AgentTool) {
+	if registry == nil {
+		return "", nil
+	}
+	if t, ok := registry[want]; ok {
+		return want, t
+	}
+	for name, t := range registry {
+		if strings.EqualFold(name, want) {
+			return name, t
+		}
+	}
+	return "", nil
+}
+
 func (b *EvidenceBatchTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	var params BatchParams
-	if err := json.Unmarshal([]byte(call.Input), &params); err != nil {
+	var rawParams struct {
+		MaxParallel int               `json:"max_parallel"`
+		Nodes       []json.RawMessage `json:"nodes"`
+	}
+	if err := json.Unmarshal([]byte(call.Input), &rawParams); err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("batch: failed to parse input: %v", err)), nil
 	}
 
-	if len(params.Nodes) == 0 {
+	if len(rawParams.Nodes) == 0 {
 		respData := BatchResponse{
-			Nodes: []BatchNodeResult{},
-			Summary: BatchSummary{
-				Total:     0,
-				Completed: 0,
-				Failed:    0,
-			},
+			Nodes:   []BatchNodeResult{},
+			Summary: BatchSummary{},
 		}
 		metadataBytes, _ := json.Marshal(respData)
 		return fantasy.ToolResponse{
@@ -176,40 +229,36 @@ func (b *EvidenceBatchTool) Run(ctx context.Context, call fantasy.ToolCall) (fan
 		}, nil
 	}
 
-	// 限制并发度
-	maxParallel := params.MaxParallel
+	nodes := make([]BatchNode, len(rawParams.Nodes))
+	for i, raw := range rawParams.Nodes {
+		nodes[i] = parseBatchNode(raw)
+	}
+
+	maxParallel := rawParams.MaxParallel
 	if maxParallel <= 0 {
-		maxParallel = 4
+		maxParallel = batchDefaultPar
 	}
-	if maxParallel > 16 {
-		maxParallel = 16
-	}
-
-	// 分配字节预算，限额为 50000 字节公平分配
-	byteLimitPerNode := 50000 / len(params.Nodes)
-	if byteLimitPerNode < 500 {
-		byteLimitPerNode = 500
+	if maxParallel > batchMaxParallel {
+		maxParallel = batchMaxParallel
 	}
 
-	// 初始化进度数据
+	// Even byte budget per node so one chatty node can't crowd out the rest.
+	byteLimitPerNode := batchOutputBudget / len(nodes)
+	if byteLimitPerNode < batchMinNodeBytes {
+		byteLimitPerNode = batchMinNodeBytes
+	}
+
 	sessionID := GetSessionFromContext(ctx)
 	progress := BatchProgress{
 		SessionID:  sessionID,
 		ToolCallID: call.ID,
-		Total:      len(params.Nodes),
-		Completed:  0,
-		Running:    0,
-		Subcalls:   make([]BatchSubcallProgress, len(params.Nodes)),
+		Total:      len(nodes),
+		Subcalls:   make([]BatchSubcallProgress, len(nodes)),
 	}
-
-	for i, node := range params.Nodes {
-		kind := node.Kind
-		if kind == "" {
-			kind = node.Tool
-		}
+	for i, node := range nodes {
 		progress.Subcalls[i] = BatchSubcallProgress{
 			ID:    node.ID,
-			Name:  kind,
+			Name:  node.Tool,
 			State: BatchSubcallRunning,
 		}
 	}
@@ -226,28 +275,35 @@ func (b *EvidenceBatchTool) Run(ctx context.Context, call fantasy.ToolCall) (fan
 		progressMu.Unlock()
 		BatchProgressBroker.Publish(pubsub.UpdatedEvent, pCopy)
 	}
-
-	// 首次发布进度
 	publishProgress()
 
 	g, gCtx := errgroup.WithContext(ctx)
 	sem := make(chan struct{}, maxParallel)
-	results := make([]BatchNodeResult, len(params.Nodes))
+	results := make([]BatchNodeResult, len(nodes))
 
-	for i := range params.Nodes {
+	for i := range nodes {
 		i := i
-		node := params.Nodes[i]
+		node := nodes[i]
 		g.Go(func() error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			// 检查取消
+			fail := func(errMsg string) {
+				results[i] = BatchNodeResult{
+					ID:     node.ID,
+					Status: "failed",
+					Error:  errMsg,
+					Kind:   node.Tool,
+				}
+				progressMu.Lock()
+				progress.Subcalls[i].State = BatchSubcallFailed
+				progress.Completed++
+				progressMu.Unlock()
+				publishProgress()
+			}
+
 			if gCtx.Err() != nil {
-				results[i] = BatchNodeResult{
-					ID:     node.ID,
-					Status: "skipped",
-					Error:  "cancelled",
-				}
+				results[i] = BatchNodeResult{ID: node.ID, Status: "skipped", Error: "cancelled", Kind: node.Tool}
 				progressMu.Lock()
 				progress.Subcalls[i].State = BatchSubcallFailed
 				progress.Completed++
@@ -256,111 +312,44 @@ func (b *EvidenceBatchTool) Run(ctx context.Context, call fantasy.ToolCall) (fan
 				return nil
 			}
 
-			// 自愈及参数转换
-			targetTool, inputJSON, err := b.normalizeBatchNode(node)
-			if err != nil {
-				results[i] = BatchNodeResult{
-					ID:     node.ID,
-					Status: "failed",
-					Error:  fmt.Sprintf("failed to normalize node: %v", err),
-				}
-				progressMu.Lock()
-				progress.Subcalls[i].State = BatchSubcallFailed
-				progress.Completed++
-				progressMu.Unlock()
-				publishProgress()
+			if strings.TrimSpace(node.Tool) == "" {
+				fail("node is missing a \"tool\" name")
 				return nil
 			}
 
-			// 防止递归死循环调用
-			if targetTool == EvidenceBatchToolName || targetTool == "Agent" {
-				results[i] = BatchNodeResult{
-					ID:     node.ID,
-					Status: "failed",
-					Error:  fmt.Sprintf("nested tool %s is blocked in Batch", targetTool),
-				}
-				progressMu.Lock()
-				progress.Subcalls[i].State = BatchSubcallFailed
-				progress.Completed++
-				progressMu.Unlock()
-				publishProgress()
+			// Block recursion: Batch cannot nest itself or spawn sub-agents.
+			if strings.EqualFold(node.Tool, EvidenceBatchToolName) || strings.EqualFold(node.Tool, "Agent") {
+				fail(fmt.Sprintf("nested tool %s is blocked in Batch", node.Tool))
 				return nil
 			}
 
-			// 在注册表中寻找目标工具
-			var actualTool fantasy.AgentTool
-			if registry != nil {
-				actualTool = registry[targetTool]
-				// 兜底不区分大小写匹配
-				if actualTool == nil {
-					for name, t := range registry {
-						if strings.EqualFold(name, targetTool) {
-							actualTool = t
-							break
-						}
-					}
-				}
-			}
-
+			name, actualTool := resolveTool(registry, node.Tool)
 			if actualTool == nil {
-				results[i] = BatchNodeResult{
-					ID:     node.ID,
-					Status: "failed",
-					Error:  fmt.Sprintf("tool %s not registered", targetTool),
-				}
-				progressMu.Lock()
-				progress.Subcalls[i].State = BatchSubcallFailed
-				progress.Completed++
-				progressMu.Unlock()
-				publishProgress()
+				fail(fmt.Sprintf("tool %s not registered", node.Tool))
 				return nil
 			}
 
-			// 执行子工具
-			slog.Debug("Batch executing node", "id", node.ID, "tool", targetTool)
+			slog.Debug("Batch executing node", "id", node.ID, "tool", name)
 			subCall := fantasy.ToolCall{
 				ID:    fmt.Sprintf("%s-%s", call.ID, node.ID),
-				Name:  targetTool,
-				Input: inputJSON,
+				Name:  name,
+				Input: string(node.Input),
 			}
 
 			resp, runErr := actualTool.Run(gCtx, subCall)
 
 			progressMu.Lock()
-			if runErr != nil {
-				results[i] = BatchNodeResult{
-					ID:     node.ID,
-					Status: "failed",
-					Error:  runErr.Error(),
-					Kind:   targetTool,
-				}
+			switch {
+			case runErr != nil:
+				results[i] = BatchNodeResult{ID: node.ID, Status: "failed", Error: runErr.Error(), Kind: name}
 				progress.Subcalls[i].State = BatchSubcallFailed
-			} else if resp.IsError {
-				content := resp.Content
-				if len(content) > byteLimitPerNode {
-					content = content[:byteLimitPerNode] + "\n[Content truncated by Batch output budget]"
-				}
-				results[i] = BatchNodeResult{
-					ID:     node.ID,
-					Status: "failed",
-					Error:  content,
-					Kind:   targetTool,
-				}
+			case resp.IsError:
+				results[i] = BatchNodeResult{ID: node.ID, Status: "failed", Error: clampContent(resp.Content, byteLimitPerNode), Kind: name}
 				progress.Subcalls[i].State = BatchSubcallFailed
-			} else {
-				content := resp.Content
-				if len(content) > byteLimitPerNode {
-					content = content[:byteLimitPerNode] + "\n[Content truncated by Batch output budget]"
-				}
-				results[i] = BatchNodeResult{
-					ID:     node.ID,
-					Status: "completed",
-					Output: content,
-					Kind:   targetTool,
-				}
+			default:
+				results[i] = BatchNodeResult{ID: node.ID, Status: "completed", Output: clampContent(resp.Content, byteLimitPerNode), Kind: name}
 				progress.Subcalls[i].State = BatchSubcallSucceeded
 			}
-
 			progress.Completed++
 			progressMu.Unlock()
 
@@ -371,10 +360,7 @@ func (b *EvidenceBatchTool) Run(ctx context.Context, call fantasy.ToolCall) (fan
 
 	_ = g.Wait()
 
-	// 最终汇总
-	summary := BatchSummary{
-		Total: len(params.Nodes),
-	}
+	summary := BatchSummary{Total: len(nodes)}
 	var evidenceParts []string
 	for _, res := range results {
 		if res.Status == "completed" {
@@ -386,10 +372,7 @@ func (b *EvidenceBatchTool) Run(ctx context.Context, call fantasy.ToolCall) (fan
 		}
 	}
 
-	respData := BatchResponse{
-		Nodes:   results,
-		Summary: summary,
-	}
+	respData := BatchResponse{Nodes: results, Summary: summary}
 	metadataBytes, _ := json.Marshal(respData)
 
 	content := fmt.Sprintf("[summary] total: %d completed: %d failed: %d\n\n%s",
@@ -401,223 +384,9 @@ func (b *EvidenceBatchTool) Run(ctx context.Context, call fantasy.ToolCall) (fan
 	}, nil
 }
 
-func (b *EvidenceBatchTool) normalizeBatchNode(node BatchNode) (string, string, error) {
-	inputs := healLLMInput(node)
-
-	kind := strings.ToLower(strings.TrimSpace(node.Kind))
-	if kind == "" {
-		kind = strings.ToLower(strings.TrimSpace(node.Tool))
+func clampContent(content string, limit int) string {
+	if len(content) > limit {
+		return content[:limit] + "\n[Content truncated by Batch output budget]"
 	}
-
-	var targetTool string
-	var params map[string]any
-
-	switch kind {
-	case "bash", "run_short_command", "run_command":
-		targetTool = "bash"
-		cmd := node.Command
-		if cmd == "" {
-			if v, ok := inputs["command"]; ok {
-				cmd, _ = v.(string)
-			} else if v, ok := inputs["script"]; ok {
-				cmd, _ = v.(string)
-			}
-		}
-		params = map[string]any{
-			"command": cmd,
-		}
-
-	case "rg", "grep", "search", "search_text", "search_files", "find", "files", "glob", "file_search":
-		targetTool = "Search"
-		mode := "content"
-		if kind == "search_files" || kind == "find" || kind == "files" || kind == "glob" || kind == "file_search" || node.FilesOnly {
-			mode = "files"
-		}
-		if v, ok := inputs["mode"]; ok {
-			if m, ok := v.(string); ok {
-				mode = m
-			}
-		}
-
-		pattern := node.Query
-		if pattern == "" {
-			pattern = node.Pattern
-		}
-		if pattern == "" {
-			pattern = node.Include
-		}
-		if pattern == "" {
-			if v, ok := inputs["pattern"]; ok {
-				pattern, _ = v.(string)
-			} else if v, ok := inputs["query"]; ok {
-				pattern, _ = v.(string)
-			} else if v, ok := inputs["include"]; ok {
-				pattern, _ = v.(string)
-			}
-		}
-
-		path := node.Path
-		if path == "" {
-			if v, ok := inputs["path"]; ok {
-				path, _ = v.(string)
-			}
-		}
-
-		ignoreCase := false
-		if v, ok := inputs["ignore_case"]; ok {
-			if bVal, ok := v.(bool); ok {
-				ignoreCase = bVal
-			}
-		}
-		literal := node.LiteralText
-		if v, ok := inputs["literal"]; ok {
-			if bVal, ok := v.(bool); ok {
-				literal = bVal
-			}
-		}
-
-		params = map[string]any{
-			"mode":        mode,
-			"pattern":     pattern,
-			"path":        path,
-			"ignore_case": ignoreCase,
-			"literal":     literal,
-		}
-		if mode == "content" {
-			if node.Include != "" {
-				params["include"] = node.Include
-			} else if v, ok := inputs["include"]; ok {
-				params["include"] = v
-			}
-			if node.FilesOnly {
-				params["files_only"] = true
-			} else if v, ok := inputs["files_only"]; ok {
-				params["files_only"] = v
-			}
-		}
-
-	case "read_file", "view", "read":
-		targetTool = "Read"
-		filePath := node.Path
-		if filePath == "" {
-			if v, ok := inputs["file_path"]; ok {
-				filePath, _ = v.(string)
-			} else if v, ok := inputs["path"]; ok {
-				filePath, _ = v.(string)
-			}
-		}
-		limit := node.Limit
-		if limit == 0 {
-			if v, ok := inputs["limit"]; ok {
-				if f, ok := v.(float64); ok {
-					limit = int(f)
-				} else if i, ok := v.(int); ok {
-					limit = i
-				}
-			}
-		}
-		offset := 0
-		if v, ok := inputs["offset"]; ok {
-			if f, ok := v.(float64); ok {
-				offset = int(f)
-			} else if i, ok := v.(int); ok {
-				offset = i
-			}
-		}
-		fold := false
-		if v, ok := inputs["fold"]; ok {
-			fold, _ = v.(bool)
-		}
-
-		params = map[string]any{
-			"file_path": filePath,
-			"limit":     limit,
-			"offset":    offset,
-			"fold":      fold,
-		}
-
-	case "list_tree", "readdir", "ls", "tree":
-		targetTool = "ReadDir"
-		path := node.Path
-		if path == "" {
-			if v, ok := inputs["path"]; ok {
-				path, _ = v.(string)
-			}
-		}
-		depth := node.Depth
-		if depth == 0 {
-			if v, ok := inputs["depth"]; ok {
-				if f, ok := v.(float64); ok {
-					depth = int(f)
-				} else if i, ok := v.(int); ok {
-					depth = i
-				}
-			}
-		}
-		var ignore []string
-		if v, ok := inputs["ignore"]; ok {
-			if arr, ok := v.([]any); ok {
-				for _, a := range arr {
-					if s, ok := a.(string); ok {
-						ignore = append(ignore, s)
-					}
-				}
-			}
-		}
-
-		params = map[string]any{
-			"path":  path,
-			"depth": depth,
-		}
-		if len(ignore) > 0 {
-			params["ignore"] = ignore
-		}
-
-	default:
-		targetTool = node.Kind
-		if targetTool == "" {
-			targetTool = node.Tool
-		}
-		params = inputs
-	}
-
-	inputBytes, err := json.Marshal(params)
-	if err != nil {
-		return "", "", err
-	}
-	return targetTool, string(inputBytes), nil
-}
-
-func healLLMInput(node BatchNode) map[string]any {
-	result := make(map[string]any)
-
-	if node.Command != "" {
-		result["command"] = node.Command
-	}
-	if node.Query != "" {
-		result["query"] = node.Query
-	}
-	if node.Pattern != "" {
-		result["pattern"] = node.Pattern
-	}
-	if node.Path != "" {
-		result["path"] = node.Path
-	}
-	if node.Limit != 0 {
-		result["limit"] = node.Limit
-	}
-	if node.Depth != 0 {
-		result["depth"] = node.Depth
-	}
-
-	mergeMap := func(m map[string]any) {
-		for k, v := range m {
-			result[k] = v
-		}
-	}
-	mergeMap(node.Args)
-	mergeMap(node.Arguments)
-	mergeMap(node.Parameters)
-
-	return result
+	return content
 }

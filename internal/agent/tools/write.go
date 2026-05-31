@@ -62,7 +62,7 @@ func NewWriteTool(
 				return fantasy.ToolResponse{}, fmt.Errorf("session_id is required")
 			}
 
-			filePath := filepathext.SmartJoin(workingDir, params.FilePath)
+			filePath := filepathext.SmartJoin(CtxWorkingDir(ctx, workingDir), params.FilePath)
 
 			fileInfo, err := CtxStat(ctx, filePath)
 			if err == nil {

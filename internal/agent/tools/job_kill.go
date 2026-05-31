@@ -32,6 +32,7 @@ func NewJobKillTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool {
 		JobKillToolName,
 		jobKillDescription,
 		func(ctx context.Context, params JobKillParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			params.ShellID = sanitizeShellID(params.ShellID)
 			if params.ShellID == "" {
 				return fantasy.NewTextErrorResponse("missing shell_id"), nil
 			}

@@ -219,7 +219,7 @@ func NewViewTool(
 			}
 
 			// Handle relative paths
-			filePath := filepathext.SmartJoin(workingDir, params.FilePath)
+			filePath := filepathext.SmartJoin(CtxWorkingDir(ctx, workingDir), params.FilePath)
 			slog.Debug("View tool reading file", "path", filePath, "original", params.FilePath)
 
 			// Check if file is outside working directory and request permission if needed

@@ -14,6 +14,21 @@ import (
 	"os"
 )
 
+// CtxWorkingDir returns the base directory for resolving relative tool paths:
+// the active backend's Root when one is attached (remote attach or a git
+// worktree), otherwise the tool's construction-time working dir. This mirrors
+// how the Bash and Search tools already resolve their cwd, so every tool agrees
+// on the active root within a turn. With no backend attached the fallback is
+// used, keeping the default local path byte-for-byte unchanged.
+func CtxWorkingDir(ctx context.Context, fallback string) string {
+	if b := GetBackendFromContext(ctx); b != nil {
+		if root := b.Root(); root != "" {
+			return root
+		}
+	}
+	return fallback
+}
+
 // CtxStat returns fs.FileInfo for path on the active backend.
 func CtxStat(ctx context.Context, path string) (fs.FileInfo, error) {
 	if b := GetBackendFromContext(ctx); b != nil {

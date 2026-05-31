@@ -40,6 +40,7 @@ func NewMonitorTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool {
 		MonitorToolName,
 		monitorDescription,
 		func(ctx context.Context, params MonitorParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			params.ShellID = sanitizeShellID(params.ShellID)
 			if params.ShellID == "" {
 				return fantasy.NewTextErrorResponse("missing shell_id"), nil
 			}

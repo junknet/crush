@@ -224,6 +224,9 @@ func describePlan(plan []plannedChange) string {
 // hunk context, ambiguous context) returns an error and aborts the whole
 // patch — no partial application.
 func planPatch(ctx context.Context, patch parsedPatch, workingDir string) ([]plannedChange, error) {
+	// Resolve relative op paths against the active backend root (worktree/remote)
+	// when attached, else the construction-time working dir.
+	workingDir = CtxWorkingDir(ctx, workingDir)
 	plan := make([]plannedChange, 0, len(patch.ops))
 	for _, op := range patch.ops {
 		if strings.ContainsAny(op.path, "*?[") {

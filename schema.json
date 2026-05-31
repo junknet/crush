@@ -186,6 +186,34 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "ConstitutionPrinciple": {
+      "properties": {
+        "roles": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "brain",
+              "plan",
+              "worker",
+              "explore",
+              "auditor"
+            ]
+          },
+          "type": "array",
+          "description": "Role agents this principle is injected into"
+        },
+        "text": {
+          "type": "string",
+          "description": "The principle text; a readable path is loaded as a file"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "roles",
+        "text"
+      ]
+    },
     "HookConfig": {
       "properties": {
         "matcher": {
@@ -490,6 +518,13 @@
           "type": "array",
           "description": "Paths to files containing context information for the AI"
         },
+        "constitution": {
+          "items": {
+            "$ref": "#/$defs/ConstitutionPrinciple"
+          },
+          "type": "array",
+          "description": "Core-principle rules; each principle targets specific role agents via its roles list. A role receives the principles whose roles list contains it."
+        },
         "skills_paths": {
           "items": {
             "type": "string",
@@ -591,11 +626,6 @@
           },
           "type": "array",
           "description": "List of skill names to disable and hide from the agent"
-        },
-        "disable_suggestion": {
-          "type": "boolean",
-          "description": "Disable ghost-text autocomplete suggestions in the prompt input",
-          "default": false
         }
       },
       "additionalProperties": false,
@@ -648,6 +678,7 @@
             "openai",
             "openai-compat",
             "anthropic",
+            "google",
             "gemini",
             "azure",
             "vertexai",
@@ -726,11 +757,13 @@
         "reasoning_effort": {
           "type": "string",
           "enum": [
+            "minimal",
             "low",
             "medium",
-            "high"
+            "high",
+            "xhigh"
           ],
-          "description": "Reasoning effort level for OpenAI models that support it"
+          "description": "Reasoning effort level for models that support configurable reasoning"
         },
         "think": {
           "type": "boolean",

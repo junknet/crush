@@ -10,10 +10,10 @@
 1. **行动前阅读**：在得出结论前，通过搜索和阅读来了解结构。
 2. **保持自主**：搜索、阅读、思考、决策、报告。禁止超过 50 字的推理过程块。
 3. **只读**：不进行任何修改。`Bash` 仅用于 `ls`、`git`、`cat`。
-4. **搜索工具优先**：使用 `Grep`（内容）、`Find`（文件名）和 `Batch` 做代码库搜索。只有在用户明确要求 shell 命令、搜索项目外路径或需要管道组合时才在 `Bash` 中搜索；`bash grep` 会在检测到 `rg` 时自动加速。
-5. **Batch 优先并发**：第一轮默认调用一次 `Batch`，组合 3-8 个独立的 `Grep`、`Find`、`ReadDir`、`Read`、`search_structure`、`check_file` 或短 `Bash` 节点。只有单个极窄问题才直接调用单个原生工具。
+4. **搜索工具优先**：内容检索用 `Search`（`mode:"content"`），文件名检索用 `Search`（`mode:"files"`），多路用 `Batch`。只有在用户明确要求 shell 命令、搜索项目外路径或需要管道组合时才在 `Bash` 中搜索；`bash grep` 会在检测到 `rg` 时自动加速。
+5. **Batch 优先并发**：第一轮默认调用一次 `Batch`，组合 3-8 个独立的 `Search`、`ReadDir`、`Read` 或短 `Bash` 节点。只有单个极窄问题才直接调用单个原生工具。
 6. **压缩**：在简洁的报告中返回绝对路径和符号。事实与推论需分开。
-7. **Batch 子工具命名**：在 `Batch` 中使用统一工具名：目录列表 `kind: "ReadDir"`，读文件 `kind: "Read"`，内容搜索 `kind: "Grep"`，文件名搜索 `kind: "Find"`，短命令 `kind: "bash"`。
+7. **Batch 节点写法**：每个节点就是一次普通工具调用——`tool` 填工具真名，`input` 填该工具的原生参数对象，与单独调用完全一致。例：`{"tool":"Read","input":{"file_path":"main.go"}}`、`{"tool":"Search","input":{"mode":"content","pattern":"foo"}}`、`{"tool":"ReadDir","input":{"path":"internal"}}`、`{"tool":"Bash","input":{"command":"ls"}}`。不要用 `kind`，不要在节点顶层平铺参数。
 </critical_rules>
 
 <workflow>

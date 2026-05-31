@@ -43,6 +43,7 @@ func NewJobOutputTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool
 		JobOutputToolName,
 		jobOutputDescription,
 		func(ctx context.Context, params JobOutputParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+			params.ShellID = sanitizeShellID(params.ShellID)
 			if params.ShellID == "" {
 				return fantasy.NewTextErrorResponse("missing shell_id"), nil
 			}
@@ -114,6 +115,22 @@ func NewJobOutputTool(bgManager *shell.BackgroundShellManager) fantasy.AgentTool
 			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(result), metadata), nil
 		},
 	)
+}
+
+// sanitizeShellID strips trailing prose a model sometimes pastes after a
+// background shell id (observed in traces: "045Sync wait is capped at 50s...").
+// A shell id is a single whitespace-free token, so keep only the leading run up
+// to the first separator and drop any <shell_id> tag wrapping. Applied at every
+// tool that takes a model-supplied shell_id so contamination never reaches lookup.
+func sanitizeShellID(raw string) string {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "<shell_id>")
+	if i := strings.IndexFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '<'
+	}); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
 
 func remoteJobOutput(ctx context.Context, params JobOutputParams) (fantasy.ToolResponse, error) {

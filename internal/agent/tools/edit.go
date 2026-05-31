@@ -78,7 +78,7 @@ func NewEditTool(
 				return fantasy.NewTextErrorResponse("file_path is required"), nil
 			}
 
-			params.FilePath = filepathext.SmartJoin(workingDir, params.FilePath)
+			params.FilePath = filepathext.SmartJoin(CtxWorkingDir(ctx, workingDir), params.FilePath)
 			if err := validateEditOldString(params.OldString); err != nil {
 				return fantasy.NewTextErrorResponse(err.Error()), nil
 			}

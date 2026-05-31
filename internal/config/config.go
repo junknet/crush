@@ -274,7 +274,12 @@ func (Attribution) JSONSchemaExtend(schema *jsonschema.Schema) {
 }
 
 type Options struct {
-	ContextPaths         []string    `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=CLAUDE.md"`
+	ContextPaths []string `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=CLAUDE.md"`
+	// Constitution is the list of core-principle rules. Each principle declares
+	// the role agents it applies to (per-principle targeting), so a role's
+	// injected constitution is the ordered concatenation of every principle whose
+	// roles list contains that role. There is no ~/.claude/CLAUDE.md fallback.
+	Constitution         []ConstitutionPrinciple `json:"constitution,omitempty" jsonschema:"description=Core-principle rules; each principle targets specific role agents via its roles list. A role receives the principles whose roles list contains it."`
 	SkillsPaths          []string    `json:"skills_paths,omitempty" jsonschema:"description=Paths to directories containing Agent Skills (folders with SKILL.md files),example=~/.config/crush/skills,example=./skills"`
 	TUI                  *TUIOptions `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
 	Debug                bool        `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
@@ -295,6 +300,15 @@ type Options struct {
 	Progress                  *bool        `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
 	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
+}
+
+// ConstitutionPrinciple is one core-principle rule and the role agents it applies
+// to. Text is loaded as a file when it resolves to a readable path, otherwise it
+// is used as inline prompt text. Roles uses the role names brain/plan/worker/
+// explore/auditor; a principle with no roles is injected into none.
+type ConstitutionPrinciple struct {
+	Roles []string `json:"roles" jsonschema:"description=Role agents this principle is injected into,example=brain,example=plan,example=worker,example=explore,example=auditor"`
+	Text  string   `json:"text" jsonschema:"description=The principle text; a readable path is loaded as a file, otherwise used as inline text"`
 }
 
 type MCPs map[string]MCPConfig

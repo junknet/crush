@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBatchToolRunsParallelNodesAndHealsInputs(t *testing.T) {
+func TestBatchToolRunsParallelNodesPassthrough(t *testing.T) {
 	workingDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "alpha.txt"), []byte("needle-alpha\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(workingDir, "beta.txt"), []byte("needle-beta\n"), 0o644))
@@ -39,14 +39,14 @@ func TestBatchToolRunsParallelNodesAndHealsInputs(t *testing.T) {
 	inputParams := BatchParams{
 		Nodes: []BatchNode{
 			{
-				ID:   "hits-alpha",
-				Kind: "grep",
-				Query: "needle-alpha",
+				ID:    "hits-alpha",
+				Tool:  "Search",
+				Input: json.RawMessage(`{"mode":"content","pattern":"needle-alpha"}`),
 			},
 			{
-				ID:   "read-beta",
-				Kind: "read_file",
-				Path: "beta.txt",
+				ID:    "read-beta",
+				Tool:  "Read",
+				Input: json.RawMessage(`{"file_path":"beta.txt"}`),
 			},
 		},
 	}
@@ -126,7 +126,7 @@ func TestBatchToolBlocksRecursion(t *testing.T) {
 		Nodes: []BatchNode{
 			{
 				ID:   "nested-batch",
-				Kind: "Batch",
+				Tool: "Batch",
 			},
 		},
 	}

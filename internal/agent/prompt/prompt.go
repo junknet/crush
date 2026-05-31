@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -234,14 +235,11 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		MemoryIndex:   memoryIndex,
 	}
 
-	// explore is a read-only fact-retrieval agent: it never writes code or
-	// designs structure, and its parent (brain) already enforces the
-	// constitution. Injecting the full ~17KB constitution would dwarf its
-	// own ~2KB prompt for no behavioral gain. plan/worker/auditor still get
-	// it because they produce or judge code.
-	if p.name != "explore" {
-		data.UserConstitution = loadUserConstitution()
-	}
+	// The constitution is assembled per role from options.constitution: a role
+	// receives the ordered concatenation of every principle whose roles list
+	// contains it. Per-principle targeting keeps each role's mind isolated
+	// (e.g. explore receives nothing). No implicit ~/.claude/CLAUDE.md source.
+	data.UserConstitution = resolveConstitution(cfg, p.name, store)
 
 	for _, contextFiles := range files {
 		data.ContextFiles = append(data.ContextFiles, contextFiles...)
@@ -249,17 +247,40 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	return data, nil
 }
 
-func loadUserConstitution() string {
-	path := filepath.Join(home.Dir(), ".claude", "CLAUDE.md")
-	content, err := os.ReadFile(path)
-	if err != nil {
+// resolveConstitution assembles a role's constitution from options.constitution:
+// every principle whose Roles list contains the role, in declaration order,
+// joined by blank lines. Per-principle targeting is the single mechanism — a
+// principle aimed at no roles (or a role aimed at by none, e.g. explore) yields
+// "". No implicit ~/.claude/CLAUDE.md source.
+func resolveConstitution(cfg *config.Config, role string, store *config.ConfigStore) string {
+	var parts []string
+	for _, principle := range cfg.Options.Constitution {
+		if !slices.Contains(principle.Roles, role) {
+			continue
+		}
+		if text := resolvePrincipleText(principle.Text, store); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// resolvePrincipleText loads the principle text from a file when the value
+// resolves to a readable path, otherwise returns it as trimmed inline text.
+func resolvePrincipleText(raw string, store *config.ConfigStore) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return ""
 	}
-	text := strings.TrimSpace(string(content))
-	if text == "" {
-		return ""
+	path := expandPath(raw, store)
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		if content, err := os.ReadFile(path); err == nil {
+			if text := strings.TrimSpace(string(content)); text != "" {
+				return fmt.Sprintf("<file path=%q>\n%s\n</file>", filepath.ToSlash(path), text)
+			}
+		}
 	}
-	return fmt.Sprintf("<file path=%q>\n%s\n</file>", filepath.ToSlash(path), text)
+	return raw
 }
 
 // DynamicNow is the time source used by DynamicPrefix; tests may replace it.

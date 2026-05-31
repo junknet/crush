@@ -77,15 +77,18 @@ func NewLsTool(permissions permission.Service, workingDir string, lsConfig confi
 		LSToolName,
 		lsDescription(),
 		func(ctx context.Context, params LSParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			searchPath, err := fsext.Expand(cmp.Or(params.Path, workingDir))
+			// Resolve against the active backend root (worktree/remote) when
+			// attached, else the construction-time working dir.
+			baseDir := CtxWorkingDir(ctx, workingDir)
+			searchPath, err := fsext.Expand(cmp.Or(params.Path, baseDir))
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("error expanding path: %v", err)), nil
 			}
 
-			searchPath = filepathext.SmartJoin(workingDir, searchPath)
+			searchPath = filepathext.SmartJoin(baseDir, searchPath)
 
 			// Check if directory is outside working directory and request permission if needed
-			absWorkingDir, err := filepath.Abs(workingDir)
+			absWorkingDir, err := filepath.Abs(baseDir)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("error resolving working directory: %v", err)), nil
 			}
